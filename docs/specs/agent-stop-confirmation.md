@@ -53,12 +53,13 @@
   但 active confirmation 只在 CLI/MCP mode 安装，None 下暂停并隐藏，重新集成时按原 preference 恢复。
 - Grok 显示不支持或不展示开关，不安装 Stop 确认 Hook。
 - 仅自然完成触发；错误、API failure、用户主动取消不发卡。
-- Codex 的 system thread 不触发结束确认。新版 Hook 输入优先按
-  `thread_source == "system"` 精确识别；在尚未提供该字段的旧版 Codex 中，
+- Codex 的内部 thread 不触发结束确认。新版 Hook 输入优先按
+  `thread_source ∈ {"system", "ambient_suggestions"}` 精确识别（拦截集合与 MCP guard 共用，见
+  `mcp.md`；后者为 ChatGPT.app 26.721+ 对 ambient 线程的新标签）；在尚未提供该字段的旧版 Codex 中，
   `transcript_path` 字段明确为 `null` 表示未创建 rollout 的 ephemeral thread，同样静默放行。
   字段缺失不按 ephemeral 处理，Claude / Cursor 的行为不受影响。命中后向
-  `~/.askhuman/daemon.log` 写一条结构化审计，`reason` 分别为 `codex_system_thread` 或
-  `codex_transcript_path_null`。
+  `~/.askhuman/daemon.log` 写一条结构化审计，`reason` 分别为 `codex_blocked_thread_source`（附
+  `threadSource` 观测原值）或 `codex_transcript_path_null`。
 
 ### 3.2 确认卡
 

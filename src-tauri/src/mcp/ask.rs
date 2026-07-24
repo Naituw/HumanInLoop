@@ -33,17 +33,21 @@ use tokio_util::task::AbortOnDropHandle;
 
 const CODEX_TURN_METADATA_KEY: &str = "x-codex-turn-metadata";
 const CODEX_THREAD_SOURCE_KEY: &str = "thread_source";
-const CODEX_SYSTEM_THREAD_SOURCE: &str = "system";
-const CODEX_SYSTEM_THREAD_BLOCK_MESSAGE: &str =
+/// Thread origins whose AskHuman calls must be silently rejected. `system` is the label used by
+/// ambient/background threads up to ChatGPT.app 26.7xx; `ambient_suggestions` replaced it in
+/// 26.721+. Unknown origins are allowed through (fail-open) but leave a "passed" audit line.
+/// Shared with the Codex stop-confirmation guard in `crate::agents::stop`.
+pub(crate) const CODEX_BLOCKED_THREAD_SOURCES: [&str; 2] = ["system", "ambient_suggestions"];
+const CODEX_BLOCKED_THREAD_MESSAGE: &str =
     "AskHuman is disabled for this Codex system-generated background thread.\n\
 Do not retry or contact the human; finish the host-requested non-interactive output directly.";
 
-fn has_system_thread_source(value: &Value) -> bool {
-    value
-        .as_object()
-        .and_then(|object| object.get(CODEX_THREAD_SOURCE_KEY))
-        .and_then(Value::as_str)
-        == Some(CODEX_SYSTEM_THREAD_SOURCE)
+fn codex_thread_source(metadata: &Value) -> Option<&str> {
+    metadata.as_object()?.get(CODEX_THREAD_SOURCE_KEY)?.as_str()
+}
+
+fn is_blocked_thread_source(source: &str) -> bool {
+    CODEX_BLOCKED_THREAD_SOURCES.contains(&source)
 }
 
 /// Codex attaches trusted per-turn context under this namespaced `_meta` entry for every MCP call.
@@ -57,12 +61,6 @@ fn codex_turn_metadata(meta: &Meta) -> Option<Value> {
     }
 }
 
-fn is_codex_system_thread(meta: &Meta) -> bool {
-    codex_turn_metadata(meta)
-        .as_ref()
-        .is_some_and(has_system_thread_source)
-}
-
 fn metadata_id<'a>(metadata: &'a Value, snake_case: &str, camel_case: &str) -> Option<&'a str> {
     metadata
         .get(snake_case)
@@ -70,23 +68,44 @@ fn metadata_id<'a>(metadata: &'a Value, snake_case: &str, camel_case: &str) -> O
         .and_then(Value::as_str)
 }
 
-fn codex_system_thread_block(meta: &Meta, tool: &str) -> Option<CallToolResult> {
-    let metadata = codex_turn_metadata(meta)?;
-    if !has_system_thread_source(&metadata) {
-        return None;
-    }
-    crate::daemon::lifecycle::log_suppression_audit(crate::daemon::lifecycle::SuppressionAudit {
+/// Guard decision + audit label for one call: `(action, reason)`. `None` means the call does not
+/// carry the Codex `_meta` namespace at all (non-Codex client; nothing to guard or audit).
+fn codex_guard_action_reason(meta: &Meta) -> Option<(&'static str, &'static str)> {
+    meta.0.get(CODEX_TURN_METADATA_KEY)?;
+    let Some(metadata) = codex_turn_metadata(meta) else {
+        return Some(("passed", "codex_turn_metadata_unreadable"));
+    };
+    Some(match codex_thread_source(&metadata) {
+        Some(source) if is_blocked_thread_source(source) => {
+            ("suppressed", "codex_blocked_thread_source")
+        }
+        Some(_) => ("passed", "codex_thread_source_passed"),
+        None => ("passed", "codex_thread_source_missing"),
+    })
+}
+
+/// Runtime guard for Codex-originated calls, evaluated before any side effect (popup, IM push,
+/// todo write). Blocked thread sources get an error result plus a "suppressed" audit line; every
+/// other Codex call proceeds but leaves a "passed" audit line carrying the observed
+/// `thread_source`, so a future host-side label rename shows up in `daemon.log` instead of
+/// failing open invisibly.
+fn codex_thread_guard(meta: &Meta, tool: &str) -> Option<CallToolResult> {
+    let (action, reason) = codex_guard_action_reason(meta)?;
+    let metadata = codex_turn_metadata(meta);
+    let metadata = metadata.as_ref();
+    crate::daemon::lifecycle::log_guard_audit(crate::daemon::lifecycle::GuardAudit {
         component: "mcp_tool",
-        reason: "codex_system_thread",
+        action,
+        reason,
         tool: Some(tool),
         agent: Some("codex"),
-        session_id: metadata_id(&metadata, "session_id", "sessionId"),
-        thread_id: metadata_id(&metadata, "thread_id", "threadId"),
-        turn_id: metadata_id(&metadata, "turn_id", "turnId"),
+        thread_source: metadata.and_then(|metadata| codex_thread_source(metadata)),
+        session_id: metadata.and_then(|metadata| metadata_id(metadata, "session_id", "sessionId")),
+        thread_id: metadata.and_then(|metadata| metadata_id(metadata, "thread_id", "threadId")),
+        turn_id: metadata.and_then(|metadata| metadata_id(metadata, "turn_id", "turnId")),
     });
-    Some(CallToolResult::error(vec![ContentBlock::text(
-        CODEX_SYSTEM_THREAD_BLOCK_MESSAGE,
-    )]))
+    (action == "suppressed")
+        .then(|| CallToolResult::error(vec![ContentBlock::text(CODEX_BLOCKED_THREAD_MESSAGE)]))
 }
 
 // `ask` 工具的入参（MCP 入参 schema 由 schemars 从本结构派生）。结构体级注释用 `//` 以免泄漏进对外
@@ -282,7 +301,7 @@ structured content; any images the human attaches are returned as image content.
         // `notifications/cancelled` (timeout / user stop / host abort). Not human dismiss.
         cancel: CancellationToken,
     ) -> Result<CallToolResult, McpError> {
-        if let Some(blocked) = codex_system_thread_block(&context.meta, "ask") {
+        if let Some(blocked) = codex_thread_guard(&context.meta, "ask") {
             return Ok(blocked);
         }
         let has_questions = params
@@ -404,7 +423,7 @@ approves ending the turn — only then may you end it.",
         context: RequestContext<RoleServer>,
         cancel: CancellationToken,
     ) -> Result<CallToolResult, McpError> {
-        if let Some(blocked) = codex_system_thread_block(&context.meta, "whats_next") {
+        if let Some(blocked) = codex_thread_guard(&context.meta, "whats_next") {
             return Ok(blocked);
         }
         let public_arguments = whats_next_arguments_value(&params);
@@ -472,7 +491,7 @@ you are unsure of the exact prior AskHuman exchange. Takes no public arguments."
         Parameters(params): Parameters<ShowLastParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        if let Some(blocked) = codex_system_thread_block(&context.meta, "show_last") {
+        if let Some(blocked) = codex_thread_guard(&context.meta, "show_last") {
             return Ok(blocked);
         }
         let binding = self
@@ -509,7 +528,7 @@ cwd (git root). Returns the 1-based index and stored text on success.",
         Parameters(params): Parameters<TodoAddParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        if let Some(blocked) = codex_system_thread_block(&context.meta, "todo_add") {
+        if let Some(blocked) = codex_thread_guard(&context.meta, "todo_add") {
             return Ok(blocked);
         }
         let text = params.text.trim();
@@ -967,30 +986,58 @@ mod tests {
         .expect("MCP response timeout")
     }
 
-    #[test]
-    fn codex_system_thread_detection_is_namespaced_exact_and_compatible() {
-        assert!(is_codex_system_thread(&codex_meta(json!({
-            "thread_source": "system"
-        }))));
-        assert!(is_codex_system_thread(&codex_meta(json!(
-            r#"{"thread_source":"system"}"#
-        ))));
+    fn guard_decision(meta: &Meta) -> Option<(&'static str, &'static str)> {
+        codex_guard_action_reason(meta)
+    }
 
-        for metadata in [
+    #[test]
+    fn codex_blocked_thread_detection_is_namespaced_exact_and_compatible() {
+        for blocked in [
+            codex_meta(json!({ "thread_source": "system" })),
+            codex_meta(json!(r#"{"thread_source":"system"}"#)),
+            codex_meta(json!({ "thread_source": "ambient_suggestions" })),
+            codex_meta(json!(r#"{"thread_source":"ambient_suggestions"}"#)),
+        ] {
+            assert_eq!(
+                guard_decision(&blocked),
+                Some(("suppressed", "codex_blocked_thread_source")),
+                "{blocked:?}"
+            );
+        }
+
+        for passed in [
             codex_meta(json!({ "thread_source": "user" })),
             codex_meta(json!({ "thread_source": "automation" })),
+            codex_meta(json!({ "thread_source": "conversational_onboarding" })),
+            codex_meta(json!({ "thread_source": "pull_request_fix_automation" })),
             codex_meta(json!({ "thread_source": "System" })),
-            codex_meta(json!({})),
-            codex_meta(json!("not json")),
-            meta(json!({ "thread_source": "system" })),
-            Meta::default(),
         ] {
-            assert!(!is_codex_system_thread(&metadata), "{metadata:?}");
+            assert_eq!(
+                guard_decision(&passed),
+                Some(("passed", "codex_thread_source_passed")),
+                "{passed:?}"
+            );
         }
+
+        assert_eq!(
+            guard_decision(&codex_meta(json!({}))),
+            Some(("passed", "codex_thread_source_missing"))
+        );
+        assert_eq!(
+            guard_decision(&codex_meta(json!("not json"))),
+            Some(("passed", "codex_turn_metadata_unreadable"))
+        );
+
+        // No Codex namespace at all: not guarded, not audited.
+        assert_eq!(
+            guard_decision(&meta(json!({ "thread_source": "system" }))),
+            None
+        );
+        assert_eq!(guard_decision(&Meta::default()), None);
     }
 
     #[tokio::test]
-    async fn system_thread_metadata_blocks_all_tools_through_rmcp_routing() -> anyhow::Result<()> {
+    async fn blocked_thread_metadata_blocks_all_tools_through_rmcp_routing() -> anyhow::Result<()> {
         let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
         let server_task = tokio::spawn(async move {
             AskServer::new()
@@ -1025,13 +1072,13 @@ mod tests {
         )
         .await;
 
-        for (offset, (name, arguments)) in [
-            ("ask", json!({ "message": "must not spawn" })),
-            ("whats_next", json!({})),
-            ("show_last", json!({})),
+        for (offset, (name, thread_source, arguments)) in [
+            ("ask", "system", json!({ "message": "must not spawn" })),
+            ("whats_next", "ambient_suggestions", json!({})),
+            ("show_last", "system", json!({})),
             // Whitespace is valid at schema decoding time but would fail handler validation.
-            // Receiving the system-thread result proves the guard ran before any todo write.
-            ("todo_add", json!({ "text": " " })),
+            // Receiving the blocked-thread result proves the guard ran before any todo write.
+            ("todo_add", "ambient_suggestions", json!({ "text": " " })),
         ]
         .into_iter()
         .enumerate()
@@ -1045,7 +1092,7 @@ mod tests {
                     "method": "tools/call",
                     "params": {
                         "_meta": {
-                            CODEX_TURN_METADATA_KEY: { "thread_source": "system" }
+                            CODEX_TURN_METADATA_KEY: { "thread_source": thread_source }
                         },
                         "name": name,
                         "arguments": arguments
@@ -1061,7 +1108,7 @@ mod tests {
             );
             assert_eq!(
                 response.pointer("/result/content/0/text"),
-                Some(&json!(CODEX_SYSTEM_THREAD_BLOCK_MESSAGE)),
+                Some(&json!(CODEX_BLOCKED_THREAD_MESSAGE)),
                 "{name}"
             );
         }
@@ -1096,7 +1143,7 @@ mod tests {
             assert_eq!(response.pointer("/error/code"), Some(&json!(-32602)));
             assert_ne!(
                 response.pointer("/error/message"),
-                Some(&json!(CODEX_SYSTEM_THREAD_BLOCK_MESSAGE))
+                Some(&json!(CODEX_BLOCKED_THREAD_MESSAGE))
             );
         }
 

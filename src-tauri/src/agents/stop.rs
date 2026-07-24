@@ -69,23 +69,23 @@ fn run_inner(args: &[String]) -> Option<Value> {
         return None;
     }
     if let Some(reason) = confirmation_suppression_reason(kind, &input) {
-        crate::daemon::lifecycle::log_suppression_audit(
-            crate::daemon::lifecycle::SuppressionAudit {
-                component: "stop_confirmation",
-                reason,
-                tool: None,
-                agent: Some(kind.as_str()),
-                session_id: Some(&session_id),
-                thread_id: input
-                    .get("thread_id")
-                    .or_else(|| input.get("threadId"))
-                    .and_then(Value::as_str),
-                turn_id: input
-                    .get("turn_id")
-                    .or_else(|| input.get("turnId"))
-                    .and_then(Value::as_str),
-            },
-        );
+        crate::daemon::lifecycle::log_guard_audit(crate::daemon::lifecycle::GuardAudit {
+            component: "stop_confirmation",
+            action: "suppressed",
+            reason,
+            tool: None,
+            agent: Some(kind.as_str()),
+            thread_source: codex_thread_source(&input),
+            session_id: Some(&session_id),
+            thread_id: input
+                .get("thread_id")
+                .or_else(|| input.get("threadId"))
+                .and_then(Value::as_str),
+            turn_id: input
+                .get("turn_id")
+                .or_else(|| input.get("turnId"))
+                .and_then(Value::as_str),
+        });
         if track {
             super::report::report_simple_event(kind, LifecycleEvent::TurnEnd, session_id, cwd);
         }
@@ -157,16 +157,21 @@ fn is_natural_stop(kind: AgentKind, input: &Value) -> bool {
     }
 }
 
+fn codex_thread_source(input: &Value) -> Option<&str> {
+    input
+        .get("thread_source")
+        .or_else(|| input.get("threadSource"))
+        .and_then(Value::as_str)
+}
+
 fn confirmation_suppression_reason(kind: AgentKind, input: &Value) -> Option<&'static str> {
     if kind != AgentKind::Codex {
         return None;
     }
-    let thread_source = input
-        .get("thread_source")
-        .or_else(|| input.get("threadSource"))
-        .and_then(Value::as_str);
-    if thread_source == Some("system") {
-        return Some("codex_system_thread");
+    if codex_thread_source(input)
+        .is_some_and(|source| crate::mcp::ask::CODEX_BLOCKED_THREAD_SOURCES.contains(&source))
+    {
+        return Some("codex_blocked_thread_source");
     }
     input
         .get("transcript_path")
@@ -417,20 +422,18 @@ mod tests {
 
     #[test]
     fn codex_system_and_ephemeral_stops_suppress_confirmation() {
-        assert_eq!(
-            confirmation_suppression_reason(
-                AgentKind::Codex,
-                &json!({"thread_source":"system", "transcript_path":"/tmp/rollout.jsonl"})
-            ),
-            Some("codex_system_thread")
-        );
-        assert_eq!(
-            confirmation_suppression_reason(
-                AgentKind::Codex,
-                &json!({"threadSource":"system", "transcriptPath":"/tmp/rollout.jsonl"})
-            ),
-            Some("codex_system_thread")
-        );
+        for input in [
+            json!({"thread_source":"system", "transcript_path":"/tmp/rollout.jsonl"}),
+            json!({"threadSource":"system", "transcriptPath":"/tmp/rollout.jsonl"}),
+            json!({"thread_source":"ambient_suggestions", "transcript_path":"/tmp/rollout.jsonl"}),
+            json!({"threadSource":"ambient_suggestions", "transcriptPath":"/tmp/rollout.jsonl"}),
+        ] {
+            assert_eq!(
+                confirmation_suppression_reason(AgentKind::Codex, &input),
+                Some("codex_blocked_thread_source"),
+                "{input:?}"
+            );
+        }
         assert_eq!(
             confirmation_suppression_reason(AgentKind::Codex, &json!({"transcript_path":null})),
             Some("codex_transcript_path_null")

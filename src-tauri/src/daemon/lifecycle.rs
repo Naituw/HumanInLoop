@@ -159,16 +159,20 @@ pub fn log_path() -> PathBuf {
     crate::paths::config_dir().join("daemon.log")
 }
 
-/// Privacy-safe audit context for a guard that rejected an interaction before side effects.
+/// Privacy-safe audit context for a guard decision ("suppressed" or "passed") taken before
+/// any side effects.
 ///
 /// Keep this deliberately identifier-only: prompts, answers, transcript paths, and arbitrary
-/// metadata must never enter the daemon log through this interface.
+/// metadata must never enter the daemon log through this interface. `thread_source` carries
+/// the raw Codex thread origin label so future host-side renames are diagnosable from logs.
 #[derive(Debug, Clone, Copy)]
-pub struct SuppressionAudit<'a> {
+pub struct GuardAudit<'a> {
     pub component: &'a str,
+    pub action: &'static str,
     pub reason: &'a str,
     pub tool: Option<&'a str>,
     pub agent: Option<&'a str>,
+    pub thread_source: Option<&'a str>,
     pub session_id: Option<&'a str>,
     pub thread_id: Option<&'a str>,
     pub turn_id: Option<&'a str>,
@@ -176,7 +180,7 @@ pub struct SuppressionAudit<'a> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SuppressionAuditLine<'a> {
+struct GuardAuditLine<'a> {
     timestamp_ms: u64,
     pid: u32,
     event: &'static str,
@@ -188,6 +192,8 @@ struct SuppressionAuditLine<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     agent: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    thread_source: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thread_id: Option<&'a str>,
@@ -195,20 +201,17 @@ struct SuppressionAuditLine<'a> {
     turn_id: Option<&'a str>,
 }
 
-fn suppression_audit_line_at(
-    audit: SuppressionAudit<'_>,
-    timestamp_ms: u64,
-    pid: u32,
-) -> Option<String> {
-    serde_json::to_string(&SuppressionAuditLine {
+fn guard_audit_line_at(audit: GuardAudit<'_>, timestamp_ms: u64, pid: u32) -> Option<String> {
+    serde_json::to_string(&GuardAuditLine {
         timestamp_ms,
         pid,
         event: "askhuman_guard",
         component: audit.component,
-        action: "suppressed",
+        action: audit.action,
         reason: audit.reason,
         tool: audit.tool,
         agent: audit.agent,
+        thread_source: audit.thread_source,
         session_id: audit.session_id,
         thread_id: audit.thread_id,
         turn_id: audit.turn_id,
@@ -219,12 +222,12 @@ fn suppression_audit_line_at(
 /// Append one structured guard decision to `daemon.log` (best-effort).
 ///
 /// The write is disabled in unit-test builds so handler tests never touch the user's real log.
-pub fn log_suppression_audit(audit: SuppressionAudit<'_>) {
+pub fn log_guard_audit(audit: GuardAudit<'_>) {
     let timestamp_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0);
-    let Some(mut line) = suppression_audit_line_at(audit, timestamp_ms, std::process::id()) else {
+    let Some(mut line) = guard_audit_line_at(audit, timestamp_ms, std::process::id()) else {
         return;
     };
     line.push('\n');
@@ -428,13 +431,15 @@ mod tests {
     }
 
     #[test]
-    fn suppression_audit_is_structured_and_omits_missing_or_sensitive_fields() {
-        let line = suppression_audit_line_at(
-            SuppressionAudit {
+    fn guard_audit_is_structured_and_omits_missing_or_sensitive_fields() {
+        let line = guard_audit_line_at(
+            GuardAudit {
                 component: "mcp_tool",
-                reason: "codex_system_thread",
+                action: "suppressed",
+                reason: "codex_blocked_thread_source",
                 tool: Some("whats_next"),
                 agent: Some("codex"),
+                thread_source: Some("ambient_suggestions"),
                 session_id: Some("session-1"),
                 thread_id: Some("thread-1"),
                 turn_id: None,
@@ -449,13 +454,39 @@ mod tests {
         assert_eq!(value["event"], "askhuman_guard");
         assert_eq!(value["component"], "mcp_tool");
         assert_eq!(value["action"], "suppressed");
-        assert_eq!(value["reason"], "codex_system_thread");
+        assert_eq!(value["reason"], "codex_blocked_thread_source");
         assert_eq!(value["tool"], "whats_next");
         assert_eq!(value["agent"], "codex");
+        assert_eq!(value["threadSource"], "ambient_suggestions");
         assert_eq!(value["sessionId"], "session-1");
         assert_eq!(value["threadId"], "thread-1");
         assert!(value.get("turnId").is_none());
         assert!(!line.contains("prompt"));
         assert!(!line.contains("transcript"));
+    }
+
+    #[test]
+    fn guard_audit_pass_action_omits_thread_source_when_absent() {
+        let line = guard_audit_line_at(
+            GuardAudit {
+                component: "mcp_tool",
+                action: "passed",
+                reason: "codex_thread_source_missing",
+                tool: Some("ask"),
+                agent: Some("codex"),
+                thread_source: None,
+                session_id: None,
+                thread_id: Some("thread-2"),
+                turn_id: None,
+            },
+            123,
+            456,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["action"], "passed");
+        assert_eq!(value["reason"], "codex_thread_source_missing");
+        assert!(value.get("threadSource").is_none());
+        assert_eq!(value["threadId"], "thread-2");
     }
 }

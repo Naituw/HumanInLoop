@@ -180,8 +180,9 @@ MCP 版 `mcp_reference()` 对应前两行调整为：
 - Grok skill 正文复用 `mcp_reference()`，自动跟随。
 - rules 是托管产物：升级二进制后按现有 `agents update` / 过期徽标机制更新四家安装文案。
 - （2026-07-24 补充）Codex Rules 不再为 task-suggestion generator 增加 scope exception，以便实际
-  观察模型对 `whats_next` 等 AskHuman 工具的调用。可信 `thread_source=system` guard 会在弹窗、IM 和
-  todo 副作用前拒绝，并将拒绝原因写入 `daemon.log`；因此 Rules 行为不承担后台线程的安全边界。
+  观察模型对 `whats_next` 等 AskHuman 工具的调用。可信 `thread_source ∈ {system,
+  ambient_suggestions}` guard 会在弹窗、IM 和 todo 副作用前拒绝，并将拒绝原因写入 `daemon.log`；
+  因此 Rules 行为不承担后台线程的安全边界。
 - （2026-07-17 补充）Rules 在用户明确要求添加待办，或把一个**具体任务 / 已提出的建议明确延后**
   （如“稍后再做”）时要求 Agent 添加项目待办；不得把 Agent 自己的内部计划或尚未被用户接受的建议
   擅自入队。CLI 版调用 `<program> todo add "<concise task>"`，MCP 版与 Grok skill 调用

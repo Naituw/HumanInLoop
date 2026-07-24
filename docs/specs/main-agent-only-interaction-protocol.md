@@ -58,8 +58,9 @@ AskHuman 从同一模板生成 Cursor、Claude Code、Codex 的全局 rules，�
 2026-07-24 补充：Codex 桌面版会在用户创建任务前运行 Suggested prompts 的 task-suggestion
 generator。为让后台线程实际尝试 AskHuman、并能直接验证运行时 guard，Rules 不再为该角色增加文案
 例外；Codex 与 Claude、Cursor、Grok 一样只保留上面的 subagent 例外。安全边界由运行时提供：
-Codex MCP 从可信 turn metadata 精确拦截 `thread_source=system`（见 `mcp.md`），Stop Hook 对 system /
-ephemeral thread 静默放行并留下审计日志（见 `agent-stop-confirmation.md`）。
+Codex MCP 从可信 turn metadata 精确拦截 `thread_source ∈ {system, ambient_suggestions}`
+（见 `mcp.md`），Stop Hook 对这两种来源 / ephemeral thread 静默放行并留下审计日志
+（见 `agent-stop-confirmation.md`）。
 
 ### D2：Grok skill 的常驻 description 同步角色边界
 

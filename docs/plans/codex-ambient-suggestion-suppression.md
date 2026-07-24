@@ -3,6 +3,11 @@
 > 状态：已实现；真实桌面端 Suggested prompts 验证按用户要求记录为项目待办，稍后执行。
 > 范围：Codex 桌面版 Suggested prompts / ambient suggestions 与 AskHuman 全局 Rules、MCP 工具的交互边界。
 > 当前验证基线：ChatGPT.app 26.715.52143，内置 `codex-cli 0.145.0-alpha.18`。
+>
+> **2026-07-24 修订**：ChatGPT.app 26.721 把 ambient 线程标签从 `thread_source=system` 改为
+> `ambient_suggestions`，本计划「只匹配精确值 `system`」的守卫因此 fail-open。拦截集合已扩为
+> `{system, ambient_suggestions}`（MCP guard 与 Stop 确认共用），并对未拦截的 Codex 调用增加
+> `action="passed"` 放行审计；现行契约见 `docs/specs/mcp.md` 与 `docs/specs/agent-stop-confirmation.md`。
 
 ## 1. 问题与已验证事实
 

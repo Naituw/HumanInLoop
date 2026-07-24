@@ -16,6 +16,12 @@
 > `ask`、`whats_next`、`show_last`、`todo_add`，并向 `~/.askhuman/daemon.log` 追加一条结构化抑制
 > 审计；其它来源与缺失 / 异常 metadata 保持 fail-open。
 >
+> **实现期补充（2026-07-24）**：ChatGPT.app 26.721 把 ambient/Suggested prompts 线程的
+> `thread_source` 标签从 `system` 改名为 `ambient_suggestions`，导致仅匹配 `system` 的 guard
+> fail-open。拦截集合改为 `{system, ambient_suggestions}`（与 Stop 确认 guard 共用），并且对**未命中
+> 拦截**的 Codex 调用也写一条 `action="passed"` 放行审计（含观测到的 `thread_source` 原值），未来宿主
+> 再改名时可直接从 daemon.log 读到新标签。
+>
 > **实现期补充（2026-07-22）**：上下文压缩恢复新增只读 `show_last`。Codex 从每调用
 > `_meta.threadId` 绑定，Claude/Cursor 由 mode 托管的 PreToolUse Hook 注入 schema 隐藏、
 > 30 秒一次性 token，Grok 在同一 MCP instance+项目+进程分区内只认领参数指纹
@@ -51,7 +57,7 @@
 | 编号 | 决策项 | 结论 |
 |---|---|---|
 | D1 | 模式互斥 | 每个 agent 三态「CLI / MCP / 未集成」，互斥。同一 agent 不同时安装 CLI 与 MCP 产物（避免双触发/冲突） |
-| D2 | MCP server 形态 | **薄壳**：不自带提问/弹窗/IM 逻辑；正常 `ask` 调用 spawn 现有 `AskHuman --output json …` 子进程复用全流程。Codex `system` thread 在 spawn 前本地拒绝 |
+| D2 | MCP server 形态 | **薄壳**：不自带提问/弹窗/IM 逻辑；正常 `ask` 调用 spawn 现有 `AskHuman --output json …` 子进程复用全流程。Codex 拦截来源（`system` / `ambient_suggestions`）thread 在 spawn 前本地拒绝 |
 | D3 | 启动方式 | 新增 busybox 角色子命令 `AskHuman mcp`（与 `daemon`/`--popup`/`__agent-hook` 并列），用 `rmcp` 跑 STDIO server |
 | D4 | 工具与 Schema | `ask` 入参为 `message`、`questions[{question, options[{text, recommended}]}]`、`files[]`；`whats_next` 承载完成报告/建议，`show_last` 对模型为零业务参数，`todo_add` 写项目待办。会话 token 字段可被托管 Hook 注入但必须从 `tools/list` schema 隐藏。`questions` / `options` item 直接内联，不得依赖本地 `$ref` |
 | D5 | 输出（结构化 + 图片直返）| `ask` 工具**声明 output schema** 并返回**结构化 JSON**（`action`/`channel`/`status?`/`answers[{questionIndex, selectedOptions, userInput?, files[]}]`）：内部子进程以 `--output json` 调用、解析后规整为 `structuredContent`（**剔除仅供脚本用的 `selectedIndices`**），并按 MCP 规范在 `content` 里附一段序列化 JSON 文本（向后兼容）。**取消时（`action:"cancel"`）顶层带 `status` 引导文案**（必须重新确认直到用户明确答复，不得当作放行），该字段同时落进 CLI `--output json`（见 §5）。人类回复中的图片读出后以 `ImageContent`(base64+mimeType) 一并放入 `content` 数组直返模型；非图片文件以路径出现在 JSON `files` 中 |
@@ -74,7 +80,7 @@
   └─ 按配置 spawn: <AskHuman 绝对路径> mcp        （STDIO，session 期常驻）
        └─ rmcp STDIO server，暴露 `ask` / `whats_next` / `show_last` / `todo_add`
             └─ 收到 ask 调用：
-                 0. 检查 Codex turn metadata；system thread 直接返回 terminal error
+                 0. 检查 Codex turn metadata；拦截来源 thread 直接返回 terminal error
                  1. 入参 Schema → argv（message / -q / -o / -o! / -f / --output json）
                  2. spawn 子进程: <AskHuman 绝对路径> <argv...>
                       · Unix：瘦客户端 → daemon（弹窗/IM/抢答/历史/落盘/排空重连全复用）
@@ -88,12 +94,13 @@
 - **并发**：客户端若并发调用 `ask`，各自 spawn 独立子进程，daemon 已支持并发请求（每请求独立 Coordinator）。
 - **环境边界**：子进程保留 cwd 与普通环境，但先清除长驻 MCP server 可能继承的四家原生 session 变量；只用每调用的可信绑定写内部环境。
 
-### Codex system thread 前置边界
+### Codex 内部 thread 前置边界
 
 Codex 把 per-turn metadata 放在请求 `_meta["x-codex-turn-metadata"]`；AskHuman 兼容该值为 JSON
-object 或 JSON 字符串，只对其中精确小写的 `thread_source: "system"` 命中。不得信任顶层任意同名
-`thread_source`。字段缺失、格式错误、`user`、`automation` 或未知值均 fail-open，避免误伤旧 Codex
-与其它 MCP 客户端。
+object 或 JSON 字符串，只对其中精确小写的 `thread_source ∈ {"system", "ambient_suggestions"}`
+命中（前者为 ChatGPT.app 26.7xx 之前 ambient 线程的标签，后者为 26.721+ 的新标签）。不得信任顶层
+任意同名 `thread_source`。字段缺失、格式错误、`user`、`automation` 或未知值均 fail-open，避免误伤
+旧 Codex 与其它 MCP 客户端。
 
 命中后 `ask`、`whats_next`、`show_last`、`todo_add` 返回 `isError: true`，固定文本为：
 
@@ -108,9 +115,14 @@ popup、IM 或项目 todo。
 
 命中时还向 `~/.askhuman/daemon.log` 追加一行 JSON 审计，固定包含
 `event="askhuman_guard"`、`component="mcp_tool"`、`action="suppressed"`、
-`reason="codex_system_thread"` 与工具名；可信 metadata 中存在时附带 session/thread/turn id。日志不
-记录提问正文、参数或任意未识别 metadata。字段缺失、格式错误或非 system 来源既不拒绝，也不写抑制
-日志。
+`reason="codex_blocked_thread_source"`、`threadSource`（观测原值）与工具名；可信 metadata 中存在时
+附带 session/thread/turn id。日志不记录提问正文、参数或任意未识别 metadata。
+
+带 `x-codex-turn-metadata` 但**未命中**拦截的调用不拒绝，但同样写一行 `action="passed"` 放行审计，
+`reason` 取 `codex_thread_source_passed`（来源存在但不在拦截集合，`threadSource` 记录原值）、
+`codex_thread_source_missing`（metadata 可读但无 `thread_source` 字符串）或
+`codex_turn_metadata_unreadable`（metadata 无法解析）之一——宿主未来再改 ambient 标签时，新值直接
+出现在放行日志里而不是无声 fail-open。非 Codex 客户端（`_meta` 无该命名空间）既不拦截也不写审计。
 
 ## 5. `ask` 工具 Schema（草案）
 
@@ -196,9 +208,10 @@ argv 映射：`message`→首个位置参数（或经 `-q` 拆分）；每个 qu
 9. 三家 MCP 配置写入为最小化编辑：保留用户其它条目/注释；重复安装幂等；卸载只移除自有条目；解析失败不破坏文件（单测覆盖）。
 10. Windows：`AskHuman mcp` 经子进程单进程弹窗回退完成提问（无 daemon）。
 11. 既有 CLI 模式（Rule/Hook）与所有现有功能回归正常。
-12. raw `tools/call` 携带 Codex `thread_source=system` 时四个工具均返回固定 terminal error 且无副作用；
-    同时写入含工具名与 `codex_system_thread` 原因的结构化审计；`user`、`automation`、缺失和异常
-    metadata 不命中。
+12. raw `tools/call` 携带 Codex `thread_source=system` 或 `ambient_suggestions` 时四个工具均返回固定
+    terminal error 且无副作用；同时写入含工具名、`codex_blocked_thread_source` 原因与 `threadSource`
+    原值的结构化审计；`user`、`automation`、缺失和异常 metadata 不命中拦截，但写 `action="passed"`
+    放行审计。
 
 ## 10. 待实现期复核 / 开放细节
 
