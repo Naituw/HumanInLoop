@@ -30,11 +30,20 @@ export interface ConfirmDetail {
   bodyMd: string;
 }
 
+/** 前缀档位元数据（D51）：同 group 的 choice 是同一动作的不同泛化档位。 */
+export interface ChoiceVariant {
+  group: string;
+  level: number;
+  levelLabel: string;
+  recommended: boolean;
+}
+
 export interface ConfirmChoice {
   id: string;
   label: string;
   description: string;
   role: ConfirmActionRole;
+  variant?: ChoiceVariant | null;
 }
 
 export interface ConfirmInput {
@@ -532,6 +541,12 @@ export interface ExperimentalConfig {
   verticalQuestions: boolean;
 }
 
+/** 权限确认相关全局设置（spec codex-permission-remember）。 */
+export interface PermissionsConfig {
+  /** Codex shell 宽松模式全局开关（D52）：非危险且可解析的 shell 命令自动放行。 */
+  codexRelaxedShell: boolean;
+}
+
 export type AgentTaskPermission = "ask" | "agent-default" | "yolo";
 
 export interface AgentTasksConfig {
@@ -565,6 +580,7 @@ export interface AppConfig {
   general: GeneralConfig;
   channels: ChannelsConfig;
   agentTasks: AgentTasksConfig;
+  permissions: PermissionsConfig;
   experimental: ExperimentalConfig;
 }
 
@@ -605,6 +621,8 @@ export interface PermissionSessionSummary {
   shellCount: number;
   networkCount: number;
   mcpCount: number;
+  /** 该会话 YOLO 模式开启中（D53）。 */
+  yolo: boolean;
   lastUsedAtMs: number;
 }
 
@@ -622,7 +640,9 @@ export type PermissionRuleKind =
   | "mcpTool"
   | "networkHost"
   | "shellExact"
-  | "shellPrefix";
+  | "shellPrefix"
+  | "shellRelaxed"
+  | "yolo";
 
 /** 一条规则展示行（D48：原样键文本）。 */
 export interface PermissionRuleInfo {
@@ -638,7 +658,8 @@ export type PermissionRulesOp =
   | { op: "sessionDetail"; sessionId: string }
   | { op: "globalDetail" }
   | { op: "resetSession"; sessionId: string }
-  | { op: "resetGlobal" };
+  | { op: "resetGlobal" }
+  | { op: "disableYolo"; sessionId: string };
 
 export type PermissionRulesResult =
   | { kind: "summaries"; sessions: PermissionSessionGroup[]; globalCount: number }

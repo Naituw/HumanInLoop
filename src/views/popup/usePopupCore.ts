@@ -35,6 +35,7 @@ import { applyTheme, fileToDataUrl } from "../../lib/theme";
 import { mark as perfMarkFe, enable as perfEnableFe } from "../../lib/perf";
 import type {
   AskRequest,
+  ConfirmChoice,
   ConfirmRequest,
   FileAttachment,
   ImageAttachment,
@@ -1515,6 +1516,73 @@ export function usePopupCore() {
       "Tool"
   );
 
+  // ===== 前缀档位选择器（D51）=====
+  // 同 group 的 choices 是同一动作的不同泛化档位：折叠成一行展示，所有 group 共享
+  // 一个档位选择器；提交仍然走被选中 choice 的 wire index，协议零改动。
+  const confirmVariantLevel = ref(0);
+
+  const confirmVariantGroups = computed(() => {
+    const groups = new Map<
+      string,
+      { level: number; index: number; levelLabel: string }[]
+    >();
+    (confirmRequest.value?.choices ?? []).forEach((choice, index) => {
+      const variant = choice.variant;
+      if (!variant) return;
+      const list = groups.get(variant.group) ?? [];
+      list.push({ level: variant.level, index, levelLabel: variant.levelLabel });
+      groups.set(variant.group, list);
+    });
+    for (const list of groups.values()) list.sort((a, b) => a.level - b.level);
+    return groups;
+  });
+
+  // 选择器档位（标签取第一个 group；各 group 的阶梯由 Hook 端保证一致）。
+  const confirmVariantLevels = computed(() => {
+    const first: { level: number; levelLabel: string }[] | undefined =
+      confirmVariantGroups.value.values().next().value;
+    return first && first.length > 1
+      ? first.map((entry) => ({ level: entry.level, label: entry.levelLabel }))
+      : [];
+  });
+
+  // 展示行：普通 choice 原样一行；每个 group 在其首个 choice 的位置折叠为一行，
+  // 行内容（label/description/wire index）跟随当前档位。
+  const confirmRows = computed(() => {
+    const choices = confirmRequest.value?.choices ?? [];
+    const rows: { index: number; choice: ConfirmChoice; group?: string }[] = [];
+    const seen = new Set<string>();
+    choices.forEach((choice, index) => {
+      const variant = choice.variant;
+      if (!variant) {
+        rows.push({ index, choice });
+        return;
+      }
+      if (seen.has(variant.group)) return;
+      seen.add(variant.group);
+      const entries = confirmVariantGroups.value.get(variant.group) ?? [];
+      const active =
+        entries.find((entry) => entry.level === confirmVariantLevel.value) ??
+        entries[0];
+      if (active) {
+        rows.push({ index: active.index, choice: choices[active.index], group: variant.group });
+      }
+    });
+    return rows;
+  });
+
+  function selectConfirmVariantLevel(level: number) {
+    if (submitting.value || level === confirmVariantLevel.value) return;
+    const previousGroup = selectedConfirmChoice.value?.variant?.group;
+    confirmVariantLevel.value = level;
+    // 已选中某个档位行时，选中项跟随切到同组的新档位。
+    if (previousGroup) {
+      const entries = confirmVariantGroups.value.get(previousGroup) ?? [];
+      const target = entries.find((entry) => entry.level === level);
+      if (target) confirmChoiceIndex.value = target.index;
+    }
+  }
+
   function startPermissionDiffEnrichment() {
     const edit = permissionEdit.value;
     const id = confirmRequest.value?.id;
@@ -1662,10 +1730,11 @@ export function usePopupCore() {
         return;
       }
       if (mod && e.key >= "1" && e.key <= "9") {
-        const index = Number(e.key) - 1;
-        if (index < (confirmRequest.value?.choices.length ?? 0)) {
+        // 快捷键按展示行计数（档位 group 折叠为一行，D51）。
+        const row = confirmRows.value[Number(e.key) - 1];
+        if (row) {
           e.preventDefault();
-          selectConfirmChoice(index);
+          selectConfirmChoice(row.index);
         }
         return;
       }
@@ -1811,6 +1880,12 @@ export function usePopupCore() {
           )
         : null;
     if (confirmChoiceIndex.value === -1) confirmChoiceIndex.value = null;
+    // 档位选择器默认停在推荐档（D51）。
+    confirmVariantLevel.value =
+      interaction.type === "confirm"
+        ? interaction.request.choices.find((choice) => choice.variant?.recommended)
+            ?.variant?.level ?? 0
+        : 0;
     confirmComment.value = "";
     showConfirmCloseWarning.value = false;
     const n = req?.questions.length ?? 0;
@@ -2172,6 +2247,10 @@ export function usePopupCore() {
     confirmCanSubmit,
     confirmDetailHtml,
     confirmToolName,
+    confirmRows,
+    confirmVariantLevel,
+    confirmVariantLevels,
+    selectConfirmVariantLevel,
     permissionEdit,
     permissionDiff,
     permissionDiffLoading,

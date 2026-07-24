@@ -82,8 +82,20 @@ pub enum Command {
     /// `/todo-auto`、`/自动待办`：无编号 → 选项目（带文本则新增自动待办）；`Some(n)` 是
     /// 兼容入口，无文本打开切换卡，带文本直接新增一条自动执行待办。
     TodoAuto(Option<u64>, Option<String>),
+    /// `/yolo [off [编号]]`：Codex YOLO 模式管理（D53）。`List` → 带关闭按钮的会话选择卡；
+    /// `Off(Some(n))` → 按 Agent 编号直关；`Off(None)` → 恰一个开着直关，多个弹卡。
+    Yolo(YoloSel),
     /// `/help`、`/帮助`、`/?`：返回动态引导文案（可发什么、可用命令）。
     Help,
+}
+
+/// `/yolo` 的子命令。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YoloSel {
+    /// 无参：列出开启中的会话（带关闭按钮的选择卡）。
+    List,
+    /// `off [编号]`：关闭（编号 = /status 的 Agent 编号；缺省时恰一个开着则直关）。
+    Off(Option<u64>),
 }
 
 /// `/unwatch` 的目标选择。
@@ -125,6 +137,7 @@ enum PhraseKind {
     Todo,
     TodoRm,
     TodoAuto,
+    Yolo,
 }
 
 /// (normalized key, command). Includes slash command names, Chinese token aliases, and
@@ -240,6 +253,14 @@ const COMMAND_PHRASES: &[(&str, PhraseKind)] = &[
     ("todoauto", PhraseKind::TodoAuto),
     ("自动待办", PhraseKind::TodoAuto),
     ("autotodo", PhraseKind::TodoAuto),
+    // /yolo（一律指向列表卡：卡上自带关闭按钮，"yolo off"/"关闭yolo" 规范化后也命中）
+    ("yolo", PhraseKind::Yolo),
+    ("yolo模式", PhraseKind::Yolo),
+    ("关闭yolo", PhraseKind::Yolo),
+    ("关yolo", PhraseKind::Yolo),
+    ("yolooff", PhraseKind::Yolo),
+    ("yolomode", PhraseKind::Yolo),
+    ("turnoffyolo", PhraseKind::Yolo),
 ];
 
 fn phrase_kind_to_command(kind: PhraseKind) -> Command {
@@ -257,6 +278,7 @@ fn phrase_kind_to_command(kind: PhraseKind) -> Command {
         PhraseKind::Todo => Command::Todo(None, None),
         PhraseKind::TodoRm => Command::TodoRm(None),
         PhraseKind::TodoAuto => Command::TodoAuto(None, None),
+        PhraseKind::Yolo => Command::Yolo(YoloSel::List),
     }
 }
 
@@ -408,6 +430,15 @@ fn classify_prefixed(trimmed: &str) -> Parsed {
                 }
             }
         }
+        "yolo" => {
+            let sel = match tokens.next() {
+                Some(sub) if sub.eq_ignore_ascii_case("off") || sub == "关闭" || sub == "关" => {
+                    YoloSel::Off(tokens.next().and_then(|value| value.parse::<u64>().ok()))
+                }
+                _ => YoloSel::List,
+            };
+            Parsed::Command(Command::Yolo(sel))
+        }
         "help" | "帮助" | "?" | "？" => Parsed::Command(Command::Help),
         _ if bang => Parsed::Text,
         _ => Parsed::UnknownCommand,
@@ -498,6 +529,9 @@ pub fn help_text(
     out.push_str(&i18n::tr(lang, "autoChannel.helpCmdTodoRm").replace("{p}", prefix));
     out.push('\n');
     out.push_str(&i18n::tr(lang, "autoChannel.helpCmdTodoAuto").replace("{p}", prefix));
+    // `/yolo`：Codex YOLO 模式管理（D53），与 /status 同门控。
+    out.push('\n');
+    out.push_str(&i18n::tr(lang, "autoChannel.helpCmdYolo").replace("{p}", prefix));
     out.push('\n');
     out.push_str(&i18n::tr(lang, "autoChannel.helpCmdHelp").replace("{p}", prefix));
     if auto {
@@ -1210,6 +1244,51 @@ mod tests {
     }
 
     #[test]
+    fn classify_yolo_variants() {
+        assert_eq!(
+            classify("/yolo"),
+            Parsed::Command(Command::Yolo(YoloSel::List))
+        );
+        assert_eq!(
+            classify("!yolo"),
+            Parsed::Command(Command::Yolo(YoloSel::List))
+        );
+        assert_eq!(
+            classify("/yolo off"),
+            Parsed::Command(Command::Yolo(YoloSel::Off(None)))
+        );
+        assert_eq!(
+            classify("/yolo OFF 3"),
+            Parsed::Command(Command::Yolo(YoloSel::Off(Some(3))))
+        );
+        assert_eq!(
+            classify("/yolo 关闭 2"),
+            Parsed::Command(Command::Yolo(YoloSel::Off(Some(2))))
+        );
+        // 未知子命令 → 列表（宽松处理，同 /watch 非数字参数）。
+        assert_eq!(
+            classify("/yolo abc"),
+            Parsed::Command(Command::Yolo(YoloSel::List))
+        );
+        // 无前缀整句短语（spec im-command-phrases）：列表卡自带关闭按钮，一律指向列表。
+        for phrase in [
+            "yolo",
+            "YOLO 模式",
+            "关闭 yolo",
+            "yolo off",
+            "turn off yolo",
+        ] {
+            assert_eq!(
+                classify(phrase),
+                Parsed::Command(Command::Yolo(YoloSel::List)),
+                "phrase: {phrase}"
+            );
+        }
+        // 含额外内容的整句不是短语命令（避免吞掉作答文本）。
+        assert_eq!(classify("我觉得 yolo 就行"), Parsed::Text);
+    }
+
+    #[test]
     fn classify_msg_and_msg_clear() {
         // `/msg <编号> <内容>`：内容为编号后的原文，保留内部换行 / 空白。
         assert_eq!(
@@ -1359,6 +1438,14 @@ mod tests {
             assert!(t.contains("transcript"), "{t}");
             let off = help_text(false, false, false, "/", lang);
             assert!(off.contains("diff") && off.contains("stage") && off.contains("transcript"));
+        }
+    }
+
+    #[test]
+    fn help_text_lists_yolo() {
+        for lang in [Lang::En, Lang::Zh] {
+            assert!(help_text(true, false, true, "/", lang).contains("/yolo"));
+            assert!(help_text(false, false, false, "/", lang).contains("/yolo"));
         }
     }
 

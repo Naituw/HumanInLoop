@@ -63,7 +63,9 @@ fn button_color(action: crate::select::SelectAction) -> &'static str {
         | crate::select::SelectAction::TodoRm
         | crate::select::SelectAction::TodoAuto
         | crate::select::SelectAction::TodoAutoEntry => "blue",
-        crate::select::SelectAction::Unwatch | crate::select::SelectAction::TodoRmEntry => "red",
+        crate::select::SelectAction::Unwatch
+        | crate::select::SelectAction::TodoRmEntry
+        | crate::select::SelectAction::Yolo => "red",
     }
 }
 

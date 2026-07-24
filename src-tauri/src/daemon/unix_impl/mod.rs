@@ -468,6 +468,8 @@ enum PickerKind {
     TodoAutoEntry,
     /// 待办管理卡（飞书代码卡 / 钉钉提问卡模板）：无行按钮，仅表单「新增」提交；`payload`＝项目 key。
     TodoManage,
+    /// `/yolo` 的会话选择卡（D53）：选项＝开着 YOLO 的 Codex session id，点「关闭」即关。
+    Yolo,
 }
 
 /// `/stage` 确认卡台账（不持久化）。业务状态留在此处；通用 view 只负责展示与动作槽映射。
@@ -1065,6 +1067,9 @@ fn permission_rules_op(
         ipc::PermissionRulesOp::ResetGlobal => ipc::PermissionRulesResult::Reset {
             removed: store::reset_global(),
         },
+        ipc::PermissionRulesOp::DisableYolo { session_id } => ipc::PermissionRulesResult::Reset {
+            removed: usize::from(store::disable_yolo(&session_id)),
+        },
     }
 }
 
@@ -1083,6 +1088,8 @@ fn permission_rule_infos(
                 RuleKey::NetworkHost { .. } => "networkHost",
                 RuleKey::ShellExact { .. } => "shellExact",
                 RuleKey::ShellPrefix { .. } => "shellPrefix",
+                RuleKey::ShellRelaxed => "shellRelaxed",
+                RuleKey::Yolo => "yolo",
             };
             let anchor = rule.last_used_at_ms.max(rule.created_at_ms);
             ipc::PermissionRuleInfo {
@@ -1567,23 +1574,86 @@ async fn handle_submit_confirm(
 
     // Permission memory auto-allow (spec codex-permission-remember §6): answer from stored
     // shadow rules before engaging any surface. A hit refreshes the rules' rolling retention.
-    if let Some(query) = task
-        .memory
-        .as_ref()
-        .and_then(|memory| memory.query.clone())
-        .filter(|_| task.agent_kind == "codex")
-    {
+    // Relaxed mode (D52) piggybacks here: an eligible shell request (hook-side verdict on
+    // the query) auto-allows when the global toggle or a session ShellRelaxed rule is on.
+    // YOLO mode (D53) is the last check and needs no query: any Codex permission task
+    // (memory metadata present) auto-allows while the session Yolo rule is on. Relaxed and
+    // yolo allows are audit-logged with the request substance.
+    if task.agent_kind == "codex" && task.memory.is_some() {
+        let query = task.memory.as_ref().and_then(|memory| memory.query.clone());
+        // Audit text for a YOLO allow: the concrete query target when present, else the
+        // popup summary (e.g. dangerous command popups carry no query).
+        let yolo_detail = match &query {
+            Some(crate::permission_rules::MemoryQuery::ShellCommands { commands, .. }) => commands
+                .iter()
+                .map(|argv| argv.join(" "))
+                .collect::<Vec<_>>()
+                .join(" && "),
+            Some(crate::permission_rules::MemoryQuery::FileEdit { paths }) => paths.join(", "),
+            Some(crate::permission_rules::MemoryQuery::McpTool { tool }) => tool.clone(),
+            Some(crate::permission_rules::MemoryQuery::NetworkHost {
+                host,
+                protocol,
+                port,
+            }) => format!("{protocol}://{host}:{port}"),
+            None => format!(
+                "{} — {}",
+                task.spec
+                    .context
+                    .iter()
+                    .find(|field| field.id == "tool")
+                    .map(|field| field.value.as_str())
+                    .unwrap_or("?"),
+                task.spec.detail.summary
+            ),
+        };
         let session_id = task.agent_session_id.clone();
+        let relaxed_global = state.config_snapshot().permissions.codex_relaxed_shell;
         let hit = tokio::task::spawn_blocking(move || {
-            crate::permission_rules::check_auto_allow(&session_id, &query)
+            if let Some(query) = &query {
+                if crate::permission_rules::check_auto_allow(&session_id, query) {
+                    return Some(("memory", String::new()));
+                }
+                if let crate::permission_rules::MemoryQuery::ShellCommands {
+                    commands,
+                    relaxed_eligible: true,
+                } = query
+                {
+                    if relaxed_global
+                        || crate::permission_rules::check_relaxed_auto_allow(&session_id)
+                    {
+                        let scope = if relaxed_global { "global" } else { "session" };
+                        let script = commands
+                            .iter()
+                            .map(|argv| argv.join(" "))
+                            .collect::<Vec<_>>()
+                            .join(" && ");
+                        return Some((scope, script));
+                    }
+                }
+            }
+            if crate::permission_rules::check_yolo_auto_allow(&session_id) {
+                return Some(("yolo", yolo_detail));
+            }
+            None
         })
         .await
-        .unwrap_or(false);
-        if hit {
-            log(&format!(
-                "permission memory auto-allow for session {}",
-                task.agent_session_id
-            ));
+        .unwrap_or(None);
+        if let Some((source, detail)) = hit {
+            match source {
+                "memory" => log(&format!(
+                    "permission memory auto-allow for session {}",
+                    task.agent_session_id
+                )),
+                "yolo" => log(&format!(
+                    "yolo auto-allow for session {}: {detail}",
+                    task.agent_session_id
+                )),
+                _ => log(&format!(
+                    "relaxed auto-allow ({source}) for session {}: {detail}",
+                    task.agent_session_id
+                )),
+            }
             let _ = ipc::write_msg(
                 &mut w,
                 &ServerMsg::ConfirmFinal {

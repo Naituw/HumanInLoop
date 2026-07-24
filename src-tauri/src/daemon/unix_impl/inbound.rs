@@ -1174,6 +1174,7 @@ async fn start_task_input_form(
         .into(),
         description: String::new(),
         role: crate::confirm::ActionRole::Primary,
+        variant: None,
     }];
     if !todo_confirmation {
         choices.extend(todos.iter().map(|todo| ConfirmChoice {
@@ -1181,6 +1182,7 @@ async fn start_task_input_form(
             label: task_todo_label(todo, lang),
             description: String::new(),
             role: crate::confirm::ActionRole::Default,
+            variant: None,
         }));
     }
     choices.push(ConfirmChoice {
@@ -1192,6 +1194,7 @@ async fn start_task_input_form(
         .into(),
         description: String::new(),
         role: crate::confirm::ActionRole::Destructive,
+        variant: None,
     });
     let spec = ConfirmSpec {
         title: title.into(),
@@ -1666,6 +1669,11 @@ pub(super) async fn handle_inbound(state: &Arc<ServerState>, channel_id: &str, t
         Parsed::Command(Command::TodoAuto(sel, content)) => {
             handle_todo_auto_cmd(state, channel_id, sel, content, &config, lang).await;
         }
+        // /yolo：Codex YOLO 模式管理（spec codex-permission-remember D53）。
+        Parsed::Command(Command::Yolo(sel)) => {
+            activate_channel_on_action(state, channel_id, &config, lang).await;
+            handle_yolo_cmd(state, channel_id, sel, &config, lang).await;
+        }
         Parsed::Command(Command::Help) | Parsed::UnknownCommand => {
             let has_q = has_active_question_on(state, channel_id);
             let _ = reply_channel_text(
@@ -1902,6 +1910,82 @@ pub(super) async fn reply_channel_text(
                 .map_err(|e| e.to_string())
         }
         _ => Err(format!("reply unsupported for channel: {}", channel_id)),
+    }
+}
+
+// ── /yolo（spec codex-permission-remember D53）──
+
+/// `/yolo`：列出开着 YOLO 的会话（带「关闭」按钮的选择卡）。`off <编号>` 按 Agent 编号直
+/// 关；`off` 缺省编号且恰一个开着 → 直关，多个 → 弹同一张选择卡。卡片发送失败（渠道不支
+/// 持）→ 文本列表兜底。
+pub(super) async fn handle_yolo_cmd(
+    state: &Arc<ServerState>,
+    channel_id: &str,
+    sel: crate::autochannel::YoloSel,
+    config: &AppConfig,
+    lang: Lang,
+) {
+    use crate::autochannel::YoloSel;
+    let ids = tokio::task::spawn_blocking(crate::permission_rules::yolo_session_ids)
+        .await
+        .unwrap_or_default();
+    if ids.is_empty() {
+        let _ =
+            reply_channel_text(channel_id, config, crate::i18n::tr(lang, "select.yoloNone")).await;
+        return;
+    }
+    // 直达目标：`off <编号>` 用 agent 快照解析；`off` 缺省且唯一 → 该会话。
+    // 编号解析不到（agent 已结束 / 编号漂移）→ 落到选择卡，点选兜底。
+    let direct = match sel {
+        YoloSel::Off(Some(seq)) => {
+            let snapshot = state.agents.snapshot();
+            crate::autochannel::find_by_seq(&snapshot, seq)
+                .and_then(|rec| rec.get("sessionId").and_then(|v| v.as_str()))
+                .map(str::to_string)
+        }
+        YoloSel::Off(None) if ids.len() == 1 => Some(ids[0].clone()),
+        _ => None,
+    };
+    if let Some(session_id) = direct {
+        let sid = session_id.clone();
+        let removed =
+            tokio::task::spawn_blocking(move || crate::permission_rules::disable_yolo(&sid))
+                .await
+                .unwrap_or(false);
+        let text = if removed {
+            log(&format!(
+                "yolo turned off via {channel_id} for session {session_id}"
+            ));
+            crate::i18n::tr(lang, "select.yoloOffDone")
+                .replace("{name}", &yolo_session_label(state, &session_id))
+        } else {
+            crate::i18n::tr(lang, "select.yoloOffGone").to_string()
+        };
+        let _ = reply_channel_text(channel_id, config, &text).await;
+        return;
+    }
+    let opts = yolo_options(state, &ids, lang);
+    let sent = send_agent_picker(
+        state,
+        channel_id,
+        config,
+        PickerKind::Yolo,
+        crate::select::title_yolo(lang),
+        opts,
+        None,
+        lang,
+    )
+    .await;
+    if !sent {
+        // 渠道不支持卡片：文本列表 + 用法提示兜底。
+        let mut text = crate::select::title_yolo(lang);
+        for session_id in &ids {
+            text.push_str(&format!("\n• {}", yolo_session_label(state, session_id)));
+        }
+        let prefix = crate::autochannel::cmd_prefix(channel_id);
+        text.push_str("\n\n");
+        text.push_str(&crate::i18n::tr(lang, "select.yoloOffHint").replace("{p}", prefix));
+        let _ = reply_channel_text(channel_id, config, &text).await;
     }
 }
 

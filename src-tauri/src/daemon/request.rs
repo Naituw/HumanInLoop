@@ -821,12 +821,14 @@ mod tests {
                         label: "Approve once".into(),
                         description: String::new(),
                         role: ActionRole::Primary,
+                        variant: None,
                     },
                     ConfirmChoice {
                         id: "deny".into(),
                         label: "Deny".into(),
                         description: String::new(),
                         role: ActionRole::Destructive,
+                        variant: None,
                     },
                 ],
                 presentation: ConfirmPresentation::SingleSelectSubmit {

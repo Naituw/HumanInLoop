@@ -25,7 +25,9 @@
 - 另收语音友好较长短语（如 `新建会话`、`查看状态`、`发消息`）。
 - 词表见 `autochannel::COMMAND_PHRASES`；键必须唯一（单测保证）。
 
-覆盖命令：`new`、`here`、`help`、`status`、`watch`、`unwatch`、`msg`、`diff`、`stage`、`transcript`、`todo`、`todo-rm`、`todo-auto`。
+覆盖命令：`new`、`here`、`help`、`status`、`watch`、`unwatch`、`msg`、`diff`、`stage`、`transcript`、`todo`、`todo-rm`、`todo-auto`、`yolo`。
+
+`yolo` 的全部短语（含 `关闭yolo`、`yolooff` 等关闭形态）一律指向**列表卡** `Yolo(List)`：卡上自带关闭按钮，与「仅无参形态」规则一致；按编号直关仍用斜线 `/yolo off <编号>`。
 
 ## 4. 非目标
 

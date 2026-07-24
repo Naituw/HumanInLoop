@@ -74,6 +74,21 @@ pub struct ShellWorkerOutput {
     /// The amendment came from the model's own `prefix_rule` (D38 session prefix tier).
     #[serde(default)]
     pub amendment_from_prefix_rule: bool,
+    /// Validated generalizations of `amendment` (D51): the amendment itself first, then
+    /// shorter truncations (longest to shortest) that pass the banned-prefix and
+    /// dangerous-command checks and would approve every segment (prefix hit or the
+    /// segment independently evaluates to allow). Empty iff `amendment` is None.
+    #[serde(default)]
+    pub amendment_candidates: Vec<Vec<String>>,
+    /// Per-segment (parallel to `segments`): the segment independently evaluates to
+    /// allow, i.e. it would not itself prompt (all policy matches and the heuristics
+    /// fallback agree on allow).
+    #[serde(default)]
+    pub segment_allows: Vec<bool>,
+    /// Any explicit policy rule with decision prompt matched some segment: native
+    /// prompts regardless of amendments, and relaxed mode must never auto-allow (D52).
+    #[serde(default)]
+    pub policy_prompt_any: bool,
 }
 
 impl ShellWorkerOutput {
@@ -86,6 +101,9 @@ impl ShellWorkerOutput {
             dangerous_any: false,
             amendment: None,
             amendment_from_prefix_rule: false,
+            amendment_candidates: Vec::new(),
+            segment_allows: Vec::new(),
+            policy_prompt_any: false,
         }
     }
 }
@@ -289,6 +307,22 @@ pub fn analyze(
         }
     }
 
+    // Per-segment rank: a segment "independently allows" when every decision that
+    // applies to it (policy matches plus the heuristics fallback) is allow.
+    let segment_allows: Vec<bool> = evals
+        .iter()
+        .map(|eval| {
+            eval.policy_decisions
+                .iter()
+                .map(String::as_str)
+                .chain(eval.heuristic)
+                .map(decision_rank)
+                .max()
+                .unwrap_or(1)
+                == 0
+        })
+        .collect();
+
     let decision = evals
         .iter()
         .flat_map(|eval| {
@@ -367,6 +401,31 @@ pub fn analyze(
         amendment_from_prefix_rule = false;
     }
 
+    // Candidate generalizations (D51): the amendment itself plus validated truncations.
+    // A truncation qualifies when it is not banned, not itself a dangerous command, and
+    // would approve every segment (prefix hit or the segment independently allows).
+    let mut amendment_candidates: Vec<Vec<String>> = Vec::new();
+    if let Some(base) = amendment.as_ref() {
+        amendment_candidates.push(base.clone());
+        for len in (1..base.len()).rev() {
+            let candidate = &base[..len];
+            if crate::shell_safety::is_banned_prefix(candidate)
+                || crate::shell_safety::is_dangerous_command(candidate)
+            {
+                continue;
+            }
+            let covers_all = segments
+                .iter()
+                .zip(&segment_allows)
+                .all(|(segment, allows)| {
+                    (segment.len() >= len && segment[..len] == candidate[..]) || *allows
+                });
+            if covers_all {
+                amendment_candidates.push(candidate.to_vec());
+            }
+        }
+    }
+
     ShellWorkerOutput {
         disabled_reason: None,
         segments,
@@ -375,6 +434,9 @@ pub fn analyze(
         dangerous_any,
         amendment,
         amendment_from_prefix_rule,
+        amendment_candidates,
+        segment_allows,
+        policy_prompt_any: policy_prompt,
     }
 }
 
@@ -923,6 +985,112 @@ mod tests {
         let output = analyze(&env.input("cargo build"), &checker, env.system.path());
         assert_eq!(output.decision, "prompt");
         assert_eq!(output.amendment, None);
+        assert!(output.policy_prompt_any);
+        assert!(output.amendment_candidates.is_empty());
+    }
+
+    #[test]
+    fn amendment_candidates_list_validated_truncations() {
+        let env = Env::new();
+        let checker = FakeChecker::new(Some((0, 144)));
+
+        // Single segment: every truncation is a prefix hit -> full ladder.
+        let output = analyze(
+            &env.input("cargo build --release"),
+            &checker,
+            env.system.path(),
+        );
+        let full: Vec<String> = vec!["cargo".into(), "build".into(), "--release".into()];
+        assert_eq!(output.amendment, Some(full.clone()));
+        assert_eq!(
+            output.amendment_candidates,
+            vec![
+                full,
+                vec!["cargo".to_string(), "build".to_string()],
+                vec!["cargo".to_string()],
+            ]
+        );
+        assert!(!output.policy_prompt_any);
+
+        // Banned truncations are skipped (["git"] is banned since 0.145).
+        let output = analyze(
+            &env.input("git push origin main"),
+            &checker,
+            env.system.path(),
+        );
+        assert_eq!(
+            output.amendment_candidates,
+            vec![
+                vec![
+                    "git".to_string(),
+                    "push".to_string(),
+                    "origin".to_string(),
+                    "main".to_string()
+                ],
+                vec!["git".to_string(), "push".to_string(), "origin".to_string()],
+                vec!["git".to_string(), "push".to_string()],
+            ]
+        );
+
+        // Multi-segment: a truncation must cover every segment (prefix hit or the
+        // segment allows on its own).
+        let output = analyze(
+            &env.input("cargo build && cargo test"),
+            &checker,
+            env.system.path(),
+        );
+        assert_eq!(output.amendment, Some(vec!["cargo".into(), "build".into()]));
+        assert_eq!(
+            output.amendment_candidates,
+            vec![
+                vec!["cargo".to_string(), "build".to_string()],
+                vec!["cargo".to_string()],
+            ]
+        );
+
+        // ls under override prompts on its own and is not covered by ["cargo"]:
+        // only the base amendment survives.
+        let output = analyze(&env.input("cargo build && ls"), &checker, env.system.path());
+        assert_eq!(output.segment_allows, vec![false, false]);
+        assert_eq!(
+            output.amendment_candidates,
+            vec![vec!["cargo".to_string(), "build".to_string()]]
+        );
+
+        // Under untrusted policy ls is known-safe (allows on its own), so ["cargo"]
+        // only needs to cover the cargo segment.
+        let mut input = env.input("cargo build && ls");
+        input.approval_policy = "untrusted".to_string();
+        let output = analyze(&input, &checker, env.system.path());
+        assert_eq!(output.segment_allows, vec![false, true]);
+        assert_eq!(
+            output.amendment_candidates,
+            vec![
+                vec!["cargo".to_string(), "build".to_string()],
+                vec!["cargo".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn amendment_candidates_skip_dangerous_truncations() {
+        let env = Env::new();
+        let checker = FakeChecker::new(Some((0, 144)));
+        let output = analyze(&env.input("rm -rf /tmp/x"), &checker, env.system.path());
+        // Base amendment is the prompting segment itself; ["rm"] is banned and
+        // ["rm", "-rf"] is dangerous, so no generalization is offered.
+        assert_eq!(
+            output.amendment,
+            Some(vec!["rm".into(), "-rf".into(), "/tmp/x".into()])
+        );
+        assert_eq!(
+            output.amendment_candidates,
+            vec![vec![
+                "rm".to_string(),
+                "-rf".to_string(),
+                "/tmp/x".to_string()
+            ]]
+        );
     }
 
     #[test]

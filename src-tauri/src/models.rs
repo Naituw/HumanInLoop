@@ -309,6 +309,27 @@ pub struct ConfirmChoice {
     #[serde(default)]
     pub description: String,
     pub role: crate::confirm::ActionRole,
+    /// Prefix-tier variant metadata (D51). Choices sharing a `group` are one logical
+    /// action at different generalization levels: the popup collapses them into a
+    /// single row with a shared level selector, every other surface renders only the
+    /// `recommended` variant. `None` for plain choices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<ChoiceVariant>,
+}
+
+/// See [`ConfirmChoice::variant`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChoiceVariant {
+    /// Logical action key shared by all levels (e.g. "shell-prefix-session").
+    pub group: String,
+    /// Ladder position; the same level index selects together across groups.
+    pub level: usize,
+    /// Short selector label for this level (the truncated prefix text).
+    pub level_label: String,
+    /// The auto-recommended level (smart 2-token, D51): the only variant that
+    /// non-popup surfaces show.
+    pub recommended: bool,
 }
 
 /// Optional input attached to a structured choice form.
@@ -832,12 +853,14 @@ mod tests {
                     label: "Approve once".into(),
                     description: String::new(),
                     role: crate::confirm::ActionRole::Primary,
+                    variant: None,
                 },
                 ConfirmChoice {
                     id: "deny".into(),
                     label: "Deny".into(),
                     description: String::new(),
                     role: crate::confirm::ActionRole::Destructive,
+                    variant: None,
                 },
             ],
             presentation: ConfirmPresentation::SingleSelectSubmit {
@@ -982,6 +1005,7 @@ mod tests {
                 label: "Project TODO".into(),
                 description: String::new(),
                 role: crate::confirm::ActionRole::Default,
+                variant: None,
             },
         );
         match &mut spec.presentation {

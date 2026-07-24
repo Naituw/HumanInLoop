@@ -72,17 +72,36 @@ pub(crate) fn is_task_input_form(request: &ConfirmRequest) -> bool {
     })
 }
 
+/// Prefix-tier variants (D51): cards have no level selector, so only the recommended
+/// variant of each group is visible on card surfaces.
+fn variant_visible(choice: &crate::models::ConfirmChoice) -> bool {
+    choice
+        .variant
+        .as_ref()
+        .is_none_or(|variant| variant.recommended)
+}
+
 /// Task forms hide their implementation-only start/cancel actions. When TODO choices are
 /// present, expose the manual action plus every non-destructive TODO action.
+///
+/// Returned values stay wire indices into the full choices list (non-recommended
+/// prefix-tier variants are skipped), so callback resolution is unaffected.
 pub(crate) fn task_choice_indices(request: &ConfirmRequest) -> Vec<usize> {
     if !is_task_input_form(request) {
-        return (0..request.choices.len()).collect();
+        return request
+            .choices
+            .iter()
+            .enumerate()
+            .filter_map(|(index, choice)| variant_visible(choice).then_some(index))
+            .collect();
     }
     let indices: Vec<_> = request
         .choices
         .iter()
         .enumerate()
-        .filter_map(|(index, choice)| (choice.role != ActionRole::Destructive).then_some(index))
+        .filter_map(|(index, choice)| {
+            (choice.role != ActionRole::Destructive && variant_visible(choice)).then_some(index)
+        })
         .collect();
     if indices.len() > 1 {
         indices
@@ -369,23 +388,23 @@ pub fn slack_blocks(
         }
     }
 
+    let choice_indices = task_choice_indices(request);
+
     // Security-relevant scope details stay static and untruncated by radio option limits.
-    for choice in request
-        .choices
-        .iter()
-        .filter(|_| !is_task_input_form(request))
-    {
-        let inline_detail = choice.description.replace('\n', " · ");
-        if inline_detail.chars().count() > 75 || choice.label.chars().count() > 75 {
-            let mut detail = format!("*{}*", slack_escape(&choice.label));
-            if !choice.description.trim().is_empty() {
-                detail.push_str(&format!("\n{}", slack_escape(&choice.description)));
+    if !is_task_input_form(request) {
+        for index in &choice_indices {
+            let choice = &request.choices[*index];
+            let inline_detail = choice.description.replace('\n', " · ");
+            if inline_detail.chars().count() > 75 || choice.label.chars().count() > 75 {
+                let mut detail = format!("*{}*", slack_escape(&choice.label));
+                if !choice.description.trim().is_empty() {
+                    detail.push_str(&format!("\n{}", slack_escape(&choice.description)));
+                }
+                blocks.push(crate::slack::blockkit::mrkdwn_section(&detail));
             }
-            blocks.push(crate::slack::blockkit::mrkdwn_section(&detail));
         }
     }
 
-    let choice_indices = task_choice_indices(request);
     let options: Vec<Value> = choice_indices
         .iter()
         .map(|index| {
@@ -599,19 +618,19 @@ pub fn telegram_html(
         }
     }
     let full_labels = telegram_uses_full_labels(request);
-    let show_choice_list = !full_labels
-        || request
-            .choices
-            .iter()
-            .any(|choice| !choice.description.trim().is_empty());
     let choice_indices = task_choice_indices(request);
+    let show_choice_list = !full_labels
+        || choice_indices
+            .iter()
+            .any(|index| !request.choices[*index].description.trim().is_empty());
     if show_choice_list && (!is_task_input_form(request) || !choice_indices.is_empty()) {
-        for index in choice_indices {
+        // Numbered markers follow the visible position (keyboard buttons match).
+        for (position, index) in choice_indices.into_iter().enumerate() {
             let choice = &request.choices[index];
             let marker = if full_labels {
                 "•".to_string()
             } else {
-                crate::channels::telegram::option_label(index)
+                crate::channels::telegram::option_label(position)
             };
             out.push_str(&format!(
                 "\n\n{} <b>{}</b>",
@@ -658,13 +677,17 @@ pub fn telegram_html(
 }
 
 fn telegram_uses_full_labels(request: &ConfirmRequest) -> bool {
-    request.choices.len() <= 3
-        && request
-            .choices
+    // Same visibility set as telegram_keyboard (variant filter only).
+    let visible: Vec<&crate::models::ConfirmChoice> = request
+        .choices
+        .iter()
+        .filter(|choice| variant_visible(choice))
+        .collect();
+    visible.len() <= 3
+        && visible
             .iter()
             .all(|choice| choice.label.chars().count() <= 12)
-        && request
-            .choices
+        && visible
             .iter()
             .map(|choice| choice.label.chars().count())
             .sum::<usize>()
@@ -672,24 +695,35 @@ fn telegram_uses_full_labels(request: &ConfirmRequest) -> bool {
 }
 
 pub fn telegram_keyboard(request: &ConfirmRequest, selected: Option<usize>) -> Value {
-    let indices: Vec<usize> = (0..request.choices.len()).collect();
+    // Task forms keep every actionable button (the html list is hidden instead), so
+    // only non-recommended prefix-tier variants are skipped here. Buttons show visible
+    // positions; callbacks carry the wire index (pc:do:<wire>), so hidden variants
+    // never shift submission resolution.
+    let indices: Vec<usize> = request
+        .choices
+        .iter()
+        .enumerate()
+        .filter_map(|(index, choice)| variant_visible(choice).then_some(index))
+        .collect();
     let full_labels = telegram_uses_full_labels(request);
     let width = if full_labels {
-        request.choices.len().max(1)
+        indices.len().max(1)
     } else {
         crate::channels::telegram::KEYBOARD_ROW_WIDTH
     };
     let mut rows = indices
         .chunks(width)
-        .map(|indices| {
+        .enumerate()
+        .map(|(chunk_position, indices)| {
             Value::Array(
             indices
                 .iter()
-                .map(|index| {
+                .enumerate()
+                .map(|(offset, index)| {
                     let label = if full_labels {
                         request.choices[*index].label.clone()
                     } else {
-                        crate::channels::telegram::option_label(*index)
+                        crate::channels::telegram::option_label(chunk_position * width + offset)
                     };
                     json!({
                         "text": if selected == Some(*index) { format!("✅ {label}") } else { label },
@@ -747,12 +781,14 @@ mod tests {
                     label: "A".repeat(100),
                     description: "full scope".into(),
                     role: ActionRole::Primary,
+                    variant: None,
                 },
                 ConfirmChoice {
                     id: "deny".into(),
                     label: "Deny".into(),
                     description: String::new(),
                     role: ActionRole::Destructive,
+                    variant: None,
                 },
             ],
             presentation: ConfirmPresentation::SingleSelectSubmit {
@@ -821,6 +857,7 @@ mod tests {
                 label: "Run todo: ⚡ Project TODO".into(),
                 description: String::new(),
                 role: ActionRole::Default,
+                variant: None,
             },
         );
         let input = match &mut request.presentation {
@@ -842,6 +879,84 @@ mod tests {
         assert!(slack.contains("⚡ Project TODO"));
         assert!(!slack.contains("Deny"));
         assert!(slack.contains("extra"));
+    }
+
+    /// Permission request with two prefix-tier groups × 2 levels (D51):
+    /// [approve, prefix:0(level0), prefix(level1, recommended), always:0, always, deny].
+    fn variant_request() -> ConfirmRequest {
+        let variant = |group: &str, level: usize, recommended: bool| {
+            Some(crate::models::ChoiceVariant {
+                group: group.into(),
+                level,
+                level_label: if level == 0 { "cargo" } else { "cargo build" }.into(),
+                recommended,
+            })
+        };
+        let mut request = request();
+        let deny = request.choices.pop().unwrap();
+        request.choices[0].label = "Approve once".into();
+        request.choices[0].description = String::new();
+        for (id, label, meta) in [
+            (
+                "remember_shell_prefix:1",
+                "Session cargo",
+                variant("shell-prefix-session", 0, false),
+            ),
+            (
+                "remember_shell_prefix",
+                "Session cargo build",
+                variant("shell-prefix-session", 1, true),
+            ),
+            (
+                "remember_shell_always:1",
+                "Always cargo",
+                variant("shell-prefix-always", 0, false),
+            ),
+            (
+                "remember_shell_always",
+                "Always cargo build",
+                variant("shell-prefix-always", 1, true),
+            ),
+        ] {
+            request.choices.push(ConfirmChoice {
+                id: id.into(),
+                label: label.into(),
+                description: String::new(),
+                role: ActionRole::Default,
+                variant: meta,
+            });
+        }
+        request.choices.push(deny);
+        request
+    }
+
+    #[test]
+    fn cards_show_only_recommended_prefix_variants_with_wire_callbacks() {
+        let request = variant_request();
+        // Visible: approve(0), recommended session(2), recommended always(4), deny(5).
+        assert_eq!(task_choice_indices(&request), vec![0, 2, 4, 5]);
+
+        let keyboard = telegram_keyboard(&request, None).to_string();
+        assert!(keyboard.contains("pc:do:0"));
+        assert!(keyboard.contains("pc:do:2"));
+        assert!(keyboard.contains("pc:do:4"));
+        assert!(keyboard.contains("pc:do:5"));
+        assert!(!keyboard.contains("pc:do:1"));
+        assert!(!keyboard.contains("pc:do:3"));
+        // Numbered button labels follow visible positions (no gaps).
+        assert!(keyboard.contains("4\u{fe0f}\u{20e3}"));
+        assert!(!keyboard.contains("6\u{fe0f}\u{20e3}"));
+        let html = telegram_html(&request, None, "", None, Lang::En);
+        assert!(html.contains("Session cargo build"));
+        assert!(!html.contains(">Session cargo<"));
+
+        let slack = slack_blocks(&request, None, "", Lang::En).to_string();
+        assert!(slack.contains("Session cargo build"));
+        assert!(!slack.contains("\"Session cargo\""));
+
+        let feishu = feishu_card(&request, None, "", Lang::En).to_string();
+        assert!(feishu.contains("confirm_choice_2"));
+        assert!(!feishu.contains("confirm_choice_1"));
     }
 
     #[test]

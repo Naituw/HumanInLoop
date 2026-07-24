@@ -13,6 +13,10 @@ const {
   showConfirmInput,
   confirmDetailHtml,
   confirmToolName,
+  confirmRows,
+  confirmVariantLevel,
+  confirmVariantLevels,
+  selectConfirmVariantLevel,
   permissionEdit,
   permissionDiff,
   permissionDiffLoading,
@@ -55,27 +59,45 @@ const {
       ></div>
     </section>
     <div class="confirm-options" role="radiogroup" :aria-label="confirmRequest.title">
+      <!-- 前缀档位选择器（D51）：所有档位 group 共享；切档实时更新下方选项文案。 -->
+      <div v-if="confirmVariantLevels.length" class="confirm-variant-bar">
+        <span class="confirm-variant-title">{{ t("popup.prefixLevel") }}</span>
+        <div class="confirm-variant-segments" role="tablist">
+          <button
+            v-for="entry in confirmVariantLevels"
+            :key="entry.level"
+            type="button"
+            class="confirm-variant-segment"
+            :class="{ active: confirmVariantLevel === entry.level }"
+            role="tab"
+            :aria-selected="confirmVariantLevel === entry.level"
+            @click="selectConfirmVariantLevel(entry.level)"
+          >
+            <code>{{ entry.label }}</code>
+          </button>
+        </div>
+      </div>
       <div
-        v-for="(choice, index) in confirmRequest.choices"
-        :key="choice.id"
+        v-for="(row, rowPosition) in confirmRows"
+        :key="row.group ?? row.choice.id"
         class="option single confirm-option"
         :class="[
-          `role-${choice.role}`,
-          { selected: confirmChoiceIndex === index },
+          `role-${row.choice.role}`,
+          { selected: confirmChoiceIndex === row.index },
         ]"
         role="radio"
         tabindex="0"
-        :aria-checked="confirmChoiceIndex === index"
-        @click="selectConfirmChoice(index)"
-        @keydown.enter.prevent="selectConfirmChoice(index)"
-        @keydown.space.prevent="selectConfirmChoice(index)"
+        :aria-checked="confirmChoiceIndex === row.index"
+        @click="selectConfirmChoice(row.index)"
+        @keydown.enter.prevent="selectConfirmChoice(row.index)"
+        @keydown.space.prevent="selectConfirmChoice(row.index)"
       >
         <span class="check radio" aria-hidden="true"></span>
         <span class="label confirm-option-label">
-          <span>{{ choice.label }}</span>
-          <small v-if="choice.description">{{ choice.description }}</small>
+          <span>{{ row.choice.label }}</span>
+          <small v-if="row.choice.description">{{ row.choice.description }}</small>
         </span>
-        <kbd v-if="index < 9" class="opt-sc">⌘{{ index + 1 }}</kbd>
+        <kbd v-if="rowPosition < 9" class="opt-sc">⌘{{ rowPosition + 1 }}</kbd>
       </div>
     </div>
     <label v-if="showConfirmInput && confirmInput" class="confirm-input-block">

@@ -7,10 +7,11 @@
 
 权限记忆功能复刻了 Codex 的 Shell 判定逻辑（`src-tauri/src/shell_safety.rs` +
 `permission_shell.rs`）。版本门控只设下限（`VERIFIED_CODEX_VERSION_FLOOR` = **0.122**，
-hook 引入版）；`VERIFIED_CODEX_VERSION_CEILING`（当前 **0.145**-alpha，对拍来源 Codex commit
-`6bd3f5e3db`，2026-07-18）是最近一次逐行对拍的版本，用户装机超出它时功能**保持启用**、
-worker stderr 记一条日志。因此同步不再是紧急事项，但仍需**定期**（Codex 新 minor 发布后）
-对拍以下上游文件并抬升已审计版本（相对 codex-rs/）：
+hook 引入版）；`VERIFIED_CODEX_VERSION_CEILING`（当前 **0.146**，对拍来源 Codex upstream
+main `1a817bb95d`，2026-07-24；同批吸收 0.145.0 的 #34271 禁选前缀扩容与 #32232
+hook-before-guardian 语义，见 spec D50-D53）是最近一次逐行对拍的版本，用户装机超出它时
+功能**保持启用**、worker stderr 记一条日志。因此同步不再是紧急事项，但仍需**定期**
+（Codex 新 minor 发布后）对拍以下上游文件并抬升已审计版本（相对 codex-rs/）：
 
 - `shell-command/src/bash.rs`（`bash -lc` 脚本拆分）
 - `shell-command/src/command_safety/is_safe_command.rs`、`is_dangerous_command.rs`（heuristics）

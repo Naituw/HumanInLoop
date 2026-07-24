@@ -443,12 +443,23 @@ pub enum AgentTaskPermission {
     Yolo,
 }
 
+/// 权限确认相关全局设置（spec codex-permission-remember）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PermissionsConfig {
+    /// Codex shell 宽松模式全局开关（D52）：非危险且可解析的 shell 命令自动放行，
+    /// 命中危险清单 / 原生 prompt 规则 / 拆不开的脚本仍然弹窗。默认关。
+    pub codex_relaxed_shell: bool,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AppConfig {
     pub general: GeneralConfig,
     pub channels: ChannelsConfig,
     pub agent_tasks: AgentTasksConfig,
+    /// 权限确认设置（宽松模式全局开关等）。
+    pub permissions: PermissionsConfig,
     /// 实验性功能开关区（spec D15）。
     pub experimental: ExperimentalConfig,
 }

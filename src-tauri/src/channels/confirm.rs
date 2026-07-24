@@ -48,13 +48,10 @@ fn input_limit_warning(request: &crate::models::ConfirmRequest, lang: Lang) -> S
 fn final_status(entry: &ConfirmEntry, lang: Lang) -> String {
     match entry.coordinator.terminal_kind() {
         Some(ConfirmTerminalKind::Decision(result)) => {
-            let denied = entry
-                .request
-                .choices
-                .iter()
-                .find(|choice| choice.id == result.action_id)
-                .map(|choice| choice.role == crate::confirm::ActionRole::Destructive)
-                .unwrap_or(false);
+            // Denied = the dismiss action, not any Destructive-styled choice: broad
+            // grants (full disk, relaxed mode) reuse Destructive purely for danger
+            // styling and must not read as a denial.
+            let denied = result.action_id == entry.request.dismiss_action_id;
             let source = source_name(&result.source_channel_id, lang);
             let task_input = entry
                 .request
@@ -79,6 +76,13 @@ fn final_status(entry: &ConfirmEntry, lang: Lang) -> String {
                 status.push_str(match lang {
                     Lang::Zh => "（本次已允许，但未能保存授权）",
                     Lang::En => " (allowed this time, but saving the grant failed)",
+                });
+            } else if result.action_id == "remember_yolo" {
+                // YOLO enabled from an IM card (D53): the session stops popping up, so the
+                // finalized card is the last surface — attach the off hint here.
+                status.push_str(match lang {
+                    Lang::Zh => "（YOLO 已开启，发送 /yolo 可随时关闭）",
+                    Lang::En => " (YOLO on; send /yolo to turn it off anytime)",
                 });
             }
             status
@@ -227,6 +231,8 @@ async fn keep_dingtalk_tombstone(
 
 fn dingtalk_param_map(request: &crate::models::ConfirmRequest, lang: Lang) -> serde_json::Value {
     let task_input = choice_cards::is_task_input_form(request);
+    // Card option ids are positions in this visible list; dingtalk_wire_index translates
+    // them back to wire indices on submit (D51: hidden variants are skipped).
     let task_choice_indices = choice_cards::task_choice_indices(request);
     let options: Vec<crate::models::OptionItem> = if task_input {
         task_choice_indices
@@ -241,10 +247,10 @@ fn dingtalk_param_map(request: &crate::models::ConfirmRequest, lang: Lang) -> se
             })
             .collect()
     } else {
-        request
-            .choices
+        task_choice_indices
             .iter()
-            .map(|choice| {
+            .map(|index| {
+                let choice = &request.choices[*index];
                 let text = if choice.description.trim().is_empty() {
                     choice.label.clone()
                 } else {
@@ -299,7 +305,15 @@ fn dingtalk_param_map(request: &crate::models::ConfirmRequest, lang: Lang) -> se
             map.remove("allow_input");
         }
     }
-    public["deny_index"] = serde_json::Value::String(request.dismiss_index().to_string());
+    // The template compares selected option ids (positions in the visible list) against
+    // deny_index, so translate the dismiss wire index to its visible position. Task
+    // cards exclude the dismiss action from options; keep the wire index there (no
+    // position can match, same as before).
+    let deny_index = task_choice_indices
+        .iter()
+        .position(|index| *index == request.dismiss_index())
+        .unwrap_or_else(|| request.dismiss_index());
+    public["deny_index"] = serde_json::Value::String(deny_index.to_string());
     let input = request.presentation.input();
     public["reason_label"] = serde_json::Value::String(
         input
@@ -408,7 +422,11 @@ pub fn start_dingtalk(
                             let _ = ack.send(serde_json::json!({}));
                             continue;
                         }
-                        let index = submit.selected_indices.first().copied()
+                        // Card option ids are positions in the visible list sent by
+                        // dingtalk_param_map; translate back to wire indices (D51).
+                        let visible = choice_cards::task_choice_indices(&entry.request);
+                        let index = submit.selected_indices.first()
+                            .and_then(|position| visible.get(*position).copied())
                             .or_else(|| entry.request.choice_form_view().default_index);
                         let Some(index) = index else {
                             let _ = ack.send(serde_json::json!({}));
@@ -937,18 +955,21 @@ mod tests {
                     label: "Approve once".into(),
                     description: String::new(),
                     role: crate::confirm::ActionRole::Primary,
+                    variant: None,
                 },
                 ConfirmChoice {
                     id: "permission_suggestion_0".into(),
                     label: "Update permission".into(),
                     description: "Session".into(),
                     role: crate::confirm::ActionRole::Default,
+                    variant: None,
                 },
                 ConfirmChoice {
                     id: "deny".into(),
                     label: "Deny".into(),
                     description: String::new(),
                     role: crate::confirm::ActionRole::Destructive,
+                    variant: None,
                 },
             ],
             presentation: ConfirmPresentation::SingleSelectSubmit {
@@ -1008,12 +1029,14 @@ mod tests {
                     label: "Start".into(),
                     description: String::new(),
                     role: crate::confirm::ActionRole::Primary,
+                    variant: None,
                 },
                 ConfirmChoice {
                     id: "cancel".into(),
                     label: "Cancel".into(),
                     description: String::new(),
                     role: crate::confirm::ActionRole::Destructive,
+                    variant: None,
                 },
             ],
             presentation: ConfirmPresentation::SingleSelectSubmit {
@@ -1058,6 +1081,7 @@ mod tests {
                 label: "Run todo: ⚡ Project TODO".into(),
                 description: String::new(),
                 role: crate::confirm::ActionRole::Default,
+                variant: None,
             },
         );
         let input = match &mut todo_request.presentation {

@@ -28,6 +28,7 @@ export default {
     },
     recommended: "推荐",
     permissionReason: "理由：",
+    prefixLevel: "前缀档位",
     permissionDiff: {
       title: "拟议变更",
       files: "{n} 个文件",
@@ -216,6 +217,13 @@ export default {
       kindNetworkHost: "网络主机",
       kindShellExact: "Shell 命令",
       kindShellPrefix: "Shell 前缀",
+      kindShellRelaxed: "宽松模式（只审危险命令）",
+      kindYolo: "YOLO 模式（自动允许一切）",
+      scopeYolo: "YOLO 模式",
+      yoloOff: "关闭 YOLO",
+      relaxedTitle: "宽松模式：只审危险命令（全局）",
+      relaxedDesc:
+        "对所有 Codex 对话生效：非危险且可解析的 shell 命令自动放行，命中危险清单（rm、dd、git reset --hard 等）、原生 prompt 规则或无法解析的脚本仍会弹窗。每次自动放行都会记录审计日志。",
     },
     appearance: {
       title: "外观",

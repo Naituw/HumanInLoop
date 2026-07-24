@@ -41,7 +41,7 @@ fn button_style(action: SelectAction) -> Option<&'static str> {
         | SelectAction::Transcript
         | SelectAction::Todo
         | SelectAction::TodoAutoEntry => None,
-        SelectAction::Unwatch | SelectAction::TodoRmEntry => Some("danger"),
+        SelectAction::Unwatch | SelectAction::TodoRmEntry | SelectAction::Yolo => Some("danger"),
     }
 }
 

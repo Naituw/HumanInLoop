@@ -26,6 +26,8 @@ pub const ACTION_NETWORK_ALWAYS: &str = "remember_network_always";
 pub const ACTION_SHELL_SESSION: &str = "remember_shell_session";
 pub const ACTION_SHELL_PREFIX: &str = "remember_shell_prefix";
 pub const ACTION_SHELL_ALWAYS: &str = "remember_shell_always";
+pub const ACTION_SHELL_RELAXED: &str = "remember_shell_relaxed";
+pub const ACTION_YOLO: &str = "remember_yolo";
 
 /// Outcome of the hook-side analysis.
 pub enum Analysis {
@@ -106,9 +108,11 @@ pub fn analyze_codex_with(input: &Value, zh: bool, shell_runner: ShellRunner<'_>
         return Analysis::Basic;
     };
 
-    // Guardian / strict_auto_review gate (D36/D43): memory options and auto-allow require a
-    // successful rollout read proving the reviewer is the user and no request_permissions
-    // FunctionCall exists in the current turn. A proven guardian route suppresses the popup
+    // Guardian gate (D36, D43 relaxed per D50): memory options and auto-allow require a
+    // successful rollout read proving the reviewer is the user. Upstream (#32232, in
+    // 0.145.0) now runs permission hooks before the automated reviewer and treats a hook
+    // decision as final even under turn-level strict auto-review, so request_permissions
+    // activity no longer disables memory. A proven guardian route suppresses the popup
     // entirely; anything unprovable keeps the basic popup.
     let owner_command = match &pending {
         Pending::Network(target) => Some(target.command.as_str()),
@@ -207,6 +211,7 @@ fn file_edit_enhancement(
         },
         description: session_note.to_string(),
         role: ActionRole::Default,
+        variant: None,
     });
     saves.push(MemorySave {
         action_id: ACTION_REMEMBER_FILES.into(),
@@ -235,6 +240,7 @@ fn file_edit_enhancement(
                 },
                 description: format!("{session_note} · {root}"),
                 role: ActionRole::Default,
+                variant: None,
             });
             saves.push(MemorySave {
                 action_id: ACTION_REMEMBER_PROJECT.into(),
@@ -254,6 +260,7 @@ fn file_edit_enhancement(
                 // Danger styling comes from the Destructive role (§4.3).
                 description: session_note.to_string(),
                 role: ActionRole::Destructive,
+                variant: None,
             });
             saves.push(MemorySave {
                 action_id: ACTION_REMEMBER_DISK.into(),
@@ -356,6 +363,7 @@ fn mcp_enhancement_at(
         },
         description: session_note.to_string(),
         role: ActionRole::Default,
+        variant: None,
     }];
     let mut saves = vec![MemorySave {
         action_id: ACTION_MCP_SESSION.into(),
@@ -381,6 +389,7 @@ fn mcp_enhancement_at(
                 },
                 description: config_path.to_string_lossy().to_string(),
                 role: ActionRole::Default,
+                variant: None,
             });
             saves.push(MemorySave {
                 action_id: ACTION_MCP_ALWAYS.into(),
@@ -411,6 +420,7 @@ fn mcp_enhancement_at(
                     "Applies across conversations; expires after 30 days unused".into()
                 },
                 role: ActionRole::Default,
+                variant: None,
             });
             saves.push(MemorySave {
                 action_id: ACTION_MCP_ALWAYS.into(),
@@ -1123,6 +1133,7 @@ fn network_enhancement(
                 target.protocol, target.port
             ),
             role: ActionRole::Default,
+            variant: None,
         },
         ConfirmChoice {
             id: ACTION_NETWORK_ALWAYS.into(),
@@ -1134,6 +1145,7 @@ fn network_enhancement(
             // The native network_rule is host+protocol wide (any port).
             description: format!("{}://{host}", target.protocol),
             role: ActionRole::Default,
+            variant: None,
         },
     ];
     let saves = vec![
@@ -1282,29 +1294,77 @@ fn shell_enhancement(
     let mut saves: Vec<MemorySave> = Vec::new();
     let mut query = None;
 
+    // Relaxed-mode eligibility (D52): splittable (segments exist here), no native
+    // prompt/forbidden hit, and no segment on either dangerous list. Rides on the
+    // query so the daemon can honor an active relaxed grant without re-parsing.
+    let relaxed_eligible = !output.policy_prompt_any
+        && !output.dangerous_any
+        && !output
+            .segments
+            .iter()
+            .any(|segment| crate::shell_safety::is_relaxed_dangerous_command(segment));
+
+    // Prefix generalization ladder (D51): worker-validated candidates, base amendment
+    // first then progressively shorter truncations. Levels run shortest-first in the
+    // selector; the smart 2-token recommendation keeps the unsuffixed action ids so IM
+    // cards and history rendering stay on the recommended tier.
+    let candidates = &output.amendment_candidates;
+    let recommended = if candidates.is_empty() {
+        0
+    } else {
+        recommended_candidate_index(candidates)
+    };
+    let ladder: Vec<(usize, &Vec<String>)> = candidates
+        .iter()
+        .enumerate()
+        .rev() // shortest first
+        .collect();
+    let variant_for = |group: &str, index: usize, level: usize| {
+        // Single-candidate ladders collapse to today's plain single choice.
+        (candidates.len() > 1).then(|| crate::models::ChoiceVariant {
+            group: group.to_string(),
+            level,
+            level_label: level_label(&candidates[index]),
+            recommended: index == recommended,
+        })
+    };
+    let action_id = |base: &str, index: usize| {
+        if index == recommended {
+            base.to_string()
+        } else {
+            format!("{base}:{index}")
+        }
+    };
+
     // Session tier and the auto-allow query are gated on the dangerous list (D38).
     // Prefix-first (D38 refined 2026-07-18): the prefix shares its source and validation
     // with the permanent amendment; the exact-commands tier only appears as a fallback
     // when no prefix could be derived.
     if !output.dangerous_any {
-        if let Some(prefix) = output.amendment.clone() {
-            let prefix_text = prefix.join(" ");
-            extra_choices.push(ConfirmChoice {
-                id: ACTION_SHELL_PREFIX.into(),
-                label: if zh {
-                    format!("本对话允许 {prefix_text} 开头的命令")
-                } else {
-                    format!("Allow commands starting with {prefix_text} this conversation")
-                },
-                description: session_note.to_string(),
-                role: ActionRole::Default,
-            });
-            saves.push(MemorySave {
-                action_id: ACTION_SHELL_PREFIX.into(),
-                namespace: RuleNamespace::Session,
-                rules: vec![RuleKey::ShellPrefix { prefix }],
-                native: None,
-            });
+        if !candidates.is_empty() {
+            for (level, (index, prefix)) in ladder.iter().enumerate() {
+                let id = action_id(ACTION_SHELL_PREFIX, *index);
+                let prefix_text = prefix.join(" ");
+                extra_choices.push(ConfirmChoice {
+                    id: id.clone(),
+                    label: if zh {
+                        format!("本对话允许 {prefix_text} 开头的命令")
+                    } else {
+                        format!("Allow commands starting with {prefix_text} this conversation")
+                    },
+                    description: session_note.to_string(),
+                    role: ActionRole::Default,
+                    variant: variant_for("shell-prefix-session", *index, level),
+                });
+                saves.push(MemorySave {
+                    action_id: id,
+                    namespace: RuleNamespace::Session,
+                    rules: vec![RuleKey::ShellPrefix {
+                        prefix: (*prefix).clone(),
+                    }],
+                    native: None,
+                });
+            }
         } else {
             let preview = shell_segments_preview(&output.segments);
             extra_choices.push(ConfirmChoice {
@@ -1316,6 +1376,7 @@ fn shell_enhancement(
                 },
                 description: format!("{session_note} · {preview}"),
                 role: ActionRole::Default,
+                variant: None,
             });
             saves.push(MemorySave {
                 action_id: ACTION_SHELL_SESSION.into(),
@@ -1330,6 +1391,7 @@ fn shell_enhancement(
         }
         query = Some(MemoryQuery::ShellCommands {
             commands: output.segments.clone(),
+            relaxed_eligible,
         });
     }
 
@@ -1337,36 +1399,104 @@ fn shell_enhancement(
     // whenever the native amendment derivation proposes a prefix (D18 baseline). No
     // session bridge: default.rules is the single source of truth and is re-read on the
     // next request (D28).
-    if let Some(prefix) = output.amendment.clone() {
+    if !candidates.is_empty() {
         if let Some(home) = default_codex_home() {
             let rules_path = home.join("rules/default.rules");
-            let prefix_text = prefix.join(" ");
-            extra_choices.push(ConfirmChoice {
-                id: ACTION_SHELL_ALWAYS.into(),
-                label: if zh {
-                    format!("始终允许 {prefix_text} 开头的命令")
-                } else {
-                    format!("Always allow commands starting with {prefix_text}")
-                },
-                description: prefix_text,
-                role: ActionRole::Default,
-            });
-            saves.push(MemorySave {
-                action_id: ACTION_SHELL_ALWAYS.into(),
-                namespace: RuleNamespace::Session,
-                rules: Vec::new(),
-                native: Some(NativeWrite::PrefixRule {
-                    rules_path: rules_path.to_string_lossy().to_string(),
-                    prefix,
-                }),
-            });
+            for (level, (index, prefix)) in ladder.iter().enumerate() {
+                let id = action_id(ACTION_SHELL_ALWAYS, *index);
+                let prefix_text = prefix.join(" ");
+                extra_choices.push(ConfirmChoice {
+                    id: id.clone(),
+                    label: if zh {
+                        format!("始终允许 {prefix_text} 开头的命令")
+                    } else {
+                        format!("Always allow commands starting with {prefix_text}")
+                    },
+                    description: prefix_text,
+                    role: ActionRole::Default,
+                    variant: variant_for("shell-prefix-always", *index, level),
+                });
+                saves.push(MemorySave {
+                    action_id: id,
+                    namespace: RuleNamespace::Session,
+                    rules: Vec::new(),
+                    native: Some(NativeWrite::PrefixRule {
+                        rules_path: rules_path.to_string_lossy().to_string(),
+                        prefix: (*prefix).clone(),
+                    }),
+                });
+            }
         }
+    }
+
+    // Relaxed mode session opt-in (D52): offered on eligible (non-dangerous, splittable)
+    // shell popups. Once saved, future eligible requests auto-allow daemon-side, so an
+    // active grant never re-renders this choice. Destructive role = danger styling.
+    if relaxed_eligible {
+        extra_choices.push(ConfirmChoice {
+            id: ACTION_SHELL_RELAXED.into(),
+            label: if zh {
+                "本对话开启宽松模式：只审危险命令".into()
+            } else {
+                "Relaxed mode this conversation: only audit dangerous commands".into()
+            },
+            description: if zh {
+                format!("{session_note} · 非危险且可解析的 shell 命令自动放行")
+            } else {
+                format!("{session_note} · non-dangerous parseable shell commands auto-allow")
+            },
+            role: ActionRole::Destructive,
+            variant: None,
+        });
+        saves.push(MemorySave {
+            action_id: ACTION_SHELL_RELAXED.into(),
+            namespace: RuleNamespace::Session,
+            rules: vec![RuleKey::ShellRelaxed],
+            native: None,
+        });
     }
 
     if saves.is_empty() {
         return ShellOutcome::Basic;
     }
     ShellOutcome::Enhanced((PermissionMemory { query, saves }, extra_choices))
+}
+
+/// Smart recommended ladder entry (D51, Q3): command + subcommand when the second token
+/// of the base amendment looks like a subcommand word; otherwise the bare command.
+/// When that exact length was filtered out (banned/dangerous/uncovered), escalate to the
+/// shortest longer candidate rather than a broader one, ultimately the base amendment.
+/// `candidates` is base-first with strictly decreasing lengths and never empty.
+fn recommended_candidate_index(candidates: &[Vec<String>]) -> usize {
+    let base = &candidates[0];
+    let desired = if base.len() >= 2 && subcommand_like(&base[1]) {
+        2
+    } else {
+        1
+    };
+    let mut best = 0;
+    for (index, candidate) in candidates.iter().enumerate() {
+        if candidate.len() >= desired {
+            best = index;
+        }
+    }
+    best
+}
+
+/// A token that reads like a subcommand: not an option flag, not a path, not a number.
+fn subcommand_like(token: &str) -> bool {
+    !token.starts_with('-') && !token.contains('/') && token.parse::<f64>().is_err()
+}
+
+/// Short selector label for one ladder level.
+fn level_label(prefix: &[String]) -> String {
+    const MAX_LABEL: usize = 48;
+    let text = prefix.join(" ");
+    if text.chars().count() > MAX_LABEL {
+        text.chars().take(MAX_LABEL).collect::<String>() + "…"
+    } else {
+        text
+    }
 }
 
 /// Short human preview of split segments for the exact-tier subtext.
@@ -1388,7 +1518,8 @@ fn shell_segments_preview(segments: &[Vec<String>]) -> String {
 enum RolloutGate {
     /// TurnContextItem proves guardian routing: reviewer=auto_review + policy on-request/granular.
     GuardianProven,
-    /// Reviewer is the user and no request_permissions FunctionCall in the current turn.
+    /// Reviewer is the user (turn-level strict auto-review no longer disables memory:
+    /// upstream #32232 makes hook decisions authoritative before the automated reviewer).
     MemoryAllowed,
     /// Anything else: unreadable rollout, missing turn context, unknown schema.
     Unproven,
@@ -1429,7 +1560,6 @@ struct OwnerCall {
 
 struct RolloutScan {
     turn_context: Option<Value>,
-    request_permissions_risk: bool,
     /// Current-turn FunctionCalls matching the probed owner command (D39/D44).
     owner_calls: Vec<OwnerCall>,
 }
@@ -1447,7 +1577,6 @@ fn scan_rollout(
     let reader = std::io::BufReader::new(file);
     let mut scan = RolloutScan {
         turn_context: None,
-        request_permissions_risk: false,
         owner_calls: Vec::new(),
     };
     let mut buffer = Vec::new();
@@ -1496,24 +1625,17 @@ fn scan_rollout_line(
     // every tool-call line must be parsed (its command may be JSON-escaped in raw
     // text, so a substring test on the command itself would be unreliable).
     let interesting = (line.contains("\"turn_context\"") && line.contains(turn_id))
-        || line.contains("request_permissions")
         || (owner_command.is_some()
             && (line.contains("function_call") || line.contains("custom_tool_call")));
     if !interesting {
         return;
     }
     let Ok(value) = serde_json::from_str::<Value>(line) else {
-        // A line mentioning request_permissions that we cannot parse is treated as risk.
-        if line.contains("request_permissions") {
-            scan.request_permissions_risk = true;
-        }
         return;
     };
     let item_type = value.get("type").and_then(Value::as_str).unwrap_or("");
     let payload = value.get("payload").unwrap_or(&Value::Null);
     if item_type != "turn_context" && item_type != "response_item" {
-        // Some other line mentioning request_permissions (e.g. event_msg): only
-        // model tool-call items grant turn-level strict review, ignore the rest.
         return;
     }
     if item_type == "turn_context" {
@@ -1532,12 +1654,6 @@ fn scan_rollout_line(
     let current_turn = call_turn.is_none() || call_turn == Some(turn_id);
     match payload_type {
         "function_call" => {
-            if payload.get("name").and_then(Value::as_str) == Some("request_permissions") {
-                if current_turn {
-                    scan.request_permissions_risk = true;
-                }
-                return;
-            }
             let (Some(probe), true) = (owner_command, current_turn) else {
                 return;
             };
@@ -1556,12 +1672,8 @@ fn scan_rollout_line(
         }
         "custom_tool_call" => {
             // code_mode: the model drives tools from a JS cell; arguments live in the
-            // source text. A request_permissions mention anywhere in the cell counts as
-            // turn-level strict review risk (substring-coarse, fails toward basic).
+            // source text and are extracted per exec_command call (D44).
             let input = payload.get("input").and_then(Value::as_str).unwrap_or("");
-            if current_turn && input.contains("request_permissions") {
-                scan.request_permissions_risk = true;
-            }
             let (Some(probe), true) = (owner_command, current_turn) else {
                 return;
             };
@@ -1807,13 +1919,7 @@ fn evaluate_gate(scan: &RolloutScan) -> RolloutGate {
         _ => false,
     };
     match reviewer {
-        "user" => {
-            if scan.request_permissions_risk {
-                RolloutGate::Unproven
-            } else {
-                RolloutGate::MemoryAllowed
-            }
-        }
+        "user" => RolloutGate::MemoryAllowed,
         "auto_review" | "guardian_subagent" if policy_guardian_eligible => {
             RolloutGate::GuardianProven
         }
@@ -1943,7 +2049,9 @@ mod tests {
     }
 
     #[test]
-    fn request_permissions_in_turn_disables_memory() {
+    fn request_permissions_in_turn_no_longer_disables_memory() {
+        // D43 relaxed (D50): upstream #32232 makes hook decisions authoritative before
+        // the automated reviewer, so request_permissions turns behave like normal turns.
         let call = json!({
             "timestamp": "t",
             "type": "response_item",
@@ -1961,52 +2069,7 @@ mod tests {
         ]);
         assert!(matches!(
             analyze_codex(&hook_input(rollout.path(), PATCH), false),
-            Analysis::Basic
-        ));
-    }
-
-    #[test]
-    fn request_permissions_in_other_turn_is_harmless() {
-        let call = json!({
-            "timestamp": "t",
-            "type": "response_item",
-            "payload": {
-                "type": "function_call",
-                "name": "request_permissions",
-                "arguments": "{}",
-                "call_id": "c1",
-                "internal_chat_message_metadata_passthrough": { "turn_id": "turn-0" }
-            }
-        });
-        let rollout = write_rollout(&[
-            call,
-            turn_context("turn-1", Some("user"), json!("on-request")),
-        ]);
-        assert!(matches!(
-            analyze_codex(&hook_input(rollout.path(), PATCH), false),
             Analysis::Enhanced { .. }
-        ));
-    }
-
-    #[test]
-    fn request_permissions_without_turn_metadata_fails_closed() {
-        let call = json!({
-            "timestamp": "t",
-            "type": "response_item",
-            "payload": {
-                "type": "function_call",
-                "name": "request_permissions",
-                "arguments": "{}",
-                "call_id": "c1"
-            }
-        });
-        let rollout = write_rollout(&[
-            turn_context("turn-1", Some("user"), json!("on-request")),
-            call,
-        ]);
-        assert!(matches!(
-            analyze_codex(&hook_input(rollout.path(), PATCH), false),
-            Analysis::Basic
         ));
     }
 
@@ -3007,18 +3070,31 @@ mod tests {
     }
 
     fn worker_output(segments: &[&[&str]]) -> ShellWorkerOutput {
+        let segments: Vec<Vec<String>> = segments
+            .iter()
+            .map(|argv| argv.iter().map(|token| token.to_string()).collect())
+            .collect();
         ShellWorkerOutput {
             disabled_reason: None,
-            segments: segments
-                .iter()
-                .map(|argv| argv.iter().map(|token| token.to_string()).collect())
-                .collect(),
+            segment_allows: vec![false; segments.len()],
+            segments,
             decision: "prompt".into(),
             explicit_allow_all: false,
             dangerous_any: false,
             amendment: None,
             amendment_from_prefix_rule: false,
+            amendment_candidates: Vec::new(),
+            policy_prompt_any: false,
         }
+    }
+
+    /// Sets the amendment plus the worker invariant: candidates always contain at least
+    /// the base amendment (`analyze` fills them together).
+    fn with_amendment(mut output: ShellWorkerOutput, prefix: &[&str]) -> ShellWorkerOutput {
+        let prefix: Vec<String> = prefix.iter().map(|token| token.to_string()).collect();
+        output.amendment = Some(prefix.clone());
+        output.amendment_candidates = vec![prefix];
+        output
     }
 
     #[test]
@@ -3029,9 +3105,10 @@ mod tests {
         ]);
         let input = shell_input(rollout.path(), "git status && cargo build");
         let runner = |_probe: &ShellProbe| {
-            let mut output = worker_output(&[&["git", "status"], &["cargo", "build"]]);
-            output.amendment = Some(vec!["cargo".into(), "build".into()]);
-            Some(output)
+            Some(with_amendment(
+                worker_output(&[&["git", "status"], &["cargo", "build"]]),
+                &["cargo", "build"],
+            ))
         };
         let Analysis::Enhanced {
             memory,
@@ -3045,11 +3122,21 @@ mod tests {
             .map(|choice| choice.id.as_str())
             .collect();
         // The fallback-derived amendment feeds the session prefix tier and the permanent
-        // tier; the exact tier is hidden when a prefix exists (D38 refined).
-        assert_eq!(ids, [ACTION_SHELL_PREFIX, ACTION_SHELL_ALWAYS]);
+        // tier; the exact tier is hidden when a prefix exists (D38 refined). Eligible
+        // requests additionally offer the relaxed-mode opt-in (D52).
+        assert_eq!(
+            ids,
+            [
+                ACTION_SHELL_PREFIX,
+                ACTION_SHELL_ALWAYS,
+                ACTION_SHELL_RELAXED
+            ]
+        );
+        // Single-candidate ladders stay plain choices (no selector metadata).
+        assert!(extra_choices.iter().all(|choice| choice.variant.is_none()));
         assert!(matches!(
             memory.query,
-            Some(MemoryQuery::ShellCommands { ref commands })
+            Some(MemoryQuery::ShellCommands { ref commands, .. })
                 if commands == &[vec!["git".to_string(), "status".into()],
                                  vec!["cargo".to_string(), "build".into()]]
         ));
@@ -3108,7 +3195,7 @@ mod tests {
             .iter()
             .map(|choice| choice.id.as_str())
             .collect();
-        assert_eq!(ids, [ACTION_SHELL_SESSION]);
+        assert_eq!(ids, [ACTION_SHELL_SESSION, ACTION_SHELL_RELAXED]);
         let session = memory
             .saves
             .iter()
@@ -3233,7 +3320,8 @@ mod tests {
             Analysis::Basic
         ));
 
-        // request_permissions mentioned inside a current-turn cell: strict-review risk.
+        // request_permissions mentioned inside a current-turn cell no longer disables
+        // memory (D43 relaxed per D50); the exec_command call still provides the owner.
         let rollout = write_rollout(&[
             shell_turn_context("turn-1", json!("on-request"), "restricted"),
             exec_cell_call(
@@ -3244,7 +3332,7 @@ mod tests {
         let input = shell_input(rollout.path(), "cargo build");
         assert!(matches!(
             analyze_codex_with(&input, false, &runner),
-            Analysis::Basic
+            Analysis::Enhanced { .. }
         ));
     }
 
@@ -3268,6 +3356,219 @@ mod tests {
     }
 
     #[test]
+    fn multi_candidate_ladder_flattens_variants_with_recommended_default() {
+        let rollout = write_rollout(&[
+            shell_turn_context("turn-1", json!("on-request"), "restricted"),
+            shell_call_full("turn-1", "cargo build --release", None, None),
+        ]);
+        let input = shell_input(rollout.path(), "cargo build --release");
+        let runner = |_probe: &ShellProbe| {
+            let mut output = with_amendment(
+                worker_output(&[&["cargo", "build", "--release"]]),
+                &["cargo", "build", "--release"],
+            );
+            output.amendment_candidates = vec![
+                vec!["cargo".into(), "build".into(), "--release".into()],
+                vec!["cargo".into(), "build".into()],
+                vec!["cargo".into()],
+            ];
+            Some(output)
+        };
+        let Analysis::Enhanced {
+            memory,
+            extra_choices,
+        } = analyze_codex_with(&input, false, &runner)
+        else {
+            panic!("expected enhancement");
+        };
+        let ids: Vec<&str> = extra_choices
+            .iter()
+            .map(|choice| choice.id.as_str())
+            .collect();
+        // Ladder is shortest-first; "build" is subcommand-like so the 2-token candidate
+        // (index 1) is recommended and keeps the unsuffixed action ids.
+        assert_eq!(
+            ids,
+            [
+                "remember_shell_prefix:2",
+                ACTION_SHELL_PREFIX,
+                "remember_shell_prefix:0",
+                "remember_shell_always:2",
+                ACTION_SHELL_ALWAYS,
+                "remember_shell_always:0",
+                ACTION_SHELL_RELAXED,
+            ]
+        );
+        // Every ladder choice carries selector metadata with aligned levels across groups.
+        for (offset, choice) in extra_choices.iter().take(6).enumerate() {
+            let variant = choice.variant.as_ref().expect("variant metadata");
+            assert_eq!(variant.level, offset % 3);
+            assert_eq!(
+                variant.group,
+                if offset < 3 {
+                    "shell-prefix-session"
+                } else {
+                    "shell-prefix-always"
+                }
+            );
+            assert_eq!(variant.recommended, offset % 3 == 1);
+        }
+        assert!(extra_choices[6].variant.is_none());
+        assert_eq!(
+            extra_choices[0].variant.as_ref().unwrap().level_label,
+            "cargo"
+        );
+        assert_eq!(
+            extra_choices[1].variant.as_ref().unwrap().level_label,
+            "cargo build"
+        );
+        // Each tier×level has its own save keyed by the action id (+1 relaxed opt-in).
+        assert_eq!(memory.saves.len(), 7);
+        let session_short = memory
+            .saves
+            .iter()
+            .find(|save| save.action_id == "remember_shell_prefix:2")
+            .unwrap();
+        assert_eq!(
+            session_short.rules,
+            vec![RuleKey::ShellPrefix {
+                prefix: vec!["cargo".into()]
+            }]
+        );
+        let always_recommended = memory
+            .saves
+            .iter()
+            .find(|save| save.action_id == ACTION_SHELL_ALWAYS)
+            .unwrap();
+        assert!(matches!(
+            always_recommended.native,
+            Some(crate::permission_rules::NativeWrite::PrefixRule { ref prefix, .. })
+                if prefix == &["cargo".to_string(), "build".into()]
+        ));
+    }
+
+    #[test]
+    fn recommended_candidate_prefers_two_tokens_then_escalates() {
+        let ladder = |prefixes: &[&[&str]]| -> Vec<Vec<String>> {
+            prefixes
+                .iter()
+                .map(|prefix| prefix.iter().map(|token| token.to_string()).collect())
+                .collect()
+        };
+        // Subcommand-like second token: 2-token candidate wins.
+        let candidates = ladder(&[
+            &["cargo", "build", "--release"],
+            &["cargo", "build"],
+            &["cargo"],
+        ]);
+        assert_eq!(recommended_candidate_index(&candidates), 1);
+        // Flag / path / number second tokens fall back to 1-token.
+        for base in [
+            &["rg", "-i", "foo"][..],
+            &["cat", "/etc/hosts"][..],
+            &["kill", "93215"][..],
+        ] {
+            let candidates = ladder(&[base, &base[..1]]);
+            assert_eq!(recommended_candidate_index(&candidates), 1, "{base:?}");
+        }
+        // Desired tier filtered out (e.g. banned): escalate to the base, never shorter.
+        let candidates = ladder(&[&["git", "push", "--force"], &["git", "push"]]);
+        assert_eq!(recommended_candidate_index(&candidates), 1);
+        let candidates = ladder(&[&["npm", "run", "build"]]);
+        assert_eq!(recommended_candidate_index(&candidates), 0);
+        // Single-token base recommends itself.
+        let candidates = ladder(&[&["ls"]]);
+        assert_eq!(recommended_candidate_index(&candidates), 0);
+    }
+
+    #[test]
+    fn relaxed_opt_in_gated_by_extended_dangerous_list_and_policy_prompts() {
+        // `git push --force` passes the upstream dangerous heuristic (prefix tiers stay)
+        // but hits the extended relaxed list: no relaxed opt-in, query not eligible.
+        let rollout = write_rollout(&[
+            shell_turn_context("turn-1", json!("on-request"), "restricted"),
+            shell_call_full("turn-1", "git push --force", None, None),
+        ]);
+        let input = shell_input(rollout.path(), "git push --force");
+        let runner = |_probe: &ShellProbe| {
+            Some(with_amendment(
+                worker_output(&[&["git", "push", "--force"]]),
+                &["git", "push", "--force"],
+            ))
+        };
+        let Analysis::Enhanced {
+            memory,
+            extra_choices,
+        } = analyze_codex_with(&input, false, &runner)
+        else {
+            panic!("expected enhancement");
+        };
+        assert!(extra_choices
+            .iter()
+            .all(|choice| choice.id != ACTION_SHELL_RELAXED));
+        assert!(matches!(
+            memory.query,
+            Some(MemoryQuery::ShellCommands {
+                relaxed_eligible: false,
+                ..
+            })
+        ));
+
+        // A native prompt-rule hit also disqualifies relaxed eligibility.
+        let rollout = write_rollout(&[
+            shell_turn_context("turn-1", json!("on-request"), "restricted"),
+            shell_call_full("turn-1", "cargo build", None, None),
+        ]);
+        let input = shell_input(rollout.path(), "cargo build");
+        let runner = |_probe: &ShellProbe| {
+            let mut output =
+                with_amendment(worker_output(&[&["cargo", "build"]]), &["cargo", "build"]);
+            output.policy_prompt_any = true;
+            Some(output)
+        };
+        let Analysis::Enhanced { memory, .. } = analyze_codex_with(&input, false, &runner) else {
+            panic!("expected enhancement");
+        };
+        assert!(matches!(
+            memory.query,
+            Some(MemoryQuery::ShellCommands {
+                relaxed_eligible: false,
+                ..
+            })
+        ));
+
+        // Plain safe command: eligible, and the opt-in save writes the ShellRelaxed key.
+        let rollout = write_rollout(&[
+            shell_turn_context("turn-1", json!("on-request"), "restricted"),
+            shell_call_full("turn-1", "cargo build", None, None),
+        ]);
+        let input = shell_input(rollout.path(), "cargo build");
+        let runner = |_probe: &ShellProbe| {
+            Some(with_amendment(
+                worker_output(&[&["cargo", "build"]]),
+                &["cargo", "build"],
+            ))
+        };
+        let Analysis::Enhanced { memory, .. } = analyze_codex_with(&input, false, &runner) else {
+            panic!("expected enhancement");
+        };
+        assert!(matches!(
+            memory.query,
+            Some(MemoryQuery::ShellCommands {
+                relaxed_eligible: true,
+                ..
+            })
+        ));
+        let relaxed = memory
+            .saves
+            .iter()
+            .find(|save| save.action_id == ACTION_SHELL_RELAXED)
+            .unwrap();
+        assert_eq!(relaxed.rules, vec![RuleKey::ShellRelaxed]);
+        assert!(relaxed.native.is_none());
+    }
+
+    #[test]
     fn model_prefix_rule_adds_session_prefix_tier() {
         let rollout = write_rollout(&[
             shell_turn_context("turn-1", json!("on-request"), "restricted"),
@@ -3287,8 +3588,7 @@ mod tests {
             assert!(!probe.sandbox_override);
             assert_eq!(probe.approval_policy, "on-request");
             assert_eq!(probe.sandbox_kind, "restricted");
-            let mut output = worker_output(&[&["cargo", "build"]]);
-            output.amendment = Some(vec!["cargo".into()]);
+            let mut output = with_amendment(worker_output(&[&["cargo", "build"]]), &["cargo"]);
             output.amendment_from_prefix_rule = true;
             Some(output)
         };
@@ -3304,7 +3604,14 @@ mod tests {
             .map(|choice| choice.id.as_str())
             .collect();
         // Prefix-first: the exact tier is not offered when a prefix exists.
-        assert_eq!(ids, [ACTION_SHELL_PREFIX, ACTION_SHELL_ALWAYS]);
+        assert_eq!(
+            ids,
+            [
+                ACTION_SHELL_PREFIX,
+                ACTION_SHELL_ALWAYS,
+                ACTION_SHELL_RELAXED
+            ]
+        );
         let prefix_save = memory
             .saves
             .iter()
@@ -3327,9 +3634,11 @@ mod tests {
         ]);
         let input = shell_input(rollout.path(), "rm -rf build");
         let runner = |_probe: &ShellProbe| {
-            let mut output = worker_output(&[&["rm", "-rf", "build"]]);
+            let mut output = with_amendment(
+                worker_output(&[&["rm", "-rf", "build"]]),
+                &["rm", "-rf", "build"],
+            );
             output.dangerous_any = true;
-            output.amendment = Some(vec!["rm".into(), "-rf".into(), "build".into()]);
             Some(output)
         };
         let Analysis::Enhanced {
@@ -3491,9 +3800,10 @@ mod tests {
         let Analysis::Enhanced { memory, .. } = analyze_codex_with(&input, false, &runner) else {
             panic!("expected enhancement");
         };
-        // No amendment -> only the exact session tier exists.
-        assert_eq!(memory.saves.len(), 1);
+        // No amendment -> the exact session tier plus the relaxed opt-in (D52).
+        assert_eq!(memory.saves.len(), 2);
         assert_eq!(memory.saves[0].action_id, ACTION_SHELL_SESSION);
+        assert_eq!(memory.saves[1].action_id, ACTION_SHELL_RELAXED);
     }
 
     #[test]

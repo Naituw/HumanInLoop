@@ -1,15 +1,21 @@
 <script setup lang="ts">
 // 「高级」tab 最后一张卡：Codex 会话授权管理（spec codex-permission-remember §6.3）。
 // 渐进加载：卡片本身全静态，点「管理」才连 daemon 取摘要，展开分组才取该组规则详情。
-import { ref } from "vue";
+// 顶部附宽松模式全局开关（D52）。
+import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { permissionRulesPanel } from "../../lib/ipc";
+import { useSettingsContext } from "./context";
 import type {
   PermissionRuleInfo,
   PermissionSessionGroup,
 } from "../../lib/types";
 
 const { t } = useI18n();
+const ctx = useSettingsContext();
+const { persist } = ctx;
+// 父组件仅在 config 加载后渲染本卡，这里可安全断言非空。
+const config = computed(() => ctx.config.value!);
 
 /** 跨会话授权分组在本组件内部使用的伪 id（不会与 Codex session id 冲突）。 */
 const GLOBAL_ID = "__global__";
@@ -22,6 +28,7 @@ const globalCount = ref(0);
 const details = ref<Record<string, PermissionRuleInfo[] | "loading">>({});
 const armedReset = ref<string | null>(null);
 const resetBusy = ref<string | null>(null);
+const yoloBusy = ref<string | null>(null);
 let disarmTimer: number | undefined;
 
 async function load() {
@@ -125,9 +132,37 @@ function shortId(id: string): string {
   return id.length > 12 ? `${id.slice(0, 8)}…` : id;
 }
 
+/** 只关 YOLO（D53）：不动该会话其它授权；成功后本地改摘要即可。 */
+async function disableYolo(id: string) {
+  yoloBusy.value = id;
+  try {
+    await permissionRulesPanel({ op: "disableYolo", sessionId: id });
+    const group = sessions.value.find((g) => g.summary.sessionId === id);
+    if (group) {
+      group.summary.yolo = false;
+      group.summary.ruleCount = Math.max(0, group.summary.ruleCount - 1);
+    }
+    // 详情已展开时刷新该组规则列表。
+    if (details.value[id] && details.value[id] !== "loading") {
+      const result = await permissionRulesPanel({
+        op: "sessionDetail",
+        sessionId: id,
+      });
+      if (result.kind === "rules") {
+        details.value = { ...details.value, [id]: result.rules };
+      }
+    }
+  } catch (e) {
+    error.value = String(e);
+  } finally {
+    yoloBusy.value = null;
+  }
+}
+
 function scopeText(group: PermissionSessionGroup): string {
   const s = group.summary;
   const parts: string[] = [];
+  if (s.yolo) parts.push(t("settings.permissionRules.scopeYolo"));
   if (s.fileExactCount > 0)
     parts.push(t("settings.permissionRules.scopeFiles", { n: s.fileExactCount }));
   for (const root of s.projectRoots)
@@ -164,6 +199,21 @@ function kindLabel(kind: PermissionRuleInfo["kind"]): string {
   <div class="card">
     <p class="card-title">{{ t("settings.permissionRules.title") }}</p>
     <p class="card-desc">{{ t("settings.permissionRules.desc") }}</p>
+    <!-- 宽松模式全局开关（D52）：会话级开关在权限弹窗里。 -->
+    <div class="row">
+      <span class="label">{{ t("settings.permissionRules.relaxedTitle") }}</span>
+      <span class="spacer"></span>
+      <label class="switch">
+        <input
+          type="checkbox"
+          v-model="config.permissions.codexRelaxedShell"
+          @change="persist"
+        />
+        <span class="track"></span>
+      </label>
+    </div>
+    <p class="card-desc">{{ t("settings.permissionRules.relaxedDesc") }}</p>
+    <hr class="divider" />
     <div class="row">
       <span class="spacer"></span>
       <button
@@ -254,6 +304,15 @@ function kindLabel(kind: PermissionRuleInfo["kind"]): string {
               <p class="card-desc">{{ scopeText(group) }}</p>
             </div>
             <span class="spacer"></span>
+            <button
+              v-if="group.summary.yolo"
+              class="btn"
+              type="button"
+              :disabled="yoloBusy === group.summary.sessionId"
+              @click="disableYolo(group.summary.sessionId)"
+            >
+              {{ t("settings.permissionRules.yoloOff") }}
+            </button>
             <button
               class="btn"
               type="button"

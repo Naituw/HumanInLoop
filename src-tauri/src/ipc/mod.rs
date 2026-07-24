@@ -211,6 +211,8 @@ pub enum PermissionRulesOp {
     ResetSession { session_id: String },
     /// 重置全部跨会话授权。
     ResetGlobal,
+    /// 只关闭某对话的 YOLO 模式（D53），其余授权保留。
+    DisableYolo { session_id: String },
 }
 
 /// 管理面板的一条对话分组：store 摘要 + agent registry 的标题/项目名增强（可为空）。
@@ -817,12 +819,14 @@ mod tests {
                         label: "Approve once".into(),
                         description: String::new(),
                         role: crate::confirm::ActionRole::Primary,
+                        variant: None,
                     },
                     crate::models::ConfirmChoice {
                         id: "deny".into(),
                         label: "Deny".into(),
                         description: String::new(),
                         role: crate::confirm::ActionRole::Destructive,
+                        variant: None,
                     },
                 ],
                 presentation: crate::models::ConfirmPresentation::SingleSelectSubmit {

@@ -299,6 +299,7 @@ pub(super) async fn send_agent_picker(
         PickerKind::TodoAutoEntry => crate::select::SelectAction::TodoAutoEntry,
         // 管理卡不经单选卡通道发送（见 todo.rs::send_todo_manage / register_todo_manage）。
         PickerKind::TodoManage => return false,
+        PickerKind::Yolo => crate::select::SelectAction::Yolo,
     };
     let view = crate::select::build_view(title, options, action, lang);
     let session_ids: Vec<String> = view.options.iter().map(|o| o.id.clone()).collect();
@@ -1075,6 +1076,19 @@ pub(super) async fn handle_select_card_action(
         PickerKind::TodoManage => {
             let _ = ack.send(None);
         }
+        PickerKind::Yolo => {
+            select_pick_yolo(
+                state,
+                channel_id,
+                &mid,
+                &session_id,
+                &config,
+                lang,
+                Some(ack),
+            )
+            .await;
+            activate_channel_on_action(state, channel_id, &config, lang).await;
+        }
     }
 }
 
@@ -1473,6 +1487,86 @@ pub(super) async fn select_pick_unwatch(
     }
 }
 
+// ===== /yolo（spec codex-permission-remember D53）=====
+
+/// `/yolo` 选择卡的会话显示名：对话标题 → 项目名 → 缩短的 session id（与管理面板同口径）。
+pub(super) fn yolo_session_label(state: &Arc<ServerState>, session_id: &str) -> String {
+    if let Some((title, project)) = state.agents.session_display(session_id) {
+        if !title.is_empty() {
+            return title;
+        }
+        if !project.is_empty() {
+            return project;
+        }
+    }
+    if session_id.len() > 12 {
+        format!("{}…", &session_id[..8])
+    } else {
+        session_id.to_string()
+    }
+}
+
+/// `/yolo` 选择卡选项：`ids` 已按最近使用倒序（[`yolo_session_ids`] 的顺序）。
+/// 展示口径与其余 agent 卡一致（见 [`crate::select::yolo_option_by_session`]）。
+pub(super) fn yolo_options(
+    state: &Arc<ServerState>,
+    ids: &[String],
+    lang: Lang,
+) -> Vec<crate::select::SelectOption> {
+    let snapshot = state.agents.snapshot();
+    let now = now_secs();
+    ids.iter()
+        .map(|session_id| {
+            crate::select::yolo_option_by_session(
+                &snapshot,
+                session_id,
+                state.agents.session_display(session_id),
+                now,
+                lang,
+            )
+        })
+        .collect()
+}
+
+/// 单选卡点选「关闭」（/yolo）：只删该会话的 Yolo 规则 → 本卡定格终态文案。三路复用：
+/// 飞书经 ack 同步回卡，钉钉走 OpenAPI 终态，TG/Slack 就地编辑。规则已不在（别处关了 /
+/// 过期）→ 定格「已不在开启状态」。
+pub(super) async fn select_pick_yolo(
+    state: &Arc<ServerState>,
+    channel_id: &str,
+    mid: &str,
+    session_id: &str,
+    config: &AppConfig,
+    lang: Lang,
+    ack: Option<crate::confirm::transport::FsAck>,
+) {
+    let sid = session_id.to_string();
+    let removed = tokio::task::spawn_blocking(move || crate::permission_rules::disable_yolo(&sid))
+        .await
+        .unwrap_or(false);
+    let label = if removed {
+        log(&format!(
+            "yolo turned off via {channel_id} for session {session_id}"
+        ));
+        crate::i18n::tr(lang, "select.yoloOffDone")
+            .replace("{name}", &yolo_session_label(state, session_id))
+    } else {
+        crate::i18n::tr(lang, "select.yoloOffGone").to_string()
+    };
+    let title = crate::select::title_yolo(lang);
+    if channel_id == "feishu" {
+        if let Some(ack) = ack {
+            let card = crate::feishu::card::build_select_final_card(&title, &label);
+            let _ = ack.send(Some(crate::feishu::card::callback_update_card(card)));
+        }
+    } else if channel_id == "dingding" {
+        dd_finalize_select_card(config, mid, &label).await;
+    } else {
+        finalize_select_card_edit(channel_id, config, mid, &title, &label).await;
+    }
+    remove_picker(state, channel_id, mid);
+}
+
 // ===== 钉钉单选卡点选（无「回调同步回卡」：空 ACK 已在路由任务发出，卡片变化走 OpenAPI）=====
 
 /// 处理钉钉单选卡点击：解析 `(outTrackId, sid)` → 找 picker → 按 kind 分派。
@@ -1620,6 +1714,10 @@ pub(super) async fn handle_select_dd_action(state: &Arc<ServerState>, data: &ser
         }
         // 管理卡提交已在上方 handle_todo_dd_submit 处理；行按钮不存在。
         PickerKind::TodoManage => {}
+        PickerKind::Yolo => {
+            select_pick_yolo(state, "dingding", &otid, &session_id, &config, lang, None).await;
+            activate_channel_on_action(state, "dingding", &config, lang).await;
+        }
     }
 }
 
@@ -2360,6 +2458,10 @@ pub(super) async fn dispatch_select_pick(
         }
         // 管理卡在 TG/Slack 上是纯文本形态，不会有卡片回调。
         PickerKind::TodoManage => {}
+        PickerKind::Yolo => {
+            select_pick_yolo(state, channel_id, mid, &session_id, config, lang, None).await;
+            activate_channel_on_action(state, channel_id, config, lang).await;
+        }
     }
 }
 

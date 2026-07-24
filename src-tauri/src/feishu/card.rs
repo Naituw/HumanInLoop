@@ -650,7 +650,9 @@ fn select_button_type(action: crate::select::SelectAction) -> &'static str {
         | crate::select::SelectAction::Transcript
         | crate::select::SelectAction::Todo
         | crate::select::SelectAction::TodoAutoEntry => "default",
-        crate::select::SelectAction::Unwatch | crate::select::SelectAction::TodoRmEntry => "danger",
+        crate::select::SelectAction::Unwatch
+        | crate::select::SelectAction::TodoRmEntry
+        | crate::select::SelectAction::Yolo => "danger",
     }
 }
 

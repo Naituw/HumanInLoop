@@ -598,6 +598,11 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
             "• {p}todo-auto [text] — choose a project to toggle or add auto-run todos 「auto todo」",
             "• {p}todo-auto [内容] — 选择项目切换或新增自动待办「自动待办」",
         ),
+        "autoChannel.helpCmdYolo" => pick(
+            lang,
+            "• {p}yolo [off] — manage Codex YOLO sessions (turn off from the card)",
+            "• {p}yolo [off] — 管理 Codex YOLO 会话（点卡片关闭）",
+        ),
         "autoChannel.helpCmdHelp" => pick(
             lang,
             "• {p}help — show this help 「help」",
@@ -811,6 +816,33 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
             "本项目待办已全部删除/清空。",
         ),
         "select.todoRmDeleted" => pick(lang, "Deleted: {text}", "已删除：{text}"),
+        // —— /yolo（spec codex-permission-remember D53）——
+        "select.titleYolo" => pick(
+            lang,
+            "Sessions with YOLO mode on (tap to end YOLO mode):",
+            "开启 YOLO 模式的会话（点关闭即结束 YOLO）：",
+        ),
+        "select.btnYoloOff" => pick(lang, "Turn off", "关闭"),
+        "select.yoloNone" => pick(
+            lang,
+            "No session has YOLO mode on.",
+            "当前没有开启 YOLO 模式的会话。",
+        ),
+        "select.yoloOffDone" => pick(
+            lang,
+            "YOLO mode turned off: {name}",
+            "已关闭 YOLO 模式：{name}",
+        ),
+        "select.yoloOffGone" => pick(
+            lang,
+            "YOLO mode was already off for this session.",
+            "该会话的 YOLO 模式已不在开启状态。",
+        ),
+        "select.yoloOffHint" => pick(
+            lang,
+            "Send {p}yolo off [n] to turn it off anytime.",
+            "发送 {p}yolo off [编号] 可随时关闭。",
+        ),
         // `/todo-auto`（第 17 轮定案）。
         "select.btnTodoAutoEntry" => pick(lang, "Toggle", "切换"),
         "select.titleTodoAuto" => pick(

@@ -68,6 +68,8 @@ pub enum SelectAction {
     TodoAuto,
     /// 待办自动执行切换卡（选项＝待办条目，已自动的带 ⚡ 徽标；按钮「切换」，点击即开/关）。
     TodoAutoEntry,
+    /// `/yolo` 的会话选择卡（选项＝开着 YOLO 的 Codex 会话；按钮「关闭」，点击即关）。
+    Yolo,
 }
 
 impl SelectAction {
@@ -91,6 +93,7 @@ impl SelectAction {
             SelectAction::TodoRmEntry => "select.btnTodoRmEntry",
             SelectAction::TodoAuto => "select.btnChoose",
             SelectAction::TodoAutoEntry => "select.btnTodoAutoEntry",
+            SelectAction::Yolo => "select.btnYoloOff",
         };
         i18n::tr(lang, key).to_string()
     }
@@ -178,6 +181,9 @@ pub fn title_todo(lang: Lang) -> String {
 }
 pub fn title_todo_rm(lang: Lang) -> String {
     i18n::tr(lang, "select.titleTodoRm").to_string()
+}
+pub fn title_yolo(lang: Lang) -> String {
+    i18n::tr(lang, "select.titleYolo").to_string()
 }
 
 /// `/todo-rm` 逐条删除卡标题：`「<项目名>」的待办（点删除即移除）：`。
@@ -459,6 +465,47 @@ pub fn agent_option_by_session(
     }
 }
 
+/// 组装单个 YOLO 会话选项（`/yolo` 单选卡，spec codex-permission-remember D53）：按
+/// session_id 在快照定位记录，与其余 agent 卡同口径（主文本 = 类型 · 项目名，副文本 =
+/// 标题，圆点 / 编号 / 工作时长），外加 YOLO 徽标。不在册（agent 已结束，规则未过期仍可
+/// 关）时用注册表存档的 `(标题, 项目名)` 降级；YOLO 仅 Codex 会话，类型标签固定。
+pub fn yolo_option_by_session(
+    snapshot: &Value,
+    session_id: &str,
+    display: Option<(String, String)>,
+    now: u64,
+    lang: Lang,
+) -> SelectOption {
+    let badge = Some("YOLO".to_string());
+    if let Some(rec) = snapshot.as_array().and_then(|l| {
+        l.iter()
+            .find(|r| r.get("sessionId").and_then(|v| v.as_str()) == Some(session_id))
+    }) {
+        let mut opt = option_from_record(rec, session_id.to_string(), &HashSet::new(), now, lang);
+        opt.badge = badge;
+        return opt;
+    }
+    let kind_label = crate::agents::AgentKind::Codex.label();
+    let (title, project) = display.unwrap_or_default();
+    SelectOption {
+        id: session_id.to_string(),
+        dot: None,
+        seq: None,
+        primary: if project.is_empty() {
+            kind_label.to_string()
+        } else {
+            format!("{kind_label} · {project}")
+        },
+        badge,
+        elapsed: None,
+        secondary: Some(if title.is_empty() {
+            i18n::tr(lang, "autoChannel.noTitle").to_string()
+        } else {
+            title
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,6 +520,37 @@ mod tests {
             {"seq":2,"kind":"claude","sessionId":"s-work","state":"working","title":"忙着","cwd":"/tmp/api-server","activeElapsedSecs":360},
             {"seq":3,"kind":"codex","sessionId":"s-end","state":"ended","title":"完了","cwd":"/tmp/proj","activeElapsedSecs":100},
         ])
+    }
+
+    #[test]
+    fn yolo_option_matches_agent_card_shape_with_fallback() {
+        // 在册：与其余 agent 卡同口径（类型 · 项目 / 标题 / 圆点 / 编号）+ YOLO 徽标。
+        let opt = yolo_option_by_session(&snap(), "s-work", None, NOW, Lang::Zh);
+        assert_eq!(opt.primary, "Claude Code · api-server");
+        assert_eq!(opt.secondary.as_deref(), Some("忙着"));
+        assert_eq!(opt.dot, Some(SelectDot::Working));
+        assert_eq!(opt.seq, Some(2));
+        assert_eq!(opt.badge.as_deref(), Some("YOLO"));
+        // 不在册：注册表存档的 (标题, 项目名) 降级，类型标签固定 Codex。
+        let opt = yolo_option_by_session(
+            &snap(),
+            "s-gone",
+            Some(("修权限弹窗".to_string(), "my-proj".to_string())),
+            NOW,
+            Lang::Zh,
+        );
+        assert_eq!(opt.primary, "Codex · my-proj");
+        assert_eq!(opt.secondary.as_deref(), Some("修权限弹窗"));
+        assert_eq!(opt.dot, None);
+        assert_eq!(opt.seq, None);
+        assert_eq!(opt.badge.as_deref(), Some("YOLO"));
+        // 完全无存档信息：仅类型 + 无标题占位。
+        let opt = yolo_option_by_session(&snap(), "s-gone", None, NOW, Lang::Zh);
+        assert_eq!(opt.primary, "Codex");
+        assert_eq!(
+            opt.secondary.as_deref(),
+            Some(i18n::tr(Lang::Zh, "autoChannel.noTitle"))
+        );
     }
 
     #[test]

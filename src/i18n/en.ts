@@ -28,6 +28,7 @@ export default {
     },
     recommended: "Recommended",
     permissionReason: "Reason:",
+    prefixLevel: "Prefix scope",
     permissionDiff: {
       title: "Proposed changes",
       files: "{n} files",
@@ -224,6 +225,13 @@ export default {
       kindNetworkHost: "Network host",
       kindShellExact: "Shell command",
       kindShellPrefix: "Shell prefix",
+      kindShellRelaxed: "Relaxed mode (audit dangerous only)",
+      kindYolo: "YOLO mode (auto-allow everything)",
+      scopeYolo: "YOLO mode",
+      yoloOff: "Turn off YOLO",
+      relaxedTitle: "Relaxed mode: only audit dangerous commands (global)",
+      relaxedDesc:
+        "Applies to all Codex conversations: non-dangerous parseable shell commands auto-allow. Commands on the dangerous list (rm, dd, git reset --hard, …), native prompt rules, or unparseable scripts still pop up. Every auto-allow is audit-logged.",
     },
     appearance: {
       title: "Appearance",

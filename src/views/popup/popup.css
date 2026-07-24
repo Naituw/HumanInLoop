@@ -259,6 +259,50 @@
   display: grid;
   gap: 8px;
 }
+/* 前缀档位选择器（D51） */
+.confirm-variant-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.confirm-variant-title {
+  color: var(--text-secondary);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.confirm-variant-segments {
+  display: inline-flex;
+  gap: 0;
+  border: var(--hairline) solid var(--control-border);
+  border-radius: 7px;
+  overflow: hidden;
+  background: var(--control-bg);
+}
+.confirm-variant-segment {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.confirm-variant-segment + .confirm-variant-segment {
+  border-left: var(--hairline) solid var(--control-border);
+}
+.confirm-variant-segment code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+}
+.confirm-variant-segment.active {
+  background: color-mix(in srgb, var(--accent, #0a84ff) 14%, var(--control-bg));
+  color: var(--text-primary);
+}
 .confirm-option {
   width: 100%;
   box-sizing: border-box;
