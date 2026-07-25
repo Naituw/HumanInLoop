@@ -88,7 +88,7 @@ IM `/new` 已支持从四种 IM 选择 workspace / Agent / 权限并在 Mac 上�
 - 不新增第二套 readiness / 启动实现；`agent_launch.rs` 的判定与链路原样复用；
 - 不做 GUI 侧的自动 watch、任务队列、进程管理（同 IM 非目标）；
 - 不支持 Linux / Windows（入口隐藏）；
-- 不在本窗口内管理 workspace（pin/hide/添加仍在设置「实验」面板）；
+- 不在本窗口内管理 workspace（pin/hide/添加仍在设置「高级 → 从 IM 创建 Agent 任务」面板）；
 - 不改变 IM `/new` 的任何行为。
 
 ## 6. 验收标准

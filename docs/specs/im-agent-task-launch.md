@@ -105,7 +105,7 @@ reporter 只上报 launch id 与 task SHA-256，不上报 task 正文。
 | D12 | workspace 权限 | 最近运行过且仍存在的目录直接成为 IM 候选，无需电脑端再次批准 |
 | D13 | workspace 身份 | canonical absolute cwd；不提升到 git root，保留子目录 / worktree 语义 |
 | D14 | workspace 展示 | 首卡只列最近 5 个并加「显示更多」；展开后按 IM 上限列其余；basename + 缩短父路径消歧；歧义或不存在不列 |
-| D15 | 功能开关 | 默认关闭；设置「实验」开启时强制 daemon keepalive 并安装/刷新 daemon 登录项 |
+| D15 | 功能开关 | 默认关闭；设置「高级」开启时强制 daemon keepalive 并安装/刷新 daemon 登录项（2026-07-25 从「实验」Tab 转正，配置键不变） |
 | D16 | 关闭语义 | 关闭功能不擅自恢复 daemon lifecycle，避免覆盖用户之后的 keepalive 选择 |
 | D17 | 权限运行语义 | 仅两种：**Agent 默认行为**（无 flags）与 **YOLO**（固定 agent adapter flags） |
 | D18 | 权限选择设置 | 全局三态：`每次询问`（默认）/ `总是 Agent 默认` / `总是 YOLO` |
@@ -320,7 +320,7 @@ daemon 先把 lifecycle event 应用到 AgentRegistry，再匹配 pending：
 
 workspace 动态状态放 `agent-workspaces.json`，launch record 放短时私有 state 目录。
 
-设置「实验 → 从 IM 创建 Agent 任务」包含：
+设置「高级 → 从 IM 创建 Agent 任务」（2026-07-25 前在「实验」Tab）包含：
 
 - enabled；说明开启会强制 daemon keepalive / 登录自启；
 - 权限选择方式三态；YOLO 持久选项有醒目风险提示；
@@ -418,3 +418,5 @@ workspace 动态状态放 `agent-workspaces.json`，launch record 放短时私�
   只有 Terminal 成功打开才出队，并发删除时仍使用卡片快照。
 - **2026-07-20**：Telegram 先选择手动输入或 TODO；手动输入沿用 ForceReply，TODO 使用可回复补充的
   二次确认卡。
+- **2026-07-25**：设置入口从「实验」Tab 转正到「高级」Tab，紧随「IM 渠道按需发送」；不再受
+  `experimental.enabled` 隐蔽开关控制，配置键与开关状态不变。readiness 的进入刷新随之改挂「高级」。

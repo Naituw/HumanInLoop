@@ -21,7 +21,7 @@ export function useSettingsSearch(deps: {
   activeTab: Ref<Tab>;
 }) {
   const { t } = useI18n();
-  const { config, activeTab } = deps;
+  const { activeTab } = deps;
 
   // 搜索态：点放大镜进入（隐藏 tab、显示输入框并聚焦），Esc/✕/选中结果退出。
   const searchActive = ref(false);
@@ -194,10 +194,10 @@ export function useSettingsSearch(deps: {
         ]),
       );
     }
-    // 实验 tab 仅在开启实验性功能后可见（其内容目前仅 macOS 的 Agent 任务卡）。
-    if (!isWindows && isMac && config.value?.experimental.enabled) {
+    // 「从 IM 创建 Agent 任务」在「高级」tab，仅 macOS 渲染。
+    if (!isWindows && isMac) {
       list.push(
-        e("experimental", "settings.agentTasks.title", [
+        e("advanced", "settings.agentTasks.title", [
           "settings.agentTasks.description",
           "settings.agentTasks.permission",
           "settings.agentTasks.readiness",

@@ -24,9 +24,9 @@
 - `channels.slack`：`enabled`、`botToken`、`appToken`、`userId`
 - `channels.autoActivation`：IM 渠道按需发送，默认 `false`
 - `channels.autoEndWatch`：切离活跃 IM 后自动结束该渠道 watch，默认 `true`，仅在 `autoActivation` 开启时生效
-- `agentTasks.enabled`：从 IM 创建电脑端 Agent 任务，默认 `false`；开启会强制 `daemonLifecycle=keepalive` 并同步 daemon 登录项
+- `agentTasks.enabled`：从 IM 创建电脑端 Agent 任务，默认 `false`；开启会强制 `daemonLifecycle=keepalive` 并同步 daemon 登录项。入口在设置「高级」Tab（2026-07-25 从「实验」转正）
 - `agentTasks.permissionPrompt`：`ask|agent-default|yolo`，默认 `ask`
-- `experimental.enabled`：显示实验区，默认 `false`
+- `experimental.enabled`：显示实验区，默认 `false`（当前实验区为空，留作下一个实验功能的落点）
 - `experimental.verticalQuestions`：多问题纵向显示，默认 `false`
 
 ## 读取入口

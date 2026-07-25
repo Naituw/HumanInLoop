@@ -59,9 +59,9 @@ function onTabClick(tab: Tab, e: MouseEvent) {
   tabDown.value = null;
   if (d && Math.hypot(e.screenX - d.x, e.screenY - d.y) > 4) return;
   activeTab.value = tab;
-  // Readiness can change in the Advanced/Agents tabs or in another process. Refresh whenever the
-  // experimental page becomes visible so it never keeps the mount-time snapshot.
-  if (tab === "experimental" && isMac) void refreshAgentTaskSettings(false);
+  // Readiness can change in the Integration/Agents tabs or in another process. Refresh whenever the
+  // advanced page becomes visible so it never keeps the mount-time snapshot.
+  if (tab === "advanced" && isMac) void refreshAgentTaskSettings(false);
 }
 
 // 其它窗口改了语言时，本窗口也同步切换。
@@ -113,7 +113,7 @@ function gotoTabTarget(raw: string) {
   const [tab, target] = raw.split("#");
   if (!TABS.includes(tab as Tab)) return;
   activeTab.value = tab as Tab;
-  if (tab === "experimental" && isMac) void refreshAgentTaskSettings(false);
+  if (tab === "advanced" && isMac) void refreshAgentTaskSettings(false);
   if (target) void ctx.gotoSettingsTarget(target);
 }
 </script>
