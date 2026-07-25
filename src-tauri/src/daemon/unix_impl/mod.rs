@@ -778,6 +778,15 @@ async fn serve(_lock: LockGuard) -> i32 {
                 names.join(", ")
             ));
         }
+        // 新增能力同理：已在 CLI/MCP mode 的 Claude 升级后即拿到提问接管 hook，无需手动开关一次。
+        let migrated = crate::integrations::agent_ask_question::migrate_outdated();
+        if !migrated.is_empty() {
+            let names: Vec<&str> = migrated.iter().map(|kind| kind.as_str()).collect();
+            log(&format!(
+                "migrated outdated question takeover hooks: {}",
+                names.join(", ")
+            ));
+        }
     }
 
     // 保活模式：让 daemon 登录项（下次登录自启）与配置一致（幂等，纯文件；exe 路径变化会刷新）。

@@ -1,3 +1,4 @@
+pub mod agent_ask_question;
 pub mod agent_context_recovery;
 pub mod agent_launch;
 pub mod agent_lifecycle;

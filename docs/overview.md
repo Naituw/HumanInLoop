@@ -389,6 +389,15 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 - Stop 确认复用普通 Ask 单选链路但不写回复历史；它与 lifecycle 共用单一 Stop handler，避免并发 Hook 提前置空闲。
 - `[user_confirmed_end_turn]` 出现在最后回复任意位置即表示用户已明确同意结束，命中后直接放行，避免再次确认。
 
+## 接管 Claude 内置提问（AskUserQuestion）
+
+> 规格 `docs/specs/claude-ask-user-question.md`。
+
+- 只有 Claude Code 有内置选择题工具。`PreToolUse`（matcher 限定该工具）把题目交给 AskHuman 的多问题卡，作答后按官方 `allow` + `updatedInput.answers` 回传，终端不再弹原生选择框；headless 下同样可答。
+- 独立 capability preference（`ask-question-preferences.json`，默认开），与 permission / stop 并列，同样只在 CLI/MCP mode 下安装 hook。
+- 取消＝`deny` + 「必须重新询问」；弹窗与 IM 都不可用等基础设施失败则不输出，让位给原生选择框。
+- 权限卡对该工具**一律让路**（不接管、不输出），与开关无关。
+
 ## 用户级 hooks + 弹窗提示音
 
 - Unix 用户 hook 位于 `~/.askhuman/hooks/<event>`，是按事件命名的可执行脚本；摘要走环境变量，完整负载走 stdin JSON，非阻塞执行。

@@ -9,6 +9,7 @@
 
 mod agents;
 mod app;
+mod ask_question;
 mod autochannel;
 mod channels;
 mod cli;

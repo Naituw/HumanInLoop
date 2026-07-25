@@ -328,6 +328,9 @@ export default {
       uninstall: "Remove",
       windowsUnsupported: "This hook is not supported on Windows",
       permissionTitle: "Permission approval",
+      askQuestionTitle: "Take over the native question tool",
+      askQuestionHint:
+        "When Claude asks through its own built-in question tool, answer from the AskHuman popup or any IM instead of the terminal; the answer goes straight back to Claude, and cancelling asks it to ask again.",
       stopTitle: "Confirm before ending",
       stopHint:
         "When this Agent naturally finishes a turn, ask through the active popup or IM whether to continue or end. Errors and manual cancellations are not intercepted.",

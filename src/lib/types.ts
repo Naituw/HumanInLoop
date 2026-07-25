@@ -845,8 +845,17 @@ export interface AgentModeStatus {
   permission: PermissionStatus;
   permissionNeedsUpdate: boolean;
   stop: StopStatus;
+  askQuestion: AskQuestionStatus;
   mcpConfigPath: string;
   mcpConfigInstalled: boolean;
+}
+
+/** 接管 Claude 内置 AskUserQuestion 的开关状态（仅 Claude Code 支持）。 */
+export interface AskQuestionStatus {
+  supported: boolean;
+  enabled: boolean;
+  installed: boolean;
+  outdated: boolean;
 }
 
 export interface StopStatus {

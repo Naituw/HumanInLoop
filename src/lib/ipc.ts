@@ -292,6 +292,9 @@ export const agentPermissionSet = (agent: AgentId, enabled: boolean) =>
 export const agentStopSet = (agent: AgentId, enabled: boolean) =>
   invoke<void>("agent_stop_set", { agent, enabled });
 
+export const agentAskQuestionSet = (agent: AgentId, enabled: boolean) =>
+  invoke<void>("agent_ask_question_set", { agent, enabled });
+
 export const mcpConfigReveal = (agent: AgentId) =>
   invoke<void>("mcp_config_reveal", { agent });
 

@@ -10,8 +10,8 @@
 
 use crate::integrations::agent_rules::{self, AgentTarget, Variant};
 use crate::integrations::{
-    agent_context_recovery, agent_permission, agent_stop, agent_subagent_guard, claude_hook,
-    cursor_hook, mcp_config, mutation_lock,
+    agent_ask_question, agent_context_recovery, agent_permission, agent_stop, agent_subagent_guard,
+    claude_hook, cursor_hook, mcp_config, mutation_lock,
 };
 use anyhow::Result;
 
@@ -260,6 +260,7 @@ fn set_unlocked(target: AgentTarget, mode: Mode) -> Result<()> {
             agent_context_recovery::reconcile_unlocked(target, mode)?;
             agent_permission::reconcile_unlocked(target, mode)?;
             agent_stop::reconcile_unlocked(stop_kind(target), mode)?;
+            agent_ask_question::reconcile_unlocked(stop_kind(target), mode)?;
             Ok(())
         }
         Mode::Mcp => {
@@ -273,6 +274,7 @@ fn set_unlocked(target: AgentTarget, mode: Mode) -> Result<()> {
             agent_context_recovery::reconcile_unlocked(target, mode)?;
             agent_permission::reconcile_unlocked(target, mode)?;
             agent_stop::reconcile_unlocked(stop_kind(target), mode)?;
+            agent_ask_question::reconcile_unlocked(stop_kind(target), mode)?;
             Ok(())
         }
     }
@@ -327,6 +329,7 @@ fn uninstall_all_unlocked(target: AgentTarget) -> Result<()> {
     mcp_config::uninstall(target)?;
     agent_permission::reconcile_unlocked(target, Mode::None)?;
     agent_stop::reconcile_unlocked(stop_kind(target), Mode::None)?;
+    agent_ask_question::reconcile_unlocked(stop_kind(target), Mode::None)?;
     Ok(())
 }
 

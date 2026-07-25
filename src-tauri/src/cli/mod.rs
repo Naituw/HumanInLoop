@@ -296,6 +296,15 @@ pub fn dispatch() {
             }
             exit(0);
         }
+        // Hidden PreToolUse adapter for Claude's built-in AskUserQuestion: the questions are
+        // answered through AskHuman instead of Claude's own picker.
+        "__ask-question-hook" => {
+            #[cfg(unix)]
+            {
+                crate::ask_question::run(argv.get(2).map(String::as_str));
+            }
+            exit(0);
+        }
         // Hidden short-lived file snapshot worker used only by the local permission popup.
         "__permission-diff-worker" => {
             #[cfg(unix)]

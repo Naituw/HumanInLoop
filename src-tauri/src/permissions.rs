@@ -136,6 +136,13 @@ fn parse_permission(agent: Agent, input: &Value) -> Option<ParseOutcome> {
     let cwd = required_string(object, "cwd", 8_192)?;
     let permission_mode = required_string(object, "permission_mode", 128)?;
     let tool_name = required_string(object, "tool_name", 512)?;
+    // Claude's built-in question tool asks the human something; it never touches their machine, so
+    // an approval card is pure noise (spec claude-ask-user-question D2). Stay out of the way
+    // entirely — a bare `allow` does not satisfy the tool's interaction requirement, and the
+    // takeover, when enabled, happens earlier in PreToolUse.
+    if agent == Agent::Claude && tool_name == "AskUserQuestion" {
+        return None;
+    }
     let tool_input = object.get("tool_input")?.clone();
     if serde_json::to_vec(&tool_input).ok()?.len() > MAX_TOOL_INPUT_BYTES {
         return None;
@@ -610,6 +617,17 @@ mod tests {
     }
 
     /// Test view of parse_permission for the popup path.
+    #[test]
+    fn claudes_own_question_tool_never_becomes_an_approval_card() {
+        let mut value = input(Agent::Claude);
+        value["tool_name"] = json!("AskUserQuestion");
+        value["tool_input"] = json!({
+            "questions": [{ "question": "Which framework?", "options": [{ "label": "React" }] }]
+        });
+        // Not even an auto-allow: we stay out of the way entirely (spec D2).
+        assert!(parse_permission(Agent::Claude, &value).is_none());
+    }
+
     fn parse_popup(agent: Agent, input: &Value) -> Option<ParsedPermission> {
         match parse_permission(agent, input)? {
             ParseOutcome::Popup(parsed) => Some(*parsed),

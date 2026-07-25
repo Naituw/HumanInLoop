@@ -662,7 +662,7 @@ const SELF_CALL_WHATS_NEXT_FLAGS: &[&str] = &[
 ];
 
 /// Ask-style usages only (D49): free-form ask, `--whats-next`, `--agent-help`,
-/// `todo add`. Config / daemon / dev subcommands never ride the whitelist.
+/// `--show-last`, `todo add`. Config / daemon / dev subcommands never ride the whitelist.
 fn self_call_usage_allowed(args: &[String]) -> bool {
     fn flags_ok(args: &[String], allowed: &[&str]) -> bool {
         args.iter()
@@ -670,7 +670,9 @@ fn self_call_usage_allowed(args: &[String]) -> bool {
     }
     match args.first().map(String::as_str) {
         None => false,
-        Some("--agent-help") => args.len() == 1,
+        // Read-only recovery of the last exchange; the interaction protocol requires agents to run
+        // it after a compaction, so making them ask for approval first is pure friction.
+        Some("--agent-help") | Some("--show-last") => args.len() == 1,
         Some("todo") => {
             args.get(1).map(String::as_str) == Some("add")
                 && args.len() >= 3
@@ -2140,6 +2142,7 @@ mod tests {
             self_call_usage_allowed(&args)
         };
         assert!(ok(&["--agent-help"]));
+        assert!(ok(&["--show-last"]));
         assert!(ok(&["todo", "add", "review the deploy plan"]));
         assert!(ok(&[
             "--whats-next",
@@ -2163,6 +2166,7 @@ mod tests {
 
         assert!(!ok(&[]));
         assert!(!ok(&["--agent-help", "extra"]));
+        assert!(!ok(&["--show-last", "extra"]));
         assert!(!ok(&["todo", "list"]));
         assert!(!ok(&["todo", "add"]));
         assert!(!ok(&["--whats-next", "-q", "smuggled question"]));

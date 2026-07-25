@@ -92,6 +92,8 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
             "用户取消了操作，你必须重新询问用户是否确定要取消，直到用户给出明确答复",
         ),
         "status.unanswered" => pick(lang, "The user did not answer this question", "用户未回答此问题"),
+        // 接管 Claude AskUserQuestion 时，单选题的题面标注（我们的卡片按整卡多选渲染，spec D5）。
+        "askQuestion.pickOne" => pick(lang, "(pick one)", "（只选一项）"),
         // 重放（spec duplicate-ask-coalescing D7）：同一个提问刚被回答过，这次没有再打扰人。
         "status.replayed" => pick(
             lang,

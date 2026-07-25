@@ -103,6 +103,11 @@ pub fn stop_preferences_file() -> PathBuf {
     config_dir().join("stop-preferences.json")
 }
 
+/// Claude 提问接管的开关（spec claude-ask-user-question D3），与 permission / stop 偏好同级。
+pub fn ask_question_preferences_file() -> PathBuf {
+    config_dir().join("ask-question-preferences.json")
+}
+
 /// Agent 生命周期追踪状态文件 `~/.askhuman/agents.json`（daemon 持久化、重启复核用）。
 pub fn agents_file() -> PathBuf {
     config_dir().join("agents.json")

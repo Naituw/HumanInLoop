@@ -1892,7 +1892,8 @@ pub fn agent_rule_open(agent: String) -> Result<(), String> {
 // ===== Agent 三态模式（CLI | MCP | 未集成） =====
 
 use crate::integrations::{
-    agent_context_recovery, agent_mode, agent_permission, agent_stop, mcp_config,
+    agent_ask_question, agent_context_recovery, agent_mode, agent_permission, agent_stop,
+    mcp_config,
 };
 
 /// 某家 Agent 的模式聚合状态（驱动设置页三态分段控件 + 产物清单）。
@@ -1921,6 +1922,8 @@ pub struct AgentModeStatus {
     /// Stop confirmation preference; activation is integration-mode gated while lifecycle tracking
     /// remains independent.
     stop: agent_stop::StopStatus,
+    /// Claude question takeover preference (spec claude-ask-user-question D3).
+    ask_question: agent_ask_question::AskQuestionStatus,
     /// MCP 配置文件展示路径。
     mcp_config_path: String,
     mcp_config_installed: bool,
@@ -1953,6 +1956,7 @@ pub fn agent_mode_status(agent: String) -> Result<AgentModeStatus, String> {
         permission,
         permission_needs_update,
         stop: agent_stop::status(stop_kind),
+        ask_question: agent_ask_question::status(stop_kind),
         mcp_config_path: mcp_config::display_path(a),
         mcp_config_installed: mcp_config::is_installed(a),
     })
@@ -1980,6 +1984,14 @@ pub fn agent_stop_set(agent: String, enabled: bool) -> Result<(), String> {
 }
 
 /// 一键切换到目标模式（"none"|"cli"|"mcp"）：自动卸旧装新。
+#[tauri::command]
+pub fn agent_ask_question_set(agent: String, enabled: bool) -> Result<(), String> {
+    let _ = parse_agent(&agent)?;
+    let kind =
+        crate::agents::AgentKind::parse(&agent).ok_or_else(|| "unknown agent".to_string())?;
+    agent_ask_question::set_enabled(kind, enabled).map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub fn agent_mode_set(app: tauri::AppHandle, agent: String, mode: String) -> Result<(), String> {
     let a = parse_agent(&agent)?;

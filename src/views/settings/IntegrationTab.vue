@@ -23,6 +23,7 @@ const {
   setMode,
   togglePermission,
   toggleStop,
+  toggleAskQuestion,
   permissionBlockedText,
   updateArtifact,
   updateSummary,
@@ -583,6 +584,55 @@ const {
       <p v-else class="card-desc agent-hint">
         {{ t("settings.integration.stopUnsupported") }}
       </p>
+
+      <!-- 接管 Claude 内置的 AskUserQuestion（仅 Claude Code 有这个工具） -->
+      <template v-if="modes[a.id].askQuestion.supported">
+        <hr class="divider" />
+        <div class="row agent-row">
+          <span class="label">{{
+            t("settings.integration.askQuestionTitle")
+          }}</span>
+          <span class="badge">
+            <span
+              class="dot"
+              :class="modes[a.id].askQuestion.installed ? 'on' : 'off'"
+            ></span>
+            {{
+              modes[a.id].askQuestion.installed
+                ? t("settings.integration.configured")
+                : t("settings.integration.notConfigured")
+            }}
+          </span>
+          <span class="spacer"></span>
+          <button
+            v-if="modes[a.id].askQuestion.outdated"
+            class="btn btn-update"
+            type="button"
+            :disabled="modeBusy[a.id]"
+            @click="toggleAskQuestion(a.id, true)"
+          >
+            <span class="dot-update"></span
+            >{{ t("settings.integration.update") }}
+          </button>
+          <label class="switch">
+            <input
+              type="checkbox"
+              :checked="modes[a.id].askQuestion.enabled"
+              :disabled="modeBusy[a.id]"
+              @change="
+                toggleAskQuestion(
+                  a.id,
+                  ($event.target as HTMLInputElement).checked
+                )
+              "
+            />
+            <span class="track"></span>
+          </label>
+        </div>
+        <p class="card-desc agent-hint">
+          {{ t("settings.integration.askQuestionHint") }}
+        </p>
+      </template>
 
       <hr class="divider" />
       <template v-if="modes[a.id].permission.supported">

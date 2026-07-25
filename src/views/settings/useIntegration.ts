@@ -8,6 +8,7 @@ import {
   agentModeUpdate,
   agentModeUpdateArtifact,
   agentPermissionSet,
+  agentAskQuestionSet,
   agentStopSet,
   agentRuleReveal,
   agentRuleOpen,
@@ -93,6 +94,12 @@ export function useIntegration(core: SettingsCore) {
       outdated: false,
       otherHandlersDetected: false,
     },
+    askQuestion: {
+      supported: false,
+      enabled: false,
+      installed: false,
+      outdated: false,
+    },
     mcpConfigPath: "",
     mcpConfigInstalled: false,
   });
@@ -148,6 +155,23 @@ export function useIntegration(core: SettingsCore) {
     modeMessage.value[agent] = null;
     try {
       await agentPermissionSet(agent, enabled);
+      modeError.value[agent] = false;
+    } catch (e) {
+      modeMessage.value[agent] = String(e);
+      modeError.value[agent] = true;
+    } finally {
+      modeBusy.value[agent] = false;
+      await refreshMode(agent);
+    }
+  }
+
+  // 接管 Claude 内置提问工具（spec claude-ask-user-question D3）。
+  async function toggleAskQuestion(agent: AgentId, enabled: boolean) {
+    if (modeBusy.value[agent]) return;
+    modeBusy.value[agent] = true;
+    modeMessage.value[agent] = null;
+    try {
+      await agentAskQuestionSet(agent, enabled);
       modeError.value[agent] = false;
     } catch (e) {
       modeMessage.value[agent] = String(e);
@@ -401,6 +425,7 @@ tool_timeout_sec = 86400`,
     setMode,
     togglePermission,
     toggleStop,
+    toggleAskQuestion,
     permissionBlockedText,
     updateArtifact,
     updateSummary,

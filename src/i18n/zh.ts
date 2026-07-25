@@ -318,6 +318,9 @@ export default {
       uninstall: "移除",
       windowsUnsupported: "Windows 暂不支持该 Hook",
       permissionTitle: "权限审批",
+      askQuestionTitle: "接管原生提问工具",
+      askQuestionHint:
+        "Claude 用自己内置的提问工具问你时，改由 AskHuman 弹窗或 IM 作答，答案直接回传给 Claude，不必回到终端；取消则要求它重新询问。",
       stopTitle: "结束前确认",
       stopHint:
         "该 Agent 自然完成一轮时，通过当前活跃弹窗或 IM 询问继续还是结束；错误和用户主动取消不会被拦截。",
