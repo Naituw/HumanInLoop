@@ -788,9 +788,15 @@ pub(crate) fn activity_parts(rec: &Value) -> ActivityParts {
     let rt_at = rt.and_then(|t| t.get("at")).and_then(|v| v.as_u64());
     let rt_tool = rt.and_then(build_rt_tool);
 
-    // 融合：实时工具严格更新（transcript 尚未追上）→ 并入为进行中末步；与末步同一工具则只改其
-    // 状态，否则更早的进行中步先收敛为已完成（新调用开始 = 前一步已结束，保持「只有末步在跑」）。
-    let use_rt = rt_tool.is_some() && realtime_newer(rt_at, ts_at);
+    // 融合（内容收敛，spec gui-agent-console 反馈记录 2026-07-25）：旧版按「事件时刻 vs
+    // transcript mtime」判先后——mtime 因任何写入前进（渐进写盘 / 落上一条完成调用），会把
+    // 仍在跑的实时步秒级挤掉，造成「工具一闪而过」。改为按**内容**收敛：
+    // - transcript 尾部已含同款步（同类别+对象）且时间不早于实时事件 → transcript 接管；
+    // - 否则实时步驻留为进行中末步，直到被接替 / registry 在 turn-end 清除 / TTL 兜底。
+    let tail_has_same = rt_tool
+        .as_ref()
+        .is_some_and(|td| steps.iter().any(|s| s.tool == *td));
+    let use_rt = rt_tool.is_some() && rt_merge_decision(rt_at, ts_at, tail_has_same, now_secs());
     let at = if use_rt {
         if let Some(td) = rt_tool {
             use crate::agents::activity::StepState;
@@ -813,7 +819,11 @@ pub(crate) fn activity_parts(rec: &Value) -> ActivityParts {
                 }
             }
         }
-        rt_at
+        // 展示时刻取两侧较新者（实时步驻留期间 transcript 可能继续前进）。
+        match (rt_at, ts_at) {
+            (Some(r), Some(t)) => Some(r.max(t)),
+            (r, t) => r.or(t),
+        }
     } else {
         ts_at
     };
@@ -824,6 +834,28 @@ pub(crate) fn activity_parts(rec: &Value) -> ActivityParts {
         todos,
         at,
     }
+}
+
+/// 实时 currentTool 的呆滞兜底：超过该时长仍未被 transcript 接替 / turn-end 清除（漏 hook /
+/// 会话异常中断）→ 不再展示为进行中。
+const RT_TOOL_TTL_SECS: u64 = 600;
+
+/// 实时工具取舍（内容收敛，抽出便于单测）：
+/// - 事件太旧（TTL）→ 弃用；
+/// - transcript 尾部已含同款步且时间不早于实时事件 → transcript 接管（弃用）；
+/// - 其余情况驻留为进行中末步（mtime 因无关写入前进不构成接替——旧版据此秒级丢弃，
+///   造成「工具一闪而过」，spec gui-agent-console 反馈记录 2026-07-25）。
+fn rt_merge_decision(
+    rt_at: Option<u64>,
+    ts_at: Option<u64>,
+    tail_has_same: bool,
+    now: u64,
+) -> bool {
+    let fresh = rt_at.is_some_and(|t| now.saturating_sub(t) <= RT_TOOL_TTL_SECS);
+    if !fresh {
+        return false;
+    }
+    !tail_has_same || realtime_newer(rt_at, ts_at)
 }
 
 /// 由 snapshot 的 `currentTool`（`{name, object, at}`）构造工具展示。类别标签按原始工具名复得，
@@ -981,6 +1013,29 @@ mod tests {
             todo_summary(&done, Lang::Zh).as_deref(),
             Some("📋 TODO 2/2")
         );
+    }
+
+    /// 实时工具取舍（内容收敛，spec gui-agent-console 反馈记录 2026-07-25）。
+    #[test]
+    fn rt_merge_decision_is_content_based() {
+        let now = 1_000_000u64;
+        // 旧版闪烁场景：transcript mtime 已追平/超过实时事件，但尾部**没有**同款步 → 驻留。
+        assert!(rt_merge_decision(Some(now - 3), Some(now), false, now));
+        // 同秒也不判负（旧版 (Some(r), Some(t)) 要求 r > t）。
+        assert!(rt_merge_decision(Some(now), Some(now), false, now));
+        // 尾部已含同款步且 transcript 不早于实时事件 → transcript 接管。
+        assert!(!rt_merge_decision(Some(now - 3), Some(now), true, now));
+        // 尾部含同款步但实时事件更新（同一工具再次被调）→ 仍并入为进行中。
+        assert!(rt_merge_decision(Some(now), Some(now - 3), true, now));
+        // TTL 呆滞兜底。
+        assert!(!rt_merge_decision(
+            Some(now - RT_TOOL_TTL_SECS - 1),
+            None,
+            false,
+            now
+        ));
+        // 无时刻的实时事件不可信 → 弃用。
+        assert!(!rt_merge_decision(None, Some(now), false, now));
     }
 
     #[test]
