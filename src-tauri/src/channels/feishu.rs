@@ -222,6 +222,7 @@ impl MessagingChannel for FeishuSession {
         let open_id = config.open_id.trim().to_string();
 
         let placeholder = i18n::tr(ctx.lang, "channel.fsInputPlaceholder");
+        let note_label_text = i18n::tr(ctx.lang, "channel.fsNoteLabel");
         let submit_label = i18n::tr(ctx.lang, "channel.fsSubmitButton");
         let recommended_prefix = i18n::tr(ctx.lang, "channel.feishuRecommendedPrefix");
         let todo_text_prefix = i18n::tr(ctx.lang, "whatsNext.todoPrefix");
@@ -305,6 +306,7 @@ impl MessagingChannel for FeishuSession {
                                     selected: &selected_final,
                                     user_input: s.user_input.as_deref(),
                                     input_placeholder: placeholder,
+                                    note_label: note_label_text,
                                     button_label: i18n::tr(ctx.lang, "channel.fsSubmitted"),
                                     recommended_prefix,
                                     single: ctx.single,
@@ -417,6 +419,7 @@ impl MessagingChannel for FeishuSession {
                 selected: &[],
                 user_input: None,
                 input_placeholder: placeholder,
+                note_label: note_label_text,
                 button_label: &status,
                 recommended_prefix,
                 single: ctx.single,

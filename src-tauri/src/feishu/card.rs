@@ -106,6 +106,7 @@ pub fn build_question_card_with_todo(
         single,
         select_only,
         input_placeholder,
+        "",
         submit_label,
         recommended_prefix,
         todo_text_prefix,
@@ -129,6 +130,7 @@ pub fn build_msg_compose_card(
             false,
             false,
             &view.input_placeholder,
+            "",
             &view.send_label,
             "",
             "",
@@ -146,9 +148,11 @@ pub struct Finalized<'a> {
     pub options: &'a [OptionItem],
     /// 用户已选选项（原文；被抢答收尾时为空 → 勾选器都不勾）。
     pub selected: &'a [String],
-    /// 补充文字回显（无则 None → 输入框留空）。
+    /// 补充文字回显（无则 None → 整段不渲染）。
     pub user_input: Option<&'a str>,
     pub input_placeholder: &'a str,
+    /// 补充文字上方的小标题（本地化「我的补充：」）。
+    pub note_label: &'a str,
     /// 禁用按钮的文案（「已提交」/「已在 X 回答」）。
     pub button_label: &'a str,
     /// 推荐选项的显示前缀（本地化 lark_md）。
@@ -217,6 +221,7 @@ pub fn build_finalized_card_with_todo(
         p.single,
         p.select_only,
         p.input_placeholder,
+        p.note_label,
         p.button_label,
         p.recommended_prefix,
         todo_text_prefix,
@@ -297,6 +302,7 @@ fn build_form(
     single: bool,
     select_only: bool,
     input_placeholder: &str,
+    note_label: &str,
     button_label: &str,
     recommended_prefix: &str,
     todo_text_prefix: &str,
@@ -321,18 +327,31 @@ fn build_form(
 
     // 严格选择无补充输入框。
     if !select_only {
-        let mut input = json!({
-            "tag": "input",
-            "name": INPUT_NAME,
-            "placeholder": { "tag": "plain_text", "content": input_placeholder },
-        });
-        if let Some(v) = user_input {
-            input["default_value"] = Value::String(v.to_string());
-        }
+        // 终态用「灰色小标题 + 引用块」回显补充文字：飞书的 `input` 一旦 disabled 就既不能编辑
+        // 也**不能选中复制**，而人常常要回头引用自己写过的话。无补充时整段省略。
         if disabled {
-            input["disabled"] = Value::Bool(true);
+            if let Some(v) = user_input.filter(|s| !s.trim().is_empty()) {
+                let quoted = v
+                    .lines()
+                    .map(|line| format!("> {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                form_elements.push(json!({
+                    "tag": "markdown",
+                    "content": format!("<font color='grey'>{note_label}</font>\n{quoted}"),
+                }));
+            }
+        } else {
+            let mut input = json!({
+                "tag": "input",
+                "name": INPUT_NAME,
+                "placeholder": { "tag": "plain_text", "content": input_placeholder },
+            });
+            if let Some(v) = user_input {
+                input["default_value"] = Value::String(v.to_string());
+            }
+            form_elements.push(input);
         }
-        form_elements.push(input);
     }
 
     let mut button = json!({
@@ -779,6 +798,7 @@ pub fn build_todo_auto_card(
         false,
         false,
         input_placeholder,
+        "",
         submit_label,
         "",
         "",
@@ -806,6 +826,7 @@ pub fn build_todo_manage_card(
             false,
             false,
             input_placeholder,
+            "",
             submit_label,
             "",
             "",
@@ -1334,8 +1355,9 @@ mod tests {
             is_markdown: true,
             options: &opts,
             selected: &sel,
-            user_input: Some("再想想"),
+            user_input: Some("再想想\n第二行"),
             input_placeholder: "补充说明（可选）",
+            note_label: "我的补充：",
             button_label: "已提交",
             recommended_prefix: "【👍推荐】 ",
             single: false,
@@ -1351,15 +1373,41 @@ mod tests {
         assert_eq!(checkers[1]["checked"], true);
         assert_eq!(checkers[1]["disabled"], true);
         assert_eq!(checkers[1]["text"]["content"], "【👍推荐】 停止");
-        // 输入框：禁用 + 回显补充文字。
-        let input = fe.iter().find(|e| e["tag"] == "input").unwrap();
-        assert_eq!(input["disabled"], true);
-        assert_eq!(input["default_value"], "再想想");
+        // 补充文字：不再是禁用输入框（那种在飞书里选不中），而是小标题 + 引用块，可选中复制。
+        assert!(fe.iter().all(|e| e["tag"] != "input"));
+        let note = fe.iter().find(|e| e["tag"] == "markdown").unwrap();
+        assert_eq!(
+            note["content"],
+            "<font color='grey'>我的补充：</font>\n> 再想想\n> 第二行"
+        );
         // 按钮：禁用 + 改文案 + 无 behaviors。
         let button = fe.iter().find(|e| e["tag"] == "button").unwrap();
         assert_eq!(button["disabled"], true);
         assert_eq!(button["text"]["content"], "已提交");
         assert!(button.get("behaviors").is_none());
+    }
+
+    #[test]
+    fn finalized_card_without_note_drops_the_whole_note_block() {
+        let opts = vec![OptionItem::new("继续", false)];
+        let card = build_finalized_card(&Finalized {
+            title: "Question 1/1",
+            text: "要继续吗？",
+            is_markdown: true,
+            options: &opts,
+            selected: &[],
+            user_input: None,
+            input_placeholder: "补充说明（可选）",
+            note_label: "我的补充：",
+            button_label: "已在 弹窗 回答",
+            recommended_prefix: "",
+            single: false,
+            select_only: false,
+        });
+        let form = form_of(&card);
+        let fe = form["elements"].as_array().unwrap();
+        assert!(fe.iter().all(|e| e["tag"] != "input"));
+        assert!(fe.iter().all(|e| e["tag"] != "markdown"));
     }
 
     #[test]

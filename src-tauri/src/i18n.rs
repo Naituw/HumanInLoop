@@ -388,6 +388,8 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "channel.fsTitleFallback" => pick(lang, "Question", "提问"),
         // 卡片表单：输入框占位 + 提交按钮文案。
         "channel.fsInputPlaceholder" => pick(lang, "Add a note (optional)", "补充说明（可选）"),
+        // 终态卡上补充文字的小标题（引用块之上）。
+        "channel.fsNoteLabel" => pick(lang, "My note:", "我的补充："),
         "channel.fsSubmitButton" => pick(lang, "Submit", "提交"),
         "channel.fsConfigInvalidSkip" => pick(
             lang,
