@@ -99,10 +99,10 @@ CLI Submit
     原样返回（绝不产出坏 JSON）。
 - i18n（`src-tauri/src/i18n.rs`）新增 `status.replayed`，中英各一句，含「N 秒前」的数值
   拼接（沿用现有 `tr` + `format!` 的写法，不引入新机制）。
-- 同批澄清三处字段说明（spec D7 配套，避免文档把重放误导成取消）：
+- 同批澄清字段说明（spec D7 配套，避免文档把重放误导成取消）：
   - `cli/help.rs` 的 `[status]` 行（中英各一处）改为通用状态说明；
-  - `cli/output.rs` 的 `JsonOutput.status` 注释、`mcp/ask.rs` 的 `AskResult.status`
-    文档注释（后者进对外 schema）改为通用状态说明，并写明判断取消要看 `action`。
+  - `cli/output.rs` 的 `JsonOutput.status` 注释改为通用状态说明，并写明判断取消要看
+    `action`（MCP `ask` 已改文本透传、无 `AskResult`，见 spec mcp.md D5 二轮定案）。
 
 ## 阶段 5：测试
 

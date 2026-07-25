@@ -48,7 +48,7 @@
 
 - 新增子命令 `AskHuman mcp`：以 STDIO 运行 MCP server，暴露 `ask`、`whats_next`、
   `show_last`、`todo_add`；`ask` 覆盖现 CLI `AskHuman` 的全部提问能力。
-- MCP server 为**薄壳**：每次 `ask` 调用就 spawn 一个现有的 `AskHuman --output json …` 子进程，复用全部既有 ask 流程（弹窗 / IM / 抢答 / 历史 / 落盘 / 排空与重连），再把人类回复中的图片读回、转 `ImageContent` 直接返回给模型。
+- MCP server 为**薄壳**：每次 `ask` 调用就 spawn 一个现有的 `AskHuman …` 子进程（默认文本输出），复用全部既有 ask 流程（弹窗 / IM / 抢答 / 历史 / 落盘 / 排空与重连），结果区块文本原样透传，再把人类回复中的图片读回、转 `ImageContent` 直接返回给模型。
 - 自动集成：每家 Agent 改为「**CLI | MCP | 未集成**」三态互斥选择。CLI 模式绑定 `Rule + 超时 Hook`，MCP 模式绑定 `Rule + MCP 配置`。
 - 手动集成：参考提示词提供 **CLI 版 / MCP 版**两份可切换展示；MCP 版同时展示各家 **MCP 配置实例**。
 
@@ -57,10 +57,10 @@
 | 编号 | 决策项 | 结论 |
 |---|---|---|
 | D1 | 模式互斥 | 每个 agent 三态「CLI / MCP / 未集成」，互斥。同一 agent 不同时安装 CLI 与 MCP 产物（避免双触发/冲突） |
-| D2 | MCP server 形态 | **薄壳**：不自带提问/弹窗/IM 逻辑；正常 `ask` 调用 spawn 现有 `AskHuman --output json …` 子进程复用全流程。Codex 拦截来源（`system` / `ambient_suggestions`）thread 在 spawn 前本地拒绝 |
+| D2 | MCP server 形态 | **薄壳**：不自带提问/弹窗/IM 逻辑；正常 `ask` 调用 spawn 现有 `AskHuman …` 子进程（默认文本输出）复用全流程。Codex 拦截来源（`system` / `ambient_suggestions`）thread 在 spawn 前本地拒绝 |
 | D3 | 启动方式 | 新增 busybox 角色子命令 `AskHuman mcp`（与 `daemon`/`--popup`/`__agent-hook` 并列），用 `rmcp` 跑 STDIO server |
 | D4 | 工具与 Schema | `ask` 入参为 `message`、`questions[{question, options[{text, recommended}]}]`、`files[]`；`whats_next` 承载完成报告/建议，`show_last` 对模型为零业务参数，`todo_add` 写项目待办。会话 token 字段可被托管 Hook 注入但必须从 `tools/list` schema 隐藏。`questions` / `options` item 直接内联，不得依赖本地 `$ref` |
-| D5 | 输出（结构化 + 图片直返）| `ask` 工具**声明 output schema** 并返回**结构化 JSON**（`action`/`channel`/`status?`/`answers[{questionIndex, selectedOptions, userInput?, files[]}]`）：内部子进程以 `--output json` 调用、解析后规整为 `structuredContent`（**剔除仅供脚本用的 `selectedIndices`**），并按 MCP 规范在 `content` 里附一段序列化 JSON 文本（向后兼容）。**取消时（`action:"cancel"`）顶层带 `status` 引导文案**（必须重新确认直到用户明确答复，不得当作放行），该字段同时落进 CLI `--output json`（见 §5）。人类回复中的图片读出后以 `ImageContent`(base64+mimeType) 一并放入 `content` 数组直返模型；非图片文件以路径出现在 JSON `files` 中 |
+| D5 | 输出（文本区块透传 + 图片直返）| `ask` **不声明 output schema**、不返回 `structuredContent`：子进程以默认文本模式调用，stdout 的结果区块（`[selected_options]` / `[user_input]` / `[files]` / `[status]`，多题 `# Qn` 分组）**原样透传**为 `content[0]` 的 `TextContent`，与 CLI 契约同一份字节。**取消时**即 `[status]` 区块引导文案（必须重新确认直到用户明确答复，不得当作放行）。区块格式说明放在工具 description（tools/list 每会话必达，替代 CLI 侧 `--agent-help` 的对应两节）。人类回复中的图片按 `[files]` 区块路径读出后以 `ImageContent`(base64+mimeType) 一并放入 `content` 直返模型；非图片文件以路径出现在 `[files]` 区块中。`todo_add` 同理只返回一行文本（如 `Added todo #3: …`）。（二轮定案 2026-07-25，依据见 §10） |
 | D6 | 超时 | MCP 模式**不需要超时 Hook**，但需按各家机制配置工具超时（否则长等待被取消）：**Codex** 写 `tool_timeout_sec=86400`(秒)+`startup_timeout_sec=30`；**Grok** 另写 `tool_timeouts = { ask = 86400 }`；**Claude Code(CLI)** 在 `mcpServers.askhuman` 写 `timeout=86400000`(**毫秒**,24h)；**Cursor** 工具/elicitation 超时 ~60s **硬编码不可配置**，不写 timeout（Cursor 推荐 CLI 模式） |
 | D7 | MCP 配置落点 | **用户级全局**（与现有 Rules/Hook 一致）：Codex `~/.codex/config.toml`、Grok `~/.grok/config.toml`、Claude `~/.claude.json`（top-level `mcpServers`）、Cursor `~/.cursor/mcp.json` |
 | D8 | 模式切换 | **一键切换**：切到另一模式时自动卸载旧模式全部产物，再安装新模式。选「未集成」= 卸载当前模式全部产物 |
@@ -81,12 +81,12 @@
        └─ rmcp STDIO server，暴露 `ask` / `whats_next` / `show_last` / `todo_add`
             └─ 收到 ask 调用：
                  0. 检查 Codex turn metadata；拦截来源 thread 直接返回 terminal error
-                 1. 入参 Schema → argv（message / -q / -o / -o! / -f / --output json）
+                 1. 入参 Schema → argv（message / -q / -o / -o! / -f；默认文本输出）
                  2. spawn 子进程: <AskHuman 绝对路径> <argv...>
                       · Unix：瘦客户端 → daemon（弹窗/IM/抢答/历史/落盘/排空重连全复用）
                       · Windows：单进程弹窗回退
-                 3. 等子进程结束，读 stdout(JSON) + exit code
-                 4. 解析 JSON → 重建文本块(TextContent) + 图片文件读出转 ImageContent
+                 3. 等子进程结束，读 stdout(结果区块文本) + exit code
+                 4. stdout 原样作为 TextContent；按 `[files]` 区块路径读出图片转 ImageContent
                  5. 组 CallToolResult 返回
 ```
 
@@ -145,16 +145,16 @@ popup、IM 或项目 todo。
 
 不在 MCP 暴露的 CLI 开关：`--no-markdown`（MCP 恒 Markdown，不传该 flag）、`--single`、`--select-only`（脚本/纯文本专用，模型自助场景不适用）。
 
-argv 映射：`message`→首个位置参数（或经 `-q` 拆分）；每个 question→`-q`；option→`-o`（`recommended` 时 `-o!`）；每个 file→`-f`；恒附 `--output json`。子进程以 argv 数组 spawn（无 shell，免引号转义）。
+argv 映射：`message`→首个位置参数（或经 `-q` 拆分）；每个 question→`-q`；option→`-o`（`recommended` 时 `-o!`）；每个 file→`-f`。子进程保持默认**文本输出**（不传 `--output json`），以 argv 数组 spawn（无 shell，免引号转义）。
 
-返回（结构化）：`ask` 声明 **output schema**，内部以 `--output json` 调子进程并解析，结果：
+返回（文本区块透传，D5 二轮定案）：
 
-- `structuredContent` = 规整后的 JSON（`{action, channel, status?, answers:[{questionIndex, selectedOptions, userInput?, files[]}]}`）。注意：子进程 `--output json` 含 `selectedIndices`（供脚本用），**MCP 输出不需要、予以剔除**；
-- **`status`（取消引导）**：仅当 `action:"cancel"` 时出现，文案要求模型必须重新确认直到用户明确答复，不得把取消当默认放行。该字段由子进程 `--output json` 顶层产出（薄壳原样透传），脚本侧 CLI 调用同样受益；正常作答时省略。
-- `content` 数组：①一段序列化 JSON 的 `TextContent`（MCP 规范要求返回结构化结果时同时给文本兜底）；②每张人类回复图片一个 `ImageContent`（从 `answers[].files` 按图片扩展名取路径、读文件 → base64 + mimeType）；
-- 非图片回复文件仍以路径出现在 JSON `files` 中。
+- `content[0]` = 子进程 stdout 的结果区块文本**原样透传**（`[selected_options]` / `[user_input]` / `[files]` / `[status]`，多题按 `# Qn` 分组）——与 CLI 契约同一份字节，`whats_next` / `show_last` 亦为同款文本，四处契约统一；
+- **取消 / 重放**都由 `[status]` 区块承载（取消引导要求模型必须重新确认直到用户明确答复；重放说明由 daemon 在区块前注入，见 spec duplicate-ask-coalescing D7），薄壳不解析不改写；
+- 每张人类回复图片一个 `ImageContent`（从 `[files]` 区块按行取路径、图片扩展名过滤、读文件 → base64 + mimeType；读不到即跳过）；非图片回复文件仍以路径出现在 `[files]` 区块中；
+- 不声明 output schema、不返回 `structuredContent`。区块格式说明写在 `ask` 的 description 里（~66 token，替代 outputSchema 的 ~345 token）。
 
-退出码/动作映射：子进程 exit 0=已作答、1=取消/未作答、3=系统错误。`ask` 工具对「取消/未作答」仍返回正常结构化结果（`action:"cancel"` 或空 answers），仅对真正的执行错误（如子进程无法启动）返回 MCP 错误。
+退出码/动作映射：子进程 exit 0=已作答**或**用户取消（stdout 均有结果区块，原样透传为正常结果）、1=参数错误、3=系统错误（无可用渠道等）。仅当退出码非 0 或 stdout 为空（真正的执行错误，如连不上 daemon）才返回 MCP `isError` 结果并透传 stderr。
 
 ## 6. 自动集成 UI（设置「Agent」Tab）
 
@@ -217,9 +217,14 @@ argv 映射：`message`→首个位置参数（或经 `-q` 拆分）；每个 qu
 
 - Cursor / Claude Code 的 MCP 工具调用是否有超时上限、是否可配（Codex 已确认可配）。
 - `ImageContent` 在三家客户端的实际渲染/喂模型表现（Codex 已确认 OK）。
-- rmcp 声明 output schema + 返回 `structuredContent` 同时携带 `ImageContent` 的确切 API（实现期对照 rmcp 文档）。
 
-> 已定（本轮）：`ask` 输出统一走 **JSON / 结构化 + output schema**（内部子进程 `--output json` → 解析 → `structuredContent` + 序列化 JSON 文本 + `ImageContent`）；Claude 用户级 `~/.claude.json` 当前版本支持，无需回退。
+> 已定（首轮）：`ask` 输出走 JSON / 结构化 + output schema（子进程 `--output json` → `structuredContent` + 序列化 JSON 文本 + `ImageContent`）；Claude 用户级 `~/.claude.json` 当前版本支持，无需回退。
+>
+> **已定（二轮，2026-07-25，推翻首轮输出形态）**：`ask` / `todo_add` 改为**纯文本透传**（D5 现行文）。依据（o200k tokenizer 实测 + 客户端源码/文档核实）：
+>
+> - outputSchema 在 tools/list 中每会话固定 ~345 token，而等价格式说明放 description 仅 ~66 token；每次调用 JSON 比文本区块多 5–13 token（多题含未答题时 JSON 略省，但文本明确标出「用户未回答」信息量更足，采纳）；
+> - Claude Code（官方 Agent SDK 文档）与 Codex（`as_function_call_output_payload`）在有 `structuredContent` 时都**只**把它喂给模型、丢弃 `content` 文本——「双份兼容文本」对模型无益、纯增传输；无 `structuredContent` 时两家都原样转发文本与图片块，Cursor/Grok 与 `whats_next` 现行纯文本同路径在产验证；
+> - 对照 Claude Code 原生 `AskUserQuestion` 的 tool_result（`User has answered your questions: "…"="…"` 一行纯文本），官方内置提问工具同样不用结构化回传。
 
 ## 11. 反馈意见
 

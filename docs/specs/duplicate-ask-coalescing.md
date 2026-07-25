@@ -118,7 +118,7 @@ Agent 侧的中断与重发不在我们的控制范围内，AskHuman 要做的�
 - 文本输出：在所有结果区块**之前**加一个 `[status]` 区块，正文按 `lang` 本地化，
   说明「这是你 N 秒前提出的完全相同问题的回答，用户已经答过，本次没有再打扰他」；
 - JSON 输出：`status` 字段填同一句话（该字段此前只在取消时出现，本次起扩展为通用状态说明）；
-- MCP：`AskResult.status` 沿用同一字段；
+- MCP：`ask` 为文本透传（spec mcp.md D5 二轮定案），`[status]` 区块随文本直达模型，无独立字段；
 - 其余内容（`[selected_options]` / `[user_input]` / `[files]` / 多问题的 `# Qn` 分组、
   whats-next 的纯文本形态、JSON 的 `answers`）与原答案逐字一致，退出码一致；
 - 说明文案到此为止，**不**追加「想要新回答就改提问再问」之类的指引。
@@ -126,9 +126,9 @@ Agent 侧的中断与重发不在我们的控制范围内，AskHuman 要做的�
 配套的语义澄清（必须同批改，否则文档会误导 agent 把重放当成取消）：
 
 - `--agent-help` 里 `[status]` 那一行改为通用表述（中英各一处），不再写「用户取消时出现」；
-- `cli/output.rs` 的 `JsonOutput.status` 与 `mcp/ask.rs` 的 `AskResult.status` 字段注释
-  改为通用状态说明，并写明**判断是否被取消要看 `action`**，不能用「`status` 是否存在」来判断；
-- 重放时 `action` 保持「作答」语义（JSON 为 `answer`，MCP 侧省略），只有真正的取消才是 `cancel`。
+- `cli/output.rs` 的 `JsonOutput.status` 字段注释改为通用状态说明，并写明**判断是否被取消
+  要看 `action`**，不能用「`status` 是否存在」来判断（MCP `ask` 已为文本透传，无独立字段）；
+- 重放时 `action` 保持「作答」语义（JSON 为 `answer`），只有真正的取消才是 `cancel`。
 
 ### D8 副作用只发生一次
 

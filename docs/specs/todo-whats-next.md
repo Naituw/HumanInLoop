@@ -104,8 +104,8 @@ Interject 是「打断进行中」的纠偏语义，不适合），希望：
 **MCP**：server 的 `whats_next`（与 `ask` 并列）入参
 `{ message?, options?: [{ text, recommended? }], files? }`；工具描述将其定位为**任务完成后的交接**，
 当前任务内的问题、决策或下一步仍走普通 `ask`；`options` 仅放具体下一任务，不含内置结束项，
-薄壳将其翻译为 `-o` / `-o!`，再 spawn `AskHuman --whats-next --output
-json …` 子进程，结果映射进 structuredContent。
+薄壳将其翻译为 `-o` / `-o!`，再 spawn `AskHuman --whats-next …` 子进程（默认文本输出），
+结果文本原样透传（与 `ask` 同为纯文本，见 spec mcp.md D5）。
 
 **提交结果 → 语义映射**（纯函数，完整单测）：
 

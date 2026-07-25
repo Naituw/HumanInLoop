@@ -359,7 +359,7 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 > 需求 `docs/specs/mcp.md`，计划 `docs/plans/mcp.md`。
 
 - `AskHuman mcp` 暴露 `ask`、`whats_next`、`show_last`、`todo_add`：`ask`/`whats_next` 每次调用 spawn 现有 CLI 流程，复用 Popup、IM、抢答、历史和 drain；`show_last` 只读恢复最近精确问答，`todo_add` 在 MCP 进程内直写 `todos.json`。
-- `ask` 入参为 message/questions/files；输出同时提供 structuredContent、JSON 文本和图片 ImageContent。MCP 取消会终止子 CLI，并通过 socket EOF 取消 Daemon 请求。
+- `ask` 入参为 message/questions/files；输出为 CLI 同款结果区块文本（原样透传，无 output schema / structuredContent）加图片 ImageContent。MCP 取消会终止子 CLI，并通过 socket EOF 取消 Daemon 请求。
 - Agent 自动集成是 None/CLI/MCP 互斥；Grok 仅 None/MCP，其 MCP 产物是 skill + config。
 - Codex、Grok、Claude 分别写适配自身的长超时配置；Cursor MCP 超时不可配置，推荐 CLI 模式。
 - MCP 没有通用的 Agent session 字段：Codex 使用每调用 `_meta.threadId`，Claude/Cursor

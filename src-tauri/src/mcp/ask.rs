@@ -1,13 +1,13 @@
-//! `ask` 工具：把 MCP 入参翻译成 `AskHuman --output json …` argv，spawn 子进程复用既有 ask 流程，
-//! 再把子进程的 JSON 结果整理成 MCP `structuredContent` + `TextContent`，并将人类回复中的图片读回为
-//! `ImageContent` 一并返回。
+//! `ask` 工具：把 MCP 入参翻译成 `AskHuman …` argv，spawn 子进程复用既有 ask 流程，把子进程
+//! 的**文本结果区块原样透传**为 `TextContent`，并将人类回复中的图片读回为 `ImageContent` 一并返回。
 //!
 //! 关键点：
 //! - 子进程用 Tokio `Command` 运行 —— stdin 被置空、stdout/stderr 被捕获，因此**不会**污染本
 //!   server 的 STDIO MCP 协议流；`kill_on_drop(true)` + 对 rmcp `CancellationToken` 的 `select!`
 //!   保证 MCP 调用被客户端取消时子进程随之终止，进而让 daemon 从 CLI socket EOF 取消在途请求。
-//! - 子进程的 JSON 含脚本专用的 `selected_indices`；反序列化进 [`AskResult`]（无该字段）即自动丢弃，
-//!   再重新序列化为 `structuredContent`，对 MCP 客户端不暴露该字段。
+//! - **输出契约与 CLI 完全一致**（同一份字节）：`[selected_options]` / `[user_input]` / `[files]` /
+//!   `[status]` 区块与多题 `# Qn` 分组直达模型，不再声明 output schema、不再返回 structuredContent
+//!   （token 成本对比与决策见 spec `docs/specs/mcp.md` D5）。图片路径从 `[files]` 区块解析。
 //!
 //! ## 取消语义（为何必须 await token，而不能只靠 drop future）
 //!
@@ -141,22 +141,6 @@ pub struct TodoAddParams {
     pub auto: Option<bool>,
 }
 
-// Output for `todo_add`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct TodoAddResult {
-    /// 1-based index in the project's pending list after the add.
-    pub index: usize,
-    /// Stable id of the new entry (for debugging / future tools).
-    pub id: String,
-    /// Trimmed task text that was stored.
-    pub text: String,
-    /// Absolute project key (git root path) the todo was attached to.
-    pub project: String,
-    /// Whether the entry is marked auto-run.
-    pub auto: bool,
-}
-
 // Input for `whats_next` (spec todo-whats-next D2).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -209,48 +193,6 @@ pub struct AskOption {
     pub recommended: bool,
 }
 
-// `ask` 工具的出参（同时用于声明 output schema 与承载 `structuredContent`）。
-//
-// 字段名刻意与 `cli::output::render_json` 的 snake_case 输出保持一致，从而能直接反序列化子进程的
-// JSON；对外刻意精简：
-//   - **不含** `selected_indices`（脚本专用，反序列化时被 serde 自动忽略）；
-//   - **不含** `channel`（MCP 客户端无需；子进程 JSON 里的 `channel` 作为未知字段被忽略）；
-//   - `action` 仅在**取消**时出现（正常作答省略，见 `ask()` 里的归一化）。
-// 结构体级注释用 `//`，避免泄漏进对外 schema。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct AskResult {
-    /// Only present (value "cancel") when the human dismissed the request without answering;
-    /// omitted on a normal answer (in which case `answers` carries the reply).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub action: Option<String>,
-    /// State of this request, present only when there is something to report. When the human
-    /// cancelled (see `action`), it tells you to ask again and keep asking until they give an
-    /// explicit reply — never treat a cancel as approval. When an identical question was already
-    /// answered moments ago, it says the answer below is that earlier reply and the human was not
-    /// disturbed again. Decide whether it was a cancel by `action`, not by the presence of this field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    /// One entry per answered question (questions left blank are omitted).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub answers: Vec<AskAnswer>,
-}
-
-// 单题作答。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct AskAnswer {
-    /// Zero-based index of the question this answer refers to.
-    pub question_index: usize,
-    /// Labels of the options the human selected.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub selected_options: Vec<String>,
-    /// Free text the human typed, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user_input: Option<String>,
-    /// Absolute paths of files the human attached (images and/or documents).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub files: Vec<String>,
-}
-
 /// MCP server：暴露 `ask`、`whats_next`、`show_last`、`todo_add`。
 #[derive(Clone)]
 pub struct AskServer {
@@ -287,9 +229,10 @@ any input that only the human can provide. Provide `message` for free-form quest
 `questions` for structured choices. Each `questions` item requires `question`; each nested \
 `options` item requires `text` and may set `recommended` to true. Example: \
 `{\"questions\":[{\"question\":\"Continue?\",\"options\":[{\"text\":\"Yes\",\"recommended\":true}]}]}`. \
-The reply is returned as \
-structured content; any images the human attaches are returned as image content.",
-        output_schema = rmcp::handler::server::tool::schema_for_type::<AskResult>(),
+The reply is plain text in labeled blocks: `[selected_options]`, `[user_input]`, `[files]` (paths \
+of files the human attached), and `[status]` (present on cancel or for a replayed earlier answer \
+— follow its instructions). Answers to multiple questions come back grouped under `# Q1`, `# Q2`, \
+… separated by `---`. Images the human attaches are also returned as image content.",
         // Truthful hints that also let Codex-style clients skip per-call approval
         // (their default treats missing destructive/open_world hints as true):
         // asking the operator destroys nothing and reaches no external world.
@@ -358,42 +301,25 @@ structured content; any images the human attaches are returned as image content.
             }
         };
 
+        // 文本结果区块（answer / cancel 均如此，取消为 `[status]` 区块）原样透传；空输出或非零
+        // 退出码意味着系统级错误（如连不上 daemon），以 is_error 回报并透传 stderr，
+        // 不让模型误以为人类作答。
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let code = output.status.code().unwrap_or(3);
-
-        // 子进程对 answer/cancel 都会输出合法 JSON；解析失败一般意味着系统级错误（如连不上 daemon），
-        // 以 is_error 结果回报，把 stderr 透传给模型，不让其误以为人类作答。
-        let value: Value = match serde_json::from_str(stdout.trim()) {
-            Ok(v) => v,
-            Err(_) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let msg = if stderr.trim().is_empty() {
-                    format!("AskHuman produced no result (exit code {code})")
-                } else {
-                    format!("AskHuman failed (exit code {code}): {}", stderr.trim())
-                };
-                return Ok(CallToolResult::error(vec![ContentBlock::text(msg)]));
-            }
-        };
-
-        // 反序列化进 AskResult 会自动丢弃脚本专用的 `selected_indices` 与 `channel`（未知字段），
-        // 再序列化即为对外的 structuredContent。
-        let mut result: AskResult = serde_json::from_value(value).map_err(|e| {
-            McpError::internal_error(format!("unexpected AskHuman output: {e}"), None)
-        })?;
-        // 正常作答不暴露 `action`（由 `answers` 表达）；仅取消时保留 `action:"cancel"` 作为信号。
-        if result.action.as_deref() == Some("answer") {
-            result.action = None;
+        let text = stdout.trim();
+        if !output.status.success() || text.is_empty() {
+            let code = output.status.code().unwrap_or(3);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = if stderr.trim().is_empty() {
+                format!("AskHuman produced no result (exit code {code})")
+            } else {
+                format!("AskHuman failed (exit code {code}): {}", stderr.trim())
+            };
+            return Ok(CallToolResult::error(vec![ContentBlock::text(msg)]));
         }
-        let structured = serde_json::to_value(&result).map_err(|e| {
-            McpError::internal_error(format!("failed to serialize ask result: {e}"), None)
-        })?;
 
-        // `structured()` 会把 structuredContent 同步序列化为 content[0] 的 JSON 文本，
-        // 兼容尚不读 structuredContent 的客户端。
-        let mut tool_result = CallToolResult::structured(structured);
-        // 把人类附带的图片直接读回为 ImageContent（非图片文件仅以路径出现在 structuredContent 中）。
-        for (path, mime) in image_files(&result) {
+        let mut tool_result = CallToolResult::success(vec![ContentBlock::text(text.to_string())]);
+        // 把人类附带的图片直接读回为 ImageContent（非图片文件仅以路径出现在 `[files]` 区块中）。
+        for (path, mime) in image_files(text) {
             match std::fs::read(&path) {
                 Ok(bytes) => {
                     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -401,7 +327,7 @@ structured content; any images the human attaches are returned as image content.
                         .content
                         .push(ContentBlock::image(b64, mime.to_string()));
                 }
-                // 读不到就跳过；路径仍在 structuredContent.answers[].files 中可供模型参考。
+                // 读不到就跳过；路径仍在 `[files]` 区块中可供模型参考。
                 Err(_) => continue,
             }
         }
@@ -521,7 +447,6 @@ you are unsure of the exact prior AskHuman exchange. Takes no public arguments."
 window / IM). Use only when the human asked to record a deferred task or accepted a concrete \
 suggestion for later — never for your own work plan. Attaches to the project of the MCP server's \
 cwd (git root). Returns the 1-based index and stored text on success.",
-        output_schema = rmcp::handler::server::tool::schema_for_type::<TodoAddResult>(),
         // Appending a todo is additive (not destructive) and touches no external world.
         annotations(destructive_hint = false, open_world_hint = false)
     )]
@@ -574,18 +499,12 @@ cwd (git root). Returns the 1-based index and stored text on success.",
                 "Failed to save todo: entry missing after write (not persisted).",
             )]));
         };
-        let result = TodoAddResult {
-            index,
-            id: entry.id,
-            text: entry.text,
-            project,
-            auto: entry.auto,
-        };
-        let structured = serde_json::to_value(&result).map_err(|e| {
-            McpError::internal_error(format!("failed to serialize todo_add result: {e}"), None)
-        })?;
-        // `structured()` mirrors structuredContent into content[0] as JSON text.
-        Ok(CallToolResult::structured(structured))
+        // 一行文本足矣（消费者是模型）；id/project 等细节对模型无用，不再返回结构化 JSON。
+        let kind = if entry.auto { "auto-run todo" } else { "todo" };
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            "Added {kind} #{index}: {}",
+            entry.text
+        ))]))
     }
 
     fn configure_child(
@@ -836,7 +755,8 @@ project todo.",
     }
 }
 
-/// 把 [`AskParams`] 翻译成 `AskHuman` 的 argv（不含程序名），末尾固定追加 `--output json`。
+/// 把 [`AskParams`] 翻译成 `AskHuman` 的 argv（不含程序名）。子进程保持默认**文本输出**，
+/// 其结果区块即为对模型透传的最终文本（与 CLI 契约同一份字节）。
 ///
 /// 纯函数，便于单测。注意：`message` 必须作为**首个**位置参数（CLI 只接受一个位置参数，且需在所有
 /// `-q` 之前）。
@@ -869,8 +789,6 @@ fn build_argv(params: &AskParams) -> Vec<String> {
         }
     }
 
-    argv.push("--output".to_string());
-    argv.push("json".to_string());
     argv
 }
 
@@ -899,18 +817,36 @@ fn build_whats_next_argv(params: &WhatsNextParams) -> Vec<String> {
     argv
 }
 
-/// 从结果中挑出「可作为 MCP 图片直接返回」的文件，返回 (路径, MIME) 列表。
-fn image_files(result: &AskResult) -> Vec<(PathBuf, &'static str)> {
-    let mut out = Vec::new();
-    for ans in &result.answers {
-        for f in &ans.files {
-            let path = PathBuf::from(f);
-            if let Some(mime) = image_mime(&path) {
-                out.push((path, mime));
+/// 从透传文本的所有 `[files]` 区块解析路径行。区块起于整行 `[files]`，其后每个非空行是一个
+/// 路径，遇空行（区块分隔）结束；多题 `# Qn` 分组下同样适用。
+///
+/// 理论上用户自由输入若恰好含一行 `[files]` 会被误认为区块，但后果仅是把后续行当候选路径
+/// ——非图片扩展名被过滤，读不到的文件被跳过，主内容（透传文本）不受任何影响。
+fn files_block_paths(text: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut in_files = false;
+    for line in text.lines() {
+        if in_files {
+            if line.trim().is_empty() {
+                in_files = false;
+            } else {
+                paths.push(PathBuf::from(line));
             }
+            continue;
+        }
+        if line == crate::cli::output::MARKER_FILES {
+            in_files = true;
         }
     }
-    out
+    paths
+}
+
+/// 从透传文本中挑出「可作为 MCP 图片直接返回」的文件，返回 (路径, MIME) 列表。
+fn image_files(text: &str) -> Vec<(PathBuf, &'static str)> {
+    files_block_paths(text)
+        .into_iter()
+        .filter_map(|path| image_mime(&path).map(|mime| (path, mime)))
+        .collect()
 }
 
 /// 按扩展名判断图片 MIME；非图片返回 `None`。
@@ -1232,8 +1168,9 @@ mod tests {
 
     #[test]
     fn argv_message_only_becomes_question() {
+        // 子进程保持默认文本输出（结果区块原样透传），不再追加 --output json。
         let p = params(json!({ "message": "Continue?" }));
-        assert_eq!(build_argv(&p), vec!["Continue?", "--output", "json"]);
+        assert_eq!(build_argv(&p), vec!["Continue?"]);
     }
 
     #[test]
@@ -1261,8 +1198,6 @@ mod tests {
                 "staging",
                 "-f",
                 "/tmp/a.png",
-                "--output",
-                "json",
             ]
         );
     }
@@ -1571,80 +1506,61 @@ mod tests {
         );
     }
 
-    /// 模拟 `ask()` 对子进程 JSON 的归一化：反序列化 + 正常作答清空 `action`。
-    fn normalize(child: Value) -> Value {
-        let mut result: AskResult = serde_json::from_value(child).unwrap();
-        if result.action.as_deref() == Some("answer") {
-            result.action = None;
+    #[test]
+    fn ask_and_todo_add_declare_no_output_schema() {
+        // 方案 A（spec mcp.md D5）：不声明 output schema，结果为 CLI 同款文本区块。
+        let server = AskServer::new();
+        for name in ["ask", "todo_add"] {
+            let tool = server.tool_router.get(name).unwrap();
+            assert!(tool.output_schema.is_none(), "{name}");
         }
-        serde_json::to_value(&result).unwrap()
     }
 
     #[test]
-    fn result_answer_drops_channel_action_and_selected_indices() {
-        // 模拟 render_json 的输出形态（含脚本专用 selected_indices + channel）。
-        let out = normalize(json!({
-            "action": "answer",
-            "channel": "popup",
-            "answers": [{
-                "question_index": 0,
-                "selected_options": ["production"],
-                "selected_indices": [1],
-                "user_input": "go",
-                "files": ["/tmp/a.png"]
-            }]
-        }));
-        assert_eq!(out["answers"][0]["question_index"], 0);
-        assert_eq!(out["answers"][0]["selected_options"][0], "production");
-        assert_eq!(out["answers"][0]["user_input"], "go");
-        // 对外精简：正常作答不带 action，且从不带 channel；selected_indices 永远剔除。
-        assert!(out.get("action").is_none());
-        assert!(out.get("channel").is_none());
-        assert!(out["answers"][0].get("selected_indices").is_none());
+    fn ask_description_documents_text_block_markers() {
+        let server = AskServer::new();
+        let description = server
+            .tool_router
+            .get("ask")
+            .unwrap()
+            .description
+            .clone()
+            .unwrap_or_default();
+        for marker in [
+            crate::cli::output::MARKER_SELECTED_OPTIONS,
+            crate::cli::output::MARKER_USER_INPUT,
+            crate::cli::output::MARKER_FILES,
+            crate::cli::output::MARKER_STATUS,
+        ] {
+            assert!(description.contains(marker), "{marker}");
+        }
+        assert!(description.contains("# Q1"));
     }
 
     #[test]
-    fn result_cancel_keeps_action_drops_channel() {
-        let out = normalize(json!({ "action": "cancel", "channel": "popup" }));
-        assert_eq!(out["action"], "cancel");
-        assert!(out.get("channel").is_none());
-        assert!(out.get("answers").is_none());
-    }
+    fn files_block_paths_parses_single_and_multi_question_output() {
+        let single = "[selected_options]\nA\n\n[user_input]\nhi\n\n[files]\n/tmp/a.png\n/tmp/b.md";
+        assert_eq!(
+            files_block_paths(single),
+            vec![PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.md")]
+        );
 
-    #[test]
-    fn result_cancel_passes_through_status() {
-        // 子进程 render_json 取消时带 status 引导；薄壳应原样透传到 structuredContent。
-        let out = normalize(json!({
-            "action": "cancel",
-            "channel": "popup",
-            "status": "The human cancelled. You must ask again."
-        }));
-        assert_eq!(out["status"], "The human cancelled. You must ask again.");
-    }
+        let multi =
+            "# Q1\n[files]\n/tmp/a.png\n\n---\n\n# Q2\n[user_input]\nok\n\n[files]\n/tmp/c.jpeg";
+        assert_eq!(
+            files_block_paths(multi),
+            vec![PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/c.jpeg")]
+        );
 
-    #[test]
-    fn result_answer_omits_status() {
-        let out = normalize(json!({ "action": "answer", "channel": "popup" }));
-        assert!(out.get("status").is_none());
+        // 无 [files] 区块（含取消路径）→ 无路径；user_input 里的普通文本行不会被误收。
+        assert!(files_block_paths("[status]\nThe user canceled.").is_empty());
+        assert!(files_block_paths("[user_input]\nsee files: /tmp/x.png").is_empty());
     }
 
     #[test]
     fn image_files_filters_by_extension() {
-        let result = AskResult {
-            action: None,
-            status: None,
-            answers: vec![AskAnswer {
-                question_index: 0,
-                selected_options: vec![],
-                user_input: None,
-                files: vec![
-                    "/tmp/a.PNG".into(),
-                    "/tmp/notes.md".into(),
-                    "/tmp/b.jpeg".into(),
-                ],
-            }],
-        };
-        let imgs = image_files(&result);
+        let text = "[files]\n/tmp/a.PNG\n/tmp/notes.md\n/tmp/b.jpeg";
+        let imgs = image_files(text);
         assert_eq!(imgs.len(), 2);
         assert_eq!(imgs[0].1, "image/png");
         assert_eq!(imgs[1].1, "image/jpeg");
