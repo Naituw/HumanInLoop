@@ -143,6 +143,12 @@ function toggleCollapse(key: string): void {
   collapsed.value = next;
 }
 
+/** 组收起时仍显示工作中的会话（含等待回答）——只收起安静的。 */
+function visibleItems(g: Group): SessionM[] {
+  if (!collapsed.value.has(g.key)) return g.items;
+  return g.items.filter((s) => s.state === "working");
+}
+
 const recentOpen = ref(true);
 
 // ===== 选中与详情 =====
@@ -166,7 +172,7 @@ function selectSession(id: string): void {
 
 /** 键盘 ↑↓ 导航用的可见会话平铺序。 */
 const flatVisible = computed<string[]>(() =>
-  groups.value.flatMap((g) => (collapsed.value.has(g.key) ? [] : g.items.map((s) => s.id)))
+  groups.value.flatMap((g) => visibleItems(g).map((s) => s.id))
 );
 
 function navigate(delta: number): void {
@@ -526,9 +532,9 @@ onBeforeUnmount(() => {
               <svg viewBox="0 0 12 12"><path d="M6 2v8M2 6h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
             </button>
           </div>
-          <ul v-show="!collapsed.has(g.key)" class="sess-list">
+          <ul v-show="visibleItems(g).length || !collapsed.has(g.key)" class="sess-list">
             <li
-              v-for="s in g.items"
+              v-for="s in visibleItems(g)"
               :key="s.id"
               class="sess"
               :class="{ selected: s.id === selectedId, ended: s.state === 'ended' }"
@@ -546,7 +552,7 @@ onBeforeUnmount(() => {
                 </span>
               </span>
             </li>
-            <li v-if="g.items.length === 0" class="sess-empty">当前过滤下无会话</li>
+            <li v-if="!collapsed.has(g.key) && g.items.length === 0" class="sess-empty">当前过滤下无会话</li>
           </ul>
         </section>
 

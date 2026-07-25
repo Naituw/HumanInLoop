@@ -58,6 +58,12 @@ function workingCount(g: ProjectGroup): number {
   return g.items.filter((a) => a.state === "working").length;
 }
 
+/** 组收起时仍显示工作中的会话（含等待回答；用户定案）——只收起安静的。 */
+function visibleItems(g: ProjectGroup): AgentRecord[] {
+  if (!collapsed.value.has(g.key)) return g.items;
+  return g.items.filter((a) => a.state === "working");
+}
+
 /** 项目待办数（组 key 为 cwd，可能是 git 根的子目录：前缀匹配兜底）。 */
 function todoCount(g: ProjectGroup): number {
   if (props.todoCounts[g.key] !== undefined) return props.todoCounts[g.key];
@@ -117,9 +123,9 @@ function rowTime(a: AgentRecord): string {
           <svg viewBox="0 0 12 12"><path d="M6 2v8M2 6h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
         </button>
       </div>
-      <ul v-show="!collapsed.has(g.key)" class="sess-list">
+      <ul v-show="visibleItems(g).length || !collapsed.has(g.key)" class="sess-list">
         <li
-          v-for="a in g.items"
+          v-for="a in visibleItems(g)"
           :key="a.sessionId"
           class="sess"
           :class="{ selected: a.sessionId === selectedId, ended: a.state === 'ended' }"
@@ -134,7 +140,12 @@ function rowTime(a: AgentRecord): string {
             </span>
           </span>
         </li>
-        <li v-if="g.items.length === 0" class="sess-empty">{{ t("console.noSessions") }}</li>
+        <li
+          v-if="!collapsed.has(g.key) && g.items.length === 0"
+          class="sess-empty"
+        >
+          {{ t("console.noSessions") }}
+        </li>
       </ul>
     </section>
 
