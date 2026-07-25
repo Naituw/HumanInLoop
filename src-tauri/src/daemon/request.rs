@@ -11,7 +11,7 @@ use crate::i18n::Lang;
 use crate::ipc::{ConfirmTask, PendingRequestInfo, ServerMsg, ShowPayload, TaskRequest};
 use crate::models::{AskRequest, ConfirmDeliveryState, ConfirmRequest, InteractionRequest};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::Notify;
@@ -42,6 +42,16 @@ pub struct RequestEntry {
     /// 供 daemon「在途 AskHuman 豁免」按 session_id 刷新——覆盖无 pid 的 agent
     /// （Codex 共享 app-server / Claude 被 scrub），使其等待人类回答期间不被「工作中兜底超时」降级。
     pub agent_session_id: Option<String>,
+    /// 重复提问收敛用的会话键与提问指纹（spec duplicate-ask-coalescing D1/D2）：
+    /// 同键同指纹的后续调用合流到本请求，不再弹第二张卡。会话键为 None 时不参与收敛。
+    pub session_key: Option<String>,
+    pub fingerprint: String,
+    /// 等待本请求结果的调用方个数（原始 CLI + 各 follower）。归零才允许取消整个请求。
+    waiters: AtomicUsize,
+    /// 等待者归零时唤醒提交连接去做取消收尾（最后离场的可能是 follower）。
+    pub waiters_gone: Arc<Notify>,
+    /// 合流上来的调用方的结果发送端；终态产生时逐个投递（spec D3/D4）。
+    followers: Mutex<Vec<UnboundedSender<RenderOutcome>>>,
     /// GUI 发送端槽位（adapter 与连接处理器共享）。
     pub gui: GuiSlot,
     /// 调用方 agent 异步解析结果（方案5/b）：daemon walk 完成后填入，helper 连接握手时若已就绪则补发。
@@ -62,6 +72,35 @@ impl RequestEntry {
             .interaction
             .ask()
             .expect("ask entry must carry an ask interaction")
+    }
+
+    /// 当前等待者个数。
+    pub fn waiter_count(&self) -> usize {
+        self.waiters.load(Ordering::SeqCst)
+    }
+
+    /// 一个调用方离场（连接断开或已拿到结果）：返回剩余等待者个数。
+    /// 归零意味着没人再消费结果，由提交连接走取消收尾（spec D4）——最后离场的可能是
+    /// 合流上来的调用方，故这里唤醒提交连接，不在各自的任务里各做各的收尾。
+    pub fn release_waiter(&self) -> usize {
+        let left = self
+            .waiters
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+                Some(v.saturating_sub(1))
+            })
+            .map(|prev| prev.saturating_sub(1))
+            .unwrap_or(0);
+        if left == 0 {
+            self.waiters_gone.notify_waiters();
+        }
+        left
+    }
+
+    /// 把终态结果投递给所有合流上来的调用方（各自写自己的 IPC `final`）。
+    pub fn broadcast_outcome(&self, outcome: &RenderOutcome) {
+        for tx in self.followers.lock().unwrap().drain(..) {
+            let _ = tx.send(outcome.clone());
+        }
     }
 }
 
@@ -366,6 +405,9 @@ impl RequestRegistry {
             .agent_session_id
             .clone()
             .filter(|s| !s.trim().is_empty());
+        // 收敛键一并算好存下，后续合流查找不必重算（spec duplicate-ask-coalescing D1/D2）。
+        let session_key = super::ask_dedup::session_key(&task);
+        let fingerprint = super::ask_dedup::fingerprint(&task);
 
         // Daemon 分配权威 request_id（用于临时目录）。
         let mut request = AskRequest::new(task.message, task.questions, task.is_markdown);
@@ -419,6 +461,11 @@ impl RequestRegistry {
             coordinator,
             show,
             agent_session_id,
+            session_key,
+            fingerprint,
+            waiters: AtomicUsize::new(1),
+            waiters_gone: Arc::new(Notify::new()),
+            followers: Mutex::new(Vec::new()),
             gui,
             resolved_agent: Arc::new(Mutex::new(None)),
             gui_connected: AtomicBool::new(false),
@@ -434,6 +481,28 @@ impl RequestRegistry {
     }
 
     /// Build a validated structured confirmation with daemon-owned identity and 24h deadline.
+    /// 合流查找（spec duplicate-ask-coalescing D3/D9）：同会话键 + 同指纹且**仍在等人回答**的
+    /// 在途请求存在时，把调用方登记为 follower，返回其结果接收端。
+    ///
+    /// 查找、收尾判定与登记必须在同一把锁内完成：已进入收尾（终态已产生）的请求视为不在途，
+    /// 否则 follower 会挂在一个永远不再投递的请求上。在途请求是个位数，直接遍历即可，不建索引。
+    pub fn try_attach(
+        &self,
+        session_key: &str,
+        fingerprint: &str,
+    ) -> Option<(Arc<RequestEntry>, UnboundedReceiver<RenderOutcome>)> {
+        let inner = self.inner.lock().unwrap();
+        let entry = inner.by_id.values().find(|entry| {
+            entry.session_key.as_deref() == Some(session_key)
+                && entry.fingerprint == fingerprint
+                && !entry.coordinator.is_finalizing()
+        })?;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        entry.followers.lock().unwrap().push(tx);
+        entry.waiters.fetch_add(1, Ordering::SeqCst);
+        Some((entry.clone(), rx))
+    }
+
     pub fn create_confirm(
         &self,
         task: ConfirmTask,
@@ -931,6 +1000,74 @@ mod tests {
             )
         );
         assert_eq!(entry.agent_session_id.as_deref(), Some("conversation-1"));
+    }
+
+    fn ask_task(session: Option<&str>, question: &str) -> TaskRequest {
+        serde_json::from_value(json!({
+            "message": {"text": "context", "files": []},
+            "questions": [{"message": question, "predefinedOptions": []}],
+            "isMarkdown": true,
+            "source": "Cursor",
+            "lang": "en",
+            "project": "/tmp/project",
+            "agentKind": "cursor",
+            "agentSessionId": session,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn identical_ask_from_same_session_attaches_to_the_live_request() {
+        let registry = RequestRegistry::new();
+        let (entry, _rx) = registry.create(ask_task(Some("s1"), "continue?"));
+        let key = entry.session_key.clone().unwrap();
+        assert_eq!(key, "sid:s1");
+        assert_eq!(entry.waiter_count(), 1);
+
+        // 不同会话 / 不同指纹都不合流。
+        assert!(registry
+            .try_attach("sid:other", &entry.fingerprint)
+            .is_none());
+        let different =
+            super::super::ask_dedup::fingerprint(&ask_task(Some("s1"), "something else"));
+        assert!(registry.try_attach(&key, &different).is_none());
+
+        let (same, mut rx) = registry
+            .try_attach(&key, &entry.fingerprint)
+            .expect("identical ask coalesces");
+        assert_eq!(same.request_id, entry.request_id);
+        assert_eq!(entry.waiter_count(), 2);
+
+        let outcome = RenderOutcome {
+            stdout: "[user_input]\nyes".into(),
+            stderr: None,
+            exit_code: 0,
+        };
+        entry.broadcast_outcome(&outcome);
+        assert_eq!(rx.try_recv().unwrap().stdout, "[user_input]\nyes");
+
+        assert_eq!(entry.release_waiter(), 1);
+        assert_eq!(entry.release_waiter(), 0);
+    }
+
+    #[test]
+    fn ask_without_session_never_coalesces() {
+        let registry = RequestRegistry::new();
+        let (entry, _rx) = registry.create(ask_task(None, "continue?"));
+        assert!(entry.session_key.is_none());
+        assert!(registry.try_attach("sid:s1", &entry.fingerprint).is_none());
+    }
+
+    #[tokio::test]
+    async fn finalizing_request_is_not_attachable() {
+        let registry = RequestRegistry::new();
+        let (entry, _rx) = registry.create(ask_task(Some("s1"), "continue?"));
+        let key = entry.session_key.clone().unwrap();
+        entry
+            .coordinator
+            .submit(crate::models::ChannelResult::cancel("popup"));
+        // 终态已产生：再挂上去就永远等不到结果了（spec duplicate-ask-coalescing D9）。
+        assert!(registry.try_attach(&key, &entry.fingerprint).is_none());
     }
 
     #[test]

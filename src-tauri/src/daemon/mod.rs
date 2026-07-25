@@ -3,6 +3,7 @@
 //! Phase 0：起一个不承载任何渠道的空 Daemon，提供握手（含二进制指纹换新）、status、stop、
 //! 单实例（flock）、自启、空闲退出。渠道 / 弹窗 / 提交将在后续 Phase 接入。
 
+pub mod ask_dedup;
 #[cfg(unix)]
 pub mod config_watch;
 pub mod lifecycle;

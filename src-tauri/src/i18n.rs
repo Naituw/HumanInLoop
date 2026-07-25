@@ -92,6 +92,12 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
             "用户取消了操作，你必须重新询问用户是否确定要取消，直到用户给出明确答复",
         ),
         "status.unanswered" => pick(lang, "The user did not answer this question", "用户未回答此问题"),
+        // 重放（spec duplicate-ask-coalescing D7）：同一个提问刚被回答过，这次没有再打扰人。
+        "status.replayed" => pick(
+            lang,
+            "This is the answer the user gave {n}s ago to an identical question. They were not asked again.",
+            "这是用户在 {n} 秒前对完全相同问题给出的回答，本次没有再打扰用户",
+        ),
         "status.confirmContinue" => pick(lang, "User confirmed to continue", "用户确认继续"),
 
         // —— 窗口标题 ——

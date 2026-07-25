@@ -223,9 +223,11 @@ pub struct AskResult {
     /// omitted on a normal answer (in which case `answers` carries the reply).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
-    /// Guidance present only when the human cancelled: they dismissed the request without
-    /// answering, so you MUST ask again and keep asking until they give an explicit reply.
-    /// Never treat a cancel as approval or as permission to proceed.
+    /// State of this request, present only when there is something to report. When the human
+    /// cancelled (see `action`), it tells you to ask again and keep asking until they give an
+    /// explicit reply — never treat a cancel as approval. When an identical question was already
+    /// answered moments ago, it says the answer below is that earlier reply and the human was not
+    /// disturbed again. Decide whether it was a cancel by `action`, not by the presence of this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     /// One entry per answered question (questions left blank are omitted).

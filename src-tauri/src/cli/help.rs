@@ -158,13 +158,13 @@ fn result_field_lines(lang: Lang) -> Vec<String> {
             format!("  {m_opts}  Predefined options the user checked"),
             format!("  {m_input}        Free-form text the user typed"),
             format!("  {m_files}             Local paths the user attached (images/files/dirs; tell type by extension)"),
-            format!("  {m_status}            Shown when the user cancels; follow its instructions to keep asking"),
+            format!("  {m_status}            State of this request (cancelled, unanswered, replayed answer); follow its text"),
         ],
         Lang::Zh => vec![
             format!("  {m_opts}  用户勾选的预定义选项"),
             format!("  {m_input}        用户输入的自由文本"),
             format!("  {m_files}             用户附带的本地路径（图片/文件/目录，按后缀区分类型）"),
-            format!("  {m_status}            用户取消时出现，请按其中说明继续询问"),
+            format!("  {m_status}            本次提问的状态（取消 / 未作答 / 重放的旧回答），按其中说明处理"),
         ],
     }
 }

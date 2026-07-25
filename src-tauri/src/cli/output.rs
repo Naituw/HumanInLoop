@@ -273,8 +273,9 @@ pub fn render_json(
     struct JsonOutput {
         action: &'static str,
         channel: String,
-        /// 取消时的引导文案（与文本侧 `[status]` 一致）：要求模型必须重新确认，直到用户给出明确答复。
-        /// 仅在取消路径出现；正常作答时省略。
+        /// 本次提问的状态说明（与文本侧 `[status]` 一致）：取消时是「必须重新确认」的引导，
+        /// 重放旧回答时是重放说明（spec duplicate-ask-coalescing D7）。无特殊状态时省略。
+        /// **判断是否被取消看 `action`**，不要用「有没有 status」来判断。
         #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]

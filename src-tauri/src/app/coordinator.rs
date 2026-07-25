@@ -62,6 +62,9 @@ pub struct Coordinator {
     result: Mutex<Option<ChannelResult>>,
     /// 赢家渠道 id（首个 submit 写入；与 `result` 不同，`finish` 不会取走，供作答后更新活跃槽读取）。
     winner: Mutex<Option<String>>,
+    /// 终态动作（首个 submit 写入，`finish` 不取走）：只有真实作答才允许进重放缓存
+    /// （spec duplicate-ask-coalescing D6）。
+    winner_action: Mutex<Option<ChannelAction>>,
     /// 是否已进入收尾阶段（首个 submit 后置位）。GUI 据此拦下「关窗即退出」，
     /// 仅放行协调器自身的 `app.exit`，确保结果先输出；收尾前不拦（Cmd+Q 等照常退出）。
     finalizing: AtomicBool,
@@ -184,6 +187,7 @@ impl Coordinator {
             pending: Arc::new(AtomicUsize::new(0)),
             result: Mutex::new(None),
             winner: Mutex::new(None),
+            winner_action: Mutex::new(None),
             finalizing: AtomicBool::new(false),
             emitted: AtomicBool::new(false),
             record_history_enabled,
@@ -228,6 +232,14 @@ impl Coordinator {
         self.winner.lock().unwrap().clone()
     }
 
+    /// 终态是不是「用户真的答了」。取消 / 系统收尾均为 false（spec duplicate-ask-coalescing D6）。
+    pub fn answered(&self) -> bool {
+        matches!(
+            *self.winner_action.lock().unwrap(),
+            Some(ChannelAction::Send)
+        )
+    }
+
     /// 投递终态结果：仅首个生效；随后取消其余 Channel 并启动收尾窗口，到时输出并退出。
     pub fn submit(self: &Arc<Self>, result: ChannelResult) {
         if !self.terminal.try_set(()) {
@@ -243,6 +255,7 @@ impl Coordinator {
             // 锁外 best-effort 出队（whats-next / Stop 卡 chip + 弹窗折叠待办区）。
             let dequeue_ids = crate::todos::ids_to_dequeue(&inner.request, &result);
             *self.winner.lock().unwrap() = Some(source.clone());
+            *self.winner_action.lock().unwrap() = Some(action);
             *self.result.lock().unwrap() = Some(result);
 
             let lang = self.lang;

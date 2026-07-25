@@ -1,6 +1,7 @@
 //! Daemon 主体（Unix）：状态与类型、serve 主循环、连接分发、请求提交与生命周期命令。
 //! watch/select/inbound/subs/detect 的自由函数拆为子模块，经 glob 导入保持单一命名空间。
 
+use super::ask_dedup;
 use super::config_watch;
 use super::lifecycle::{self, DaemonMeta, LockGuard};
 use super::popup_focus::{PopupEffect, PopupFocusArbiter, ReadyMetadata};
@@ -207,6 +208,9 @@ struct ServerState {
     /// 上次广播时的「等待回答」会话集（排序去重）：变化才重推 AgentsState，
     /// 使 `waitingRequestId` 徽标在提问创建/完结时即时刷新（watch 引擎 tick 内比对）。
     last_waiting: Mutex<Vec<String>>,
+    /// 每会话最近一条已完成问答（spec duplicate-ask-coalescing D5）：agent 被中断后原样重发
+    /// 同一个提问时直接回放上次答案，不再打扰人。仅内存，daemon 换新即失效。
+    replay: Mutex<crate::daemon::ask_dedup::ReplayCache>,
 }
 
 /// 一条控制台焦点订阅（`tx` 即该 agents 订阅者的发送端；同一订阅者重设焦点就地更新）。
@@ -809,6 +813,7 @@ async fn serve(_lock: LockGuard) -> i32 {
         pending_launches: Mutex::new(Vec::new()),
         gui_focus: Mutex::new(Vec::new()),
         last_waiting: Mutex::new(Vec::new()),
+        replay: Mutex::new(crate::daemon::ask_dedup::ReplayCache::new()),
     });
 
     // 空闲退出检查。
@@ -1867,8 +1872,52 @@ async fn handle_submit(
         broadcast_agents_state(state);
     }
     let lang = Lang::resolve(&task.lang);
+
+    // 重复提问收敛（spec duplicate-ask-coalescing）：agent 那一轮被中断后往往原样重发同一个
+    // 提问，而旧的 CLI 进程不会被杀，旧卡片仍然有效。这里在建新请求之前先看两件事——
+    // 同一个提问是不是还挂在人面前（合流），或者刚刚已经被回答过（重放）。
+    if let Some(session_key) = ask_dedup::session_key(&task) {
+        let fingerprint = ask_dedup::fingerprint(&task);
+        if let Some((entry, follower_rx)) = state.registry.try_attach(&session_key, &fingerprint) {
+            handle_coalesced(entry, follower_rx, reader, w).await;
+            return;
+        }
+        let hit =
+            state
+                .replay
+                .lock()
+                .unwrap()
+                .get_fresh(&session_key, &fingerprint, Instant::now());
+        if let Some(hit) = hit {
+            let json = task.output_format == crate::models::OutputFormat::Json;
+            let outcome = ask_dedup::mark_replayed(&hit.outcome, hit.ago, json, lang);
+            log(&format!(
+                "request {} replayed ({}s ago)",
+                hit.request_id,
+                hit.ago.as_secs()
+            ));
+            let _ = ipc::write_msg(
+                &mut w,
+                &ServerMsg::Accepted {
+                    request_id: hit.request_id,
+                },
+            )
+            .await;
+            let _ = ipc::write_msg(
+                &mut w,
+                &ServerMsg::Final {
+                    stdout: outcome.stdout,
+                    exit_code: outcome.exit_code,
+                },
+            )
+            .await;
+            return;
+        }
+    }
+
     let (entry, mut final_rx) = state.registry.create(task);
     let request_id = entry.request_id.clone();
+    let session_key = entry.session_key.clone();
     crate::perf::mark(&perf_id, "dmn.created");
     log(&format!("request {} accepted", request_id));
 
@@ -1975,11 +2024,17 @@ async fn handle_submit(
         spawn_gui_watchdog(entry.clone(), lang, im_attached, state.clone());
     }
 
-    // 等待结果或 CLI 断开。
-    let outcome = tokio::select! {
-        o = final_rx.recv() => o,
-        _ = wait_cli_eof(&mut reader) => {
-            log(&format!("request {} cli disconnected; cancelling", request_id));
+    // 等待结果或 CLI 断开。本连接断开时只有在**没有其它调用方还在等**这份结果时才取消整个
+    // 请求（spec duplicate-ask-coalescing D4）：合流上来的调用方仍需要人回答完的答案。
+    let mut caller_gone = false;
+    let outcome = loop {
+        // 本连接已断且再无人等这份结果 → 取消整个请求（最后离场的可能是合流上来的调用方，
+        // 它只会唤醒这里，收尾统一在提交连接做）。
+        if caller_gone && entry.waiter_count() == 0 {
+            log(&format!(
+                "request {} cli disconnected; cancelling",
+                request_id
+            ));
             // Cancel the whole request: IM cards finalize to "Cancelled by caller", popup closes.
             // The IM finalize runs in the channels' own tasks (which outlive this entry), so the
             // daemon need not wait here — it stays alive.
@@ -1992,7 +2047,48 @@ async fn handle_submit(
             state.watch.notify.notify_one();
             return;
         }
+        let waiters_gone = entry.waiters_gone.clone();
+        tokio::select! {
+            o = final_rx.recv() => break o,
+            _ = waiters_gone.notified(), if caller_gone => continue,
+            _ = wait_cli_eof(&mut reader), if !caller_gone => {
+                caller_gone = true;
+                if entry.release_waiter() > 0 {
+                    log(&format!(
+                        "request {} cli disconnected; kept for {} coalesced caller(s)",
+                        request_id,
+                        entry.waiter_count()
+                    ));
+                }
+                continue;
+            }
+        }
     };
+
+    // 先把结果分发给合流上来的调用方，再走本连接自己的收尾。
+    if let Some(o) = outcome.as_ref() {
+        entry.broadcast_outcome(o);
+        // 真实作答才进重放缓存：取消的语义是「重新问我」，重放会把 agent 卡进死循环
+        // （spec duplicate-ask-coalescing D6）。
+        if let Some(key) = session_key.as_ref() {
+            if entry.coordinator.answered() {
+                state.replay.lock().unwrap().put(
+                    key,
+                    ask_dedup::ReplayEntry {
+                        fingerprint: entry.fingerprint.clone(),
+                        outcome: o.clone(),
+                        request_id: request_id.clone(),
+                        finished_at: Instant::now(),
+                    },
+                );
+            }
+        }
+    }
+    if caller_gone {
+        // 原始调用方早已离场（它的连接是死的）；结果已交给还在等的那些调用方，这里只做收尾。
+        finish_request_bookkeeping(state, &entry, &request_id, auto).await;
+        return;
+    }
 
     match outcome {
         Some(o) => {
@@ -2020,6 +2116,17 @@ async fn handle_submit(
             .await;
         }
     }
+    finish_request_bookkeeping(state, &entry, &request_id, auto).await;
+}
+
+/// 一次提问完结后的公共收尾：活跃槽、弹窗焦点、登记表、菜单栏与 `/watch` 跟底。
+/// 原始调用方是否还连着都要走这一段（合流场景下它可能早就断开了）。
+async fn finish_request_bookkeeping(
+    state: &Arc<ServerState>,
+    entry: &Arc<request::RequestEntry>,
+    request_id: &str,
+    auto: bool,
+) {
     // 「在哪个渠道作答就用哪个」：把活跃槽更新为本次作答渠道（弹窗作答 → "popup"，即不再发 IM）。
     // 若由此从某 IM 切走，旧 IM 在 set_active_channel 内收反激活提示。仅自动激活开时生效。
     if auto {
@@ -2027,9 +2134,9 @@ async fn handle_submit(
             set_active_channel(state, &winner).await;
         }
     }
-    update_popup_focus(state, |focus| focus.terminal(&request_id));
+    update_popup_focus(state, |focus| focus.terminal(request_id));
     entry.cancel.notify_waiters();
-    state.registry.remove(&request_id);
+    state.registry.remove(request_id);
     // 在途请求数 -1：刷新菜单栏状态。
     broadcast_tray_state(state);
     // /watch：答复完结 → 「正在等待你的回答」状态解除，即时进卡。对参与了本次问答的渠道，
@@ -2053,6 +2160,72 @@ async fn handle_submit(
     }
     state.watch.notify.notify_one();
     log(&format!("request {} done", request_id));
+}
+
+/// 合流上来的调用方（spec duplicate-ask-coalescing D3）：同会话的同一个提问已经挂在人面前，
+/// 这里只等那张卡的结果，不再弹窗、不投 IM、不碰托盘 / watch / 用户 hook——它们都属于
+/// 「那一次提问」，已经发生过了。本连接断开也只是少一个等待者，绝不取消别人还在等的卡片。
+async fn handle_coalesced(
+    entry: Arc<request::RequestEntry>,
+    mut follower_rx: tokio::sync::mpsc::UnboundedReceiver<crate::app::RenderOutcome>,
+    mut reader: Reader,
+    mut w: OwnedWriteHalf,
+) {
+    let request_id = entry.request_id.clone();
+    log(&format!(
+        "request {} coalesced (waiters={})",
+        request_id,
+        entry.waiter_count()
+    ));
+    if ipc::write_msg(
+        &mut w,
+        &ServerMsg::Accepted {
+            request_id: request_id.clone(),
+        },
+    )
+    .await
+    .is_err()
+    {
+        entry.release_waiter();
+        return;
+    }
+
+    let outcome = tokio::select! {
+        o = follower_rx.recv() => o,
+        _ = wait_cli_eof(&mut reader) => {
+            entry.release_waiter();
+            log(&format!("request {} coalesced caller disconnected", request_id));
+            return;
+        }
+    };
+
+    match outcome {
+        Some(o) => {
+            if let Some(err) = &o.stderr {
+                let _ = ipc::write_msg(&mut w, &ServerMsg::Warn { text: err.clone() }).await;
+            }
+            let _ = ipc::write_msg(
+                &mut w,
+                &ServerMsg::Final {
+                    stdout: o.stdout,
+                    exit_code: o.exit_code,
+                },
+            )
+            .await;
+        }
+        // 结果通道关闭（请求被取消）：与主路径同口径判异常退出码。
+        None => {
+            let _ = ipc::write_msg(
+                &mut w,
+                &ServerMsg::Final {
+                    stdout: String::new(),
+                    exit_code: 3,
+                },
+            )
+            .await;
+        }
+    }
+    entry.release_waiter();
 }
 
 /// GUI Helper 连接：凭 token 关联请求，随后进入 `serve_gui`（下发 show、收 answer 投递协调器）。
