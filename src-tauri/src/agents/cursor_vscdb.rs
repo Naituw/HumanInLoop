@@ -26,6 +26,9 @@ use super::transcript_full::{self, AskHumanBlock, TranscriptDoc, TranscriptEvent
 const MAX_RECENT_EVS: usize = 60;
 /// 首次同步一个会话时，最多回看的历史 bubble 数（含 TODO 台账重建；再早的忽略）。
 const MAX_BACKFILL: usize = 400;
+/// 尾部「活动区」条数：bubble 行是**原地流式更新**的（文字逐段补全、status loading→completed），
+/// 这段每拍整体重读、不入定稿缓存；早于此边界的 bubble 视为定稿、增量消化一次。
+const TAIL_LIVE: usize = 20;
 /// 完整会话解析的事件上限（与 transcript_full::MAX_EVENTS 对齐）。
 const MAX_TX_EVENTS: usize = 2000;
 
@@ -121,14 +124,23 @@ fn bubble_at(b: &Value) -> Option<u64> {
         .and_then(transcript_full::parse_iso8601_secs)
 }
 
-/// toolFormerData 的参数（rawArgs 优先，回退 params；JSON 字符串解析成对象——
-/// `classify_tool` 与 `detect_askhuman` 都按对象取键）。解析失败保留原串。
+/// toolFormerData 的参数：取**首个非空**的 `rawArgs` / `params` 字符串（不同版本二选一填充：
+/// 实测有的会话 rawArgs 是空串、真参数在 params），JSON 解析成对象——`classify_tool` 与
+/// `detect_askhuman` 都按对象取键；解析失败保留原串；也容忍参数直接是对象的形态。
 fn tool_args(tf: &Value) -> Option<Value> {
-    let raw = tf
-        .get("rawArgs")
-        .or_else(|| tf.get("params"))
-        .and_then(|v| v.as_str())?;
-    Some(serde_json::from_str::<Value>(raw).unwrap_or_else(|_| Value::String(raw.to_string())))
+    if let Some(raw) = ["rawArgs", "params"].iter().find_map(|k| {
+        tf.get(*k)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }) {
+        return Some(
+            serde_json::from_str::<Value>(raw).unwrap_or_else(|_| Value::String(raw.to_string())),
+        );
+    }
+    ["rawArgs", "params"]
+        .iter()
+        .find_map(|k| tf.get(*k).filter(|v| v.is_object()).cloned())
 }
 
 /// 工具结果文本（result 是 JSON 字符串 `{output, ...}`；取 output，回退原串）。
@@ -198,12 +210,17 @@ fn cache() -> &'static Mutex<HashMap<String, SessCache>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// 活动帧解析（watch tick 热路径）：增量消化新增 bubble，聚合语义与 jsonl 完全同源。
-/// 会话不在库中（CLI / 旧版本）→ None（调用方回退 jsonl）。
+/// 活动帧解析（watch tick 热路径）。分两区：
+/// - **定稿区**（早于尾部 `TAIL_LIVE` 条）：增量消化一次进滚动窗 / TODO 台账；
+/// - **活动区**（尾部 `TAIL_LIVE` 条）：每拍整体重读——bubble 行原地流式更新（文字逐段
+///   补全、工具 status 翻转），读一次就定格会让新内容永远停在首见状态（用户实证）。
+///
+/// 聚合语义与 jsonl 完全同源。会话不在库中（CLI / 旧版本）→ None（调用方回退 jsonl）。
 pub fn resolve_activity(session_id: &str) -> Option<Activity> {
     let conn = open()?;
     let composer = composer_value(&conn, session_id)?;
     let headers = header_ids(&composer)?;
+    let finalized = headers.len().saturating_sub(TAIL_LIVE);
 
     let mut guard = cache().lock().ok()?;
     let entry = guard.entry(session_id.to_string()).or_insert(SessCache {
@@ -220,12 +237,13 @@ pub fn resolve_activity(session_id: &str) -> Option<Activity> {
         entry.last_at = None;
     }
     // 首次同步只回看有限窗口（台账尽力重建；再早的 TODO 更新忽略）。
-    if entry.seen == 0 && headers.len() > MAX_BACKFILL {
-        entry.seen = headers.len() - MAX_BACKFILL;
+    if entry.seen == 0 && finalized > MAX_BACKFILL {
+        entry.seen = finalized - MAX_BACKFILL;
     }
-    for bubble_id in &headers[entry.seen..] {
+    // 定稿区：增量消化一次。
+    for bubble_id in &headers[entry.seen.min(finalized)..finalized] {
         let Some(b) = bubble_value(&conn, session_id, bubble_id) else {
-            continue; // bubble 尚未写入 / 已清理：跳过，下一拍重试不阻塞。
+            continue; // 定稿边界仍缺行（极罕见）：放弃该条，不阻塞。
         };
         if let Some(at) = bubble_at(&b) {
             entry.last_at = Some(at);
@@ -241,25 +259,49 @@ pub fn resolve_activity(session_id: &str) -> Option<Activity> {
             }
         }
     }
-    entry.seen = headers.len();
+    entry.seen = finalized.max(entry.seen);
     if entry.recent.len() > MAX_RECENT_EVS {
         let drop = entry.recent.len() - MAX_RECENT_EVS;
         entry.recent.drain(..drop);
     }
 
-    // 聚合：滚动窗事件 + TODO 台账快照（一条 replace 事件注入）。vscdb 自带真实工具状态，
-    // 不做 Cursor jsonl 的「全部收敛」。
-    let mut evs: Vec<Ev> = Vec::with_capacity(entry.recent.len() + 1);
-    if !entry.todos.is_empty() {
+    // 活动区：每拍重读，事件与 TODO 更新叠在定稿态副本之上。
+    let mut live_todos = entry.todos.clone();
+    let mut live_evs: Vec<Ev> = Vec::new();
+    let mut live_at = entry.last_at;
+    for bubble_id in &headers[finalized..] {
+        let Some(b) = bubble_value(&conn, session_id, bubble_id) else {
+            continue; // 行还没写入：下一拍自然补上。
+        };
+        if let Some(at) = bubble_at(&b) {
+            live_at = Some(live_at.map_or(at, |x| x.max(at)));
+        }
+        let mut evs = Vec::new();
+        bubble_to_evs(&b, &mut evs);
+        for ev in evs {
+            match ev {
+                Ev::Todos { replace, items } => {
+                    activity::apply_todo_update(&mut live_todos, replace, &items);
+                }
+                other => live_evs.push(other),
+            }
+        }
+    }
+
+    // 聚合：TODO 快照（一条 replace 事件注入）+ 定稿滚动窗 + 活动区事件。
+    // vscdb 自带真实工具状态，不做 Cursor jsonl 的「全部收敛」。
+    let mut evs: Vec<Ev> = Vec::with_capacity(entry.recent.len() + live_evs.len() + 1);
+    if !live_todos.is_empty() {
         evs.push(Ev::Todos {
             replace: true,
-            items: entry.todos.clone(),
+            items: live_todos,
         });
     }
     evs.extend(entry.recent.iter().cloned());
+    evs.extend(live_evs);
     let mut a = activity::aggregate(&evs, false)?;
     a.todos.retain(|t| t.state != TodoState::Cancelled);
-    a.at = entry.last_at;
+    a.at = live_at;
     Some(a)
 }
 
@@ -481,6 +523,33 @@ mod tests {
         let mut out = Vec::new();
         push_tx_events(&b, &mut out);
         assert!(matches!(&out[0], TranscriptEvent::UserText { text, .. } if text == "修一个 bug"));
+    }
+
+    /// 参数取非空源：rawArgs 空串时回退 params；edit_file_v2 的 relativeWorkspacePath
+    /// 提取为文件名对象（用户实证：某些会话 rawArgs 恒空、真参数在 params）。
+    #[test]
+    fn tool_args_fall_back_to_params_and_extract_workspace_path() {
+        let b = serde_json::json!({
+            "type": 2,
+            "text": "",
+            "toolFormerData": {
+                "name": "edit_file_v2",
+                "status": "loading",
+                "rawArgs": "",
+                "params": "{\"relativeWorkspacePath\":\"/x/src/cli/debug_cmd.rs\",\"noCodeblock\":true}",
+            },
+        });
+        let mut evs = Vec::new();
+        bubble_to_evs(&b, &mut evs);
+        assert_eq!(evs.len(), 1); // loading：无结果闭合
+        let Ev::Tool(td) = &evs[0] else {
+            panic!("expected tool ev");
+        };
+        assert!(matches!(
+            td.label,
+            crate::agents::activity::ToolLabel::Write
+        ));
+        assert_eq!(td.object.as_deref(), Some("debug_cmd.rs"));
     }
 
     /// 真机守护冒烟（与 transcript_full 的 real_* 测试同模式）：本机存在 Cursor 全局库时，

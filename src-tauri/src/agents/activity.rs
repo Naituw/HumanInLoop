@@ -746,6 +746,8 @@ fn arg_filename(args: Option<&Value>) -> Option<String> {
         "filename",
         "file",
         "notebook_path",
+        // Cursor IDE（vscdb 源）edit_file_v2 的参数键。
+        "relativeWorkspacePath",
     ] {
         if let Some(s) = o.get(k).and_then(|v| v.as_str()) {
             let seg = s.trim_end_matches('/').rsplit('/').next().unwrap_or(s);
