@@ -815,10 +815,12 @@ pub(super) fn detect_askhuman(
     let name_l = name.to_ascii_lowercase();
     let mut message = String::new();
     let mut questions: Vec<String> = Vec::new();
-    let mut is_ah = name_l == "ask" || name_l.contains("askhuman");
+    let mut is_ah = false;
 
     if let Some(a) = args {
-        // CLI 形态（Bash/Shell 命令，string 或 argv 数组）。
+        // CLI 形态（Bash/Shell 命令，string 或 argv 数组）。仅当解析出**命令位**的 AskHuman
+        // 提问调用才算——`rg 'AskHuman'`、`pkill -f AskHuman`、`AskHuman daemon status` 等
+        // 只是提到或非提问子命令，一律不算（用户实证：脚本里的字面量全被误判成问答卡）。
         let cmd_string = a
             .get("command")
             .and_then(|v| v.as_str())
@@ -832,9 +834,8 @@ pub(super) fn detect_askhuman(
                 })
             });
         if let Some(cmd) = cmd_string {
-            if cmd.to_ascii_lowercase().contains("askhuman") {
+            if let Some((m, qs)) = parse_askhuman_cli(&cmd) {
                 is_ah = true;
-                let (m, qs) = parse_askhuman_cli(&cmd);
                 message = m;
                 questions = qs;
             }
@@ -856,13 +857,13 @@ pub(super) fn detect_askhuman(
                     }
                 }
             }
+            if message.is_empty() && questions.is_empty() {
+                message = summarize_args(name, args);
+            }
         }
     }
     if !is_ah {
         return None;
-    }
-    if message.is_empty() && questions.is_empty() {
-        message = summarize_args(name, args);
     }
     let answers = result
         .map(|r| parse_askhuman_answers(r, questions.len().max(1)))
@@ -948,39 +949,87 @@ fn shellish_tokens(cmd: &str) -> Vec<String> {
     tokens
 }
 
+/// AskHuman 后第一个位置参数是这些 → 非提问子命令（daemon 管理 / 待办 / 配置等），不算 ask。
+/// 隐藏 hook 子命令（`__` 前缀）另行排除。
+const NON_ASK_SUBCOMMANDS: &[&str] = &[
+    "daemon", "agents", "dev", "todo", "channel", "config", "doctor", "mcp", "debug", "help",
+    "version",
+];
+
 /// Parse an AskHuman CLI invocation into `(message, questions)`（spec gui-agent-console C14）。
-/// Best-effort：`-m/--message` 或首个位置参数为 message，`-q/--question` 逐条入列；
-/// `-o/-o!/-f` 跳过取值；shell 操作符 / heredoc 标记不当作 message。
-fn parse_askhuman_cli(cmd: &str) -> (String, Vec<String>) {
+/// 判定（用户实证修正 2026-07-25：字面量/子命令全被误判）：
+/// 1. AskHuman 必须处于**命令位**（整条命令或 `&&`/`;`/`|` 某段的首 token，允许 env 前缀）；
+/// 2. 首位置参数是管理子命令 / `__` 隐藏 hook → 不算；
+/// 3. 必须有**提问特征**：`-q/--question`、`-m/--message`、`--whats-next`、`--stdin`
+///    或非空位置 message；纯旗标调用（--show-last 等）不算。
+///
+/// 多段命令取第一个满足条件的段。不是 ask 调用返回 None。
+fn parse_askhuman_cli(cmd: &str) -> Option<(String, Vec<String>)> {
     let tokens = shellish_tokens(cmd);
-    let Some(start) = tokens.iter().position(|t| {
-        let base = t.rsplit('/').next().unwrap_or(t);
-        base.to_ascii_lowercase().contains("askhuman")
-    }) else {
-        return (cmd.to_string(), Vec::new());
-    };
+    // 按 shell 操作符切段（shellish_tokens 后操作符是独立 token 或粘连 token 的边界近似）。
+    let mut segments: Vec<Vec<&str>> = vec![Vec::new()];
+    for t in &tokens {
+        if matches!(t.as_str(), "&&" | "||" | ";" | "|" | "&") {
+            segments.push(Vec::new());
+        } else {
+            segments.last_mut().unwrap().push(t.as_str());
+        }
+    }
+    segments.iter().find_map(|seg| parse_ask_segment(seg))
+}
+
+/// 单段解析：命令位是 AskHuman 且具备提问特征才返回 Some。
+fn parse_ask_segment(seg: &[&str]) -> Option<(String, Vec<String>)> {
+    // 跳过 env 前缀（VAR=val）与常见包装器。
+    let mut idx = 0;
+    while idx < seg.len()
+        && (seg[idx].contains('=') && !seg[idx].starts_with('-')
+            || matches!(seg[idx], "env" | "nohup" | "command"))
+    {
+        idx += 1;
+    }
+    let head = seg.get(idx)?;
+    let base = head.rsplit('/').next().unwrap_or(head).to_ascii_lowercase();
+    if base != "askhuman" && base != "humaninloop" {
+        return None;
+    }
+    let rest = &seg[idx + 1..];
+    // 首位置参数是管理子命令 / 隐藏 hook → 不是 ask。
+    if let Some(first) = rest.first() {
+        let f = first.to_ascii_lowercase();
+        if f.starts_with("__") || NON_ASK_SUBCOMMANDS.contains(&f.as_str()) {
+            return None;
+        }
+    }
     let mut message = String::new();
     let mut questions: Vec<String> = Vec::new();
+    let mut has_signal = false;
     let mut positional: Vec<String> = Vec::new();
-    let mut i = start + 1;
-    while i < tokens.len() {
-        let tok = tokens[i].as_str();
+    let mut i = 0;
+    while i < rest.len() {
+        let tok = rest[i];
         match tok {
             "-q" | "--question" => {
-                if let Some(v) = tokens.get(i + 1) {
-                    questions.push(v.clone());
+                has_signal = true;
+                if let Some(v) = rest.get(i + 1) {
+                    questions.push(v.to_string());
                     i += 2;
                 } else {
                     i += 1;
                 }
             }
             "-m" | "--message" => {
-                if let Some(v) = tokens.get(i + 1) {
-                    message = v.clone();
+                has_signal = true;
+                if let Some(v) = rest.get(i + 1) {
+                    message = v.to_string();
                     i += 2;
                 } else {
                     i += 1;
                 }
+            }
+            "--whats-next" | "--stdin" => {
+                has_signal = true;
+                i += 1;
             }
             "-o" | "--option" | "-o!" | "--option!" | "-f" | "--file" => {
                 i += 2; // 跳过取值
@@ -1001,7 +1050,13 @@ fn parse_askhuman_cli(cmd: &str) -> (String, Vec<String>) {
     if message.is_empty() {
         message = positional.into_iter().next().unwrap_or_default();
     }
-    (message, questions)
+    if !message.is_empty() {
+        has_signal = true;
+    }
+    if !has_signal {
+        return None; // 纯旗标调用（--show-last / --settings 等）。
+    }
+    Some((message, questions))
 }
 
 /// Split a multi-question output（`# Qn` 分组 + `---` 分隔）into per-question answers；
@@ -1334,9 +1389,37 @@ mod tests {
     /// heredoc / 操作符不当作 message；--stdin 场景 message 允许为空。
     #[test]
     fn cli_parser_ignores_shell_operators() {
-        let (m, qs) = parse_askhuman_cli("AskHuman -q \"继续吗？\" --stdin <<'EOF'");
+        let (m, qs) =
+            parse_askhuman_cli("AskHuman -q \"继续吗？\" --stdin <<'EOF'").expect("is an ask");
         assert_eq!(m, "");
         assert_eq!(qs, vec!["继续吗？"]);
+    }
+
+    /// 判定收紧（用户实证 2026-07-25）：字面量提及 / 管理子命令 / 纯旗标不算 ask；
+    /// 链式命令取第一个真正的提问段。
+    #[test]
+    fn cli_parser_rejects_mentions_and_subcommands() {
+        // 字面量提及（非命令位）。
+        assert!(parse_askhuman_cli("rg -n 'AskHuman' src-tauri/src | head -5").is_none());
+        assert!(parse_askhuman_cli("pkill -f '\\.local/bin/AskHuman --gui-host'").is_none());
+        assert!(parse_askhuman_cli("ls -la ~/.local/bin/AskHuman").is_none());
+        // 管理子命令 / 隐藏 hook / 纯旗标。
+        assert!(parse_askhuman_cli("AskHuman daemon status").is_none());
+        assert!(parse_askhuman_cli("AskHuman agents monitor --json").is_none());
+        assert!(parse_askhuman_cli("AskHuman todo add \"买菜\"").is_none());
+        assert!(parse_askhuman_cli("AskHuman __agent-hook cursor activity").is_none());
+        assert!(parse_askhuman_cli("AskHuman --show-last").is_none());
+        // 链式：管理段被跳过，提问段命中。
+        let (m, qs) = parse_askhuman_cli(
+            "AskHuman agents monitor && AskHuman \"报告\" -q \"下一步？\" -o \"A\"",
+        )
+        .expect("second segment is an ask");
+        assert_eq!(m, "报告");
+        assert_eq!(qs, vec!["下一步？"]);
+        // whats-next 是提问。
+        assert!(parse_askhuman_cli("AskHuman --whats-next \"总结\" -o \"好\"").is_some());
+        // 带路径的命令位。
+        assert!(parse_askhuman_cli("/usr/local/bin/AskHuman -m \"选一个\"").is_some());
     }
 
     /// 事件 JSON：ask 块打 `type:"ask"`，普通工具行打 `type:"tool"` 且 label/object 拆分。
