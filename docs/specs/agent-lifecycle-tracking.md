@@ -69,6 +69,7 @@ AskHuman agents status
 | D26 | interrupt / 关窗 结束判据（同 Claude 兜底） | Codex **无任何** interrupt/abort/SessionEnd hook（源码坐实：`Stop` 仅在回合**自然完成**触发，用户 Esc 打断走 `CodexErr::TurnAborted` 在 Stop 之前直接返回；见 §8）。故 Codex 的「打断 / 关窗 / 报错结束」＝Claude 无 Stop / 被 scrub 时的**同一兜底**：`working_backstop_sweep`（静默超时 工作中→空闲）+ D12 TTL（→已结束），**接受延迟**。正常回合结束仍由已安装的 `Stop`→turn-end hook 即时切「空闲」 |
 | D27 | app-server 判据 | walk 命中的 Codex 祖先满足以下即判为「共享 app-server、非 TUI」→ 按 D25 记 `pid=None`：**命令行含 `app-server` 子命令**（argv0 为 `codex` 且参数含 `app-server` 令牌，`--listen unix://`/`stdio://` 皆算）。**兜底（可选）**：无 tty **且** 父链上溯到 PID 1（通用、不写死 codex，兼容未来其它共享守护架构）。嵌入/旧模式 TUI 命令为纯 `codex`（无 `app-server`）→ 不受影响，pid 照常可用 |
 | D28 | 累计有效工作时长 | `AgentRecord` 持久化 `activeElapsedSecs` + `activeSince`：同一 session 跨 Turn 累计 Working 区间，只扣真正 Idle；AskHuman / Stop confirmation 等待仍算 Working，Stop continuation 不重置。正常 `turn-end` 冻结，backstop/TTL 用最后活动时刻封口、不计兜底宽限。旧记录字段缺失从 0 开始，不用 `startedAt` 近似历史。snapshot 的 `activeElapsedSecs` 注入含当前区间的生效总值，供 Watch 与工作中 Agent 单选卡统一展示；Idle/Ended Watch 终态显示冻结值。 |
+| D29 | Resume 继承与孪生并账（2026-07-25，用户实证） | 记录被判结束（SessionEnd / pid 死亡 / TTL / 重启存活复核）后同 session 事件再来 ＝ **resume**：`apply_event` 复活 ended 里的原记录并**继承**累计时长/起点/编号，不再新建零时长记录——此前 IDE 会话（pid 常缺失或误判）被反复拆成多条、累计时长归零重计（跑一上午只显示 30 分钟）。`load()` 时对历史数据做**孪生并账**：活动记录吸收同 (kind, session) 已结束孪生的时长与最早起点，纯已结束孪生合并到最新一条（幂等，仅影响累计展示与列表去重）。 |
 
 ## 5. 非目标（明确不做）
 

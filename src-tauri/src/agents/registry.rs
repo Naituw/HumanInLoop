@@ -163,6 +163,43 @@ fn stop_active(rec: &mut AgentRecord, end: u64) -> bool {
     true
 }
 
+/// 「已结束孪生」并账（spec agent-lifecycle-tracking 2026-07-25）：历史版本在 resume 前不继承
+/// 累计时长，同一会话被拆成多条记录、时长归零重计（用户实证：跑一上午只显示 30 分钟）。
+/// 活动记录吸收全部同 (kind, session) 孪生的时长与最早起点；纯已结束的孪生合并到最新一条。
+/// 幂等，仅影响累计展示与列表去重。
+fn merge_ended_twins(active: &mut [AgentRecord], ended: &mut VecDeque<AgentRecord>) {
+    for a in active.iter_mut() {
+        ended.retain(|e| {
+            if e.session_id == a.session_id && e.kind == a.kind {
+                a.active_elapsed_secs = a.active_elapsed_secs.saturating_add(e.active_elapsed_secs);
+                a.started_at = a.started_at.min(e.started_at);
+                false
+            } else {
+                true
+            }
+        });
+    }
+    let drained: Vec<AgentRecord> = ended.drain(..).collect();
+    for e in drained {
+        if let Some(m) = ended
+            .iter_mut()
+            .find(|m| m.session_id == e.session_id && m.kind == e.kind)
+        {
+            m.active_elapsed_secs = m.active_elapsed_secs.saturating_add(e.active_elapsed_secs);
+            m.started_at = m.started_at.min(e.started_at);
+            if e.ended_at > m.ended_at {
+                m.ended_at = e.ended_at;
+                m.last_activity = m.last_activity.max(e.last_activity);
+                if e.title.is_some() {
+                    m.title = e.title;
+                }
+            }
+        } else {
+            ended.push_back(e);
+        }
+    }
+}
+
 /// Effective cumulative active time at `now`, including the current Working interval.
 fn active_elapsed_at(rec: &AgentRecord, now: u64) -> u64 {
     rec.active_elapsed_secs.saturating_add(
@@ -220,6 +257,10 @@ impl AgentRegistry {
             stop_active(&mut rec, end);
             push_ended(&mut inner.ended, rec);
         }
+        // 「已结束孪生」并账治愈（spec agent-lifecycle-tracking 2026-07-25）。
+        let mut ended = std::mem::take(&mut inner.ended);
+        merge_ended_twins(&mut inner.active, &mut ended);
+        inner.ended = ended;
         // 盘上旧 seq 一律忽略：按序（活动在前、已结束在后）重排，保证「当前 daemon 生命周期内」稳定、从 1 起。
         let mut seq = 1u64;
         for r in inner.active.iter_mut() {
@@ -309,25 +350,48 @@ impl AgentRegistry {
                 (i, false)
             }
             None => {
-                let seq = inner.alloc_seq();
-                inner.active.push(AgentRecord {
-                    seq,
-                    kind,
-                    session_id: session_id.to_string(),
-                    pid,
-                    title: None,
-                    cwd,
-                    started_at: now,
-                    last_activity: now,
-                    active_elapsed_secs: 0,
-                    active_since: None,
-                    state: AgentState::Idle,
-                    ended_at: None,
-                    terminal: None,
-                    current_tool: None,
-                    turn_steps: 0,
-                    turn_started_at: None,
-                });
+                // Resume（spec agent-lifecycle-tracking 2026-07-25）：同 (kind, session) 的已结束
+                // 记录 → **复活并继承**累计工作时长/起点/编号。此前每次「结束→事件再来」都新建
+                // 零时长记录，重启存活复核 + pid 误判会把同一会话拆成多条、累计时长归零重计
+                // （用户实证：跑一上午只显示 30 分钟）。
+                if let Some(pos) = inner
+                    .ended
+                    .iter()
+                    .position(|r| r.session_id == session_id && r.kind == kind)
+                {
+                    let mut r = inner.ended.remove(pos).expect("position is valid");
+                    r.state = AgentState::Idle;
+                    r.ended_at = None;
+                    r.active_since = None;
+                    if pid.is_some() {
+                        r.pid = pid;
+                    }
+                    if cwd.is_some() {
+                        r.cwd = cwd;
+                    }
+                    r.last_activity = now;
+                    inner.active.push(r);
+                } else {
+                    let seq = inner.alloc_seq();
+                    inner.active.push(AgentRecord {
+                        seq,
+                        kind,
+                        session_id: session_id.to_string(),
+                        pid,
+                        title: None,
+                        cwd,
+                        started_at: now,
+                        last_activity: now,
+                        active_elapsed_secs: 0,
+                        active_since: None,
+                        state: AgentState::Idle,
+                        ended_at: None,
+                        terminal: None,
+                        current_tool: None,
+                        turn_steps: 0,
+                        turn_started_at: None,
+                    });
+                }
                 (inner.active.len() - 1, true)
             }
         };
@@ -1273,6 +1337,98 @@ mod tests {
         assert_eq!(nopid["state"], "ended");
         let withpid = arr.iter().find(|x| x["sessionId"] == "withpid").unwrap();
         assert_ne!(withpid["state"], "ended");
+    }
+
+    /// Resume 继承（spec agent-lifecycle-tracking 2026-07-25）：结束后同 session 事件再来 →
+    /// 复活原记录并延续累计时长/起点，不产生零时长新记录与已结束孪生。
+    #[test]
+    fn resumed_session_inherits_active_total() {
+        let r = reg();
+        r.apply_event(
+            AgentKind::Cursor,
+            LifecycleEvent::TurnStart,
+            "s",
+            None,
+            None,
+            100,
+        );
+        // 结束：冻结 100→400 = 300s。
+        r.apply_event(
+            AgentKind::Cursor,
+            LifecycleEvent::SessionEnd,
+            "s",
+            None,
+            None,
+            400,
+        );
+        // 事件再来（resume）：复活原记录。
+        r.apply_event(
+            AgentKind::Cursor,
+            LifecycleEvent::TurnStart,
+            "s",
+            None,
+            None,
+            1000,
+        );
+        r.apply_event(
+            AgentKind::Cursor,
+            LifecycleEvent::TurnEnd,
+            "s",
+            None,
+            None,
+            1600,
+        );
+        let arr = r.snapshot();
+        let arr = arr.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "复活而非孪生");
+        assert_eq!(arr[0]["state"], "idle");
+        assert_eq!(arr[0]["startedAt"], 100);
+        assert_eq!(arr[0]["activeElapsedSecs"], 900); // 300 + 600
+    }
+
+    /// 「已结束孪生」并账：活动记录吸收全部孪生；纯已结束孪生合并到最新一条。
+    #[test]
+    fn merge_ended_twins_folds_totals() {
+        let mk = |sid: &str, elapsed: u64, started: u64, ended_at: u64| AgentRecord {
+            seq: 0,
+            kind: AgentKind::Cursor,
+            session_id: sid.into(),
+            pid: None,
+            title: None,
+            cwd: None,
+            started_at: started,
+            last_activity: ended_at,
+            active_elapsed_secs: elapsed,
+            active_since: None,
+            state: AgentState::Ended,
+            ended_at: Some(ended_at),
+            terminal: None,
+            current_tool: None,
+            turn_steps: 0,
+            turn_started_at: None,
+        };
+        let mut active = vec![AgentRecord {
+            state: AgentState::Working,
+            ended_at: None,
+            active_elapsed_secs: 500,
+            started_at: 5_000,
+            ..mk("a", 0, 5_000, 0)
+        }];
+        let mut ended: VecDeque<AgentRecord> = VecDeque::from(vec![
+            mk("a", 1_000, 1_000, 2_000),
+            mk("a", 2_000, 2_500, 4_000),
+            mk("b", 700, 100, 900),
+            mk("b", 300, 1_000, 2_000),
+        ]);
+        merge_ended_twins(&mut active, &mut ended);
+        // 活动记录吸收两条 a 孪生：500+1000+2000，起点取最早。
+        assert_eq!(active[0].active_elapsed_secs, 3_500);
+        assert_eq!(active[0].started_at, 1_000);
+        // b 的两条合并为一条：时长求和、结束时刻取最新。
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0].active_elapsed_secs, 1_000);
+        assert_eq!(ended[0].started_at, 100);
+        assert_eq!(ended[0].ended_at, Some(2_000));
     }
 
     #[test]
