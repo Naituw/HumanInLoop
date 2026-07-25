@@ -105,14 +105,17 @@ function rowTime(a: AgentRecord): string {
           </svg>
           <span class="proj-name" :title="g.path || undefined">{{ g.label }}</span>
           <span v-if="workingCount(g)" class="badge badge-working">{{ workingCount(g) }}</span>
+          <!-- 待办徽标：钉在组头行内（working 徽标之后），独立可点（打开该项目待办窗口）。
+               嵌套在 toggle 按钮内故用 span + click.stop（避免非法嵌套 button）。 -->
+          <span
+            v-if="g.key !== UNKNOWN_PROJECT_KEY && todoCount(g)"
+            class="badge badge-todo"
+            role="button"
+            :title="t('agents.openTodos')"
+            :aria-label="t('agents.openTodos')"
+            @click.stop="emit('todos', g.path)"
+          >☑{{ todoCount(g) }}</span>
         </button>
-        <button
-          v-if="g.key !== UNKNOWN_PROJECT_KEY && todoCount(g)"
-          class="badge badge-todo"
-          :title="t('agents.openTodos')"
-          :aria-label="t('agents.openTodos')"
-          @click="emit('todos', g.path)"
-        >☑{{ todoCount(g) }}</button>
         <button
           v-if="newTaskSupported && g.path"
           class="plus-btn"
@@ -255,10 +258,8 @@ function rowTime(a: AgentRecord): string {
   background: color-mix(in srgb, #30d158 20%, transparent);
   color: #248a3d;
 }
-/* 待办徽标是可点击按钮：打开该项目的待办窗口。 */
+/* 待办徽标：组头行内的可点击元素（打开该项目的待办窗口），独立 hover 高亮。 */
 .badge-todo {
-  appearance: none;
-  border: none;
   cursor: pointer;
   background: color-mix(in srgb, var(--text-primary) 8%, transparent);
   color: var(--text-tertiary);
