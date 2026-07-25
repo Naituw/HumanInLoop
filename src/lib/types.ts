@@ -461,6 +461,7 @@ export type TranscriptEventJson =
     }
   | {
       type: "ask";
+      kind?: "ask" | "whatsNext";
       message: string;
       questions: { text: string; answer?: string | null }[];
       at?: number | null;

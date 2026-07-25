@@ -152,10 +152,10 @@ watch(() => props.sessionId, loadLatest);
             </button>
           </div>
           <template v-for="(qa, qi) in e.questions" :key="qi">
-            <div v-if="qa.text" class="tx-ask-sub">
+            <div v-if="qa.text || e.kind === 'whatsNext'" class="tx-ask-sub">
               <div class="tx-ask-subq">
-                <span class="tx-ask-qn">Q{{ qi + 1 }}</span>
-                <span>{{ qa.text }}</span>
+                <span v-if="e.kind !== 'whatsNext'" class="tx-ask-qn">Q{{ qi + 1 }}</span>
+                <span>{{ qa.text || t("console.tx.whatsNextQuestion") }}</span>
               </div>
               <div v-if="qa.answer" class="tx-ask-a">
                 <span class="tx-role">{{ t("console.tx.you") }}</span>

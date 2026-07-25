@@ -5,6 +5,7 @@
 use super::title::transcript_path;
 use super::AgentKind;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -61,9 +62,16 @@ pub enum TranscriptEvent {
 /// answers. A plain single-question ask keeps one entry with empty `text`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AskHumanBlock {
+    pub kind: AskHumanKind,
     /// Shared message shown above the questions (may be long Markdown).
     pub message: String,
     pub questions: Vec<AskQA>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskHumanKind {
+    Ask,
+    WhatsNext,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -235,6 +243,10 @@ pub fn event_json(ev: &TranscriptEvent) -> Value {
             if let Some(ah) = ask_human {
                 serde_json::json!({
                     "type": "ask",
+                    "kind": match ah.kind {
+                        AskHumanKind::Ask => "ask",
+                        AskHumanKind::WhatsNext => "whatsNext",
+                    },
                     "message": ah.message,
                     "questions": ah
                         .questions
@@ -260,8 +272,7 @@ pub fn load_path(kind: AgentKind, path: &Path) -> Result<TranscriptDoc, String> 
     let (lines, truncated_head) = read_lines_bounded(path, MAX_READ_BYTES)?;
     let mut events = Vec::new();
     let mut partial = false;
-    // Open tool calls waiting for result (order pairing fallback).
-    let mut open_tools: Vec<usize> = Vec::new();
+    let mut open_tools = OpenTools::default();
 
     for line in lines {
         let line = line.trim();
@@ -391,7 +402,7 @@ fn push_full(
     kind: AgentKind,
     v: &Value,
     out: &mut Vec<TranscriptEvent>,
-    open_tools: &mut Vec<usize>,
+    open_tools: &mut OpenTools,
 ) {
     match kind {
         AgentKind::Cursor | AgentKind::Claude => push_msg(v, out, open_tools),
@@ -400,7 +411,7 @@ fn push_full(
     }
 }
 
-fn push_msg(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut Vec<usize>) {
+fn push_msg(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut OpenTools) {
     let role = v
         .get("role")
         .and_then(|r| r.as_str())
@@ -497,7 +508,7 @@ fn push_msg(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut Vec<usiz
                     at: event_time(v),
                     at_label: None,
                 });
-                open_tools.push(out.len() - 1);
+                open_tools.insert(out.len() - 1, None);
             }
             "tool_result" => {
                 let err = item
@@ -505,14 +516,14 @@ fn push_msg(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut Vec<usiz
                     .and_then(|x| x.as_bool())
                     .unwrap_or(false);
                 let content = tool_result_text(item);
-                close_tool(out, open_tools, content, err);
+                close_tool(out, open_tools, None, content, err);
             }
             _ => {}
         }
     }
 }
 
-fn push_codex(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut Vec<usize>) {
+fn push_codex(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut OpenTools) {
     let ttype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
     let Some(payload) = v.get("payload") else {
         return;
@@ -574,16 +585,20 @@ fn push_codex(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut Vec<us
             }
             let args_val = parse_args_value(payload.get("arguments"));
             let td = super::activity::classify_tool(name, args_val.as_ref());
+            let ask_human = detect_askhuman(name, args_val.as_ref(), None);
             out.push(TranscriptEvent::ToolCall {
                 name: name.to_string(),
                 args_summary: format_tool_line(&td),
                 result_summary: None,
                 is_error: false,
-                ask_human: None,
+                ask_human,
                 at: event_time(v),
                 at_label: None,
             });
-            open_tools.push(out.len() - 1);
+            open_tools.insert(
+                out.len() - 1,
+                payload.get("call_id").and_then(Value::as_str),
+            );
         }
         ("response_item", "function_call_output") => {
             let content = payload
@@ -591,7 +606,13 @@ fn push_codex(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut Vec<us
                 .and_then(|x| x.as_str())
                 .unwrap_or("")
                 .to_string();
-            close_tool(out, open_tools, content, false);
+            close_tool(
+                out,
+                open_tools,
+                payload.get("call_id").and_then(Value::as_str),
+                content,
+                false,
+            );
         }
         ("event_msg", "agent_message") => {
             if let Some(t) = payload.get("message").and_then(|m| m.as_str()) {
@@ -621,7 +642,7 @@ fn push_codex(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut Vec<us
     }
 }
 
-fn push_grok(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut Vec<usize>) {
+fn push_grok(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut OpenTools) {
     match v.get("type").and_then(|t| t.as_str()).unwrap_or("") {
         "user" => {
             if let Some(t) = value_text(v.get("content")) {
@@ -681,7 +702,7 @@ fn push_grok(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut Vec<usi
                         at: event_time(v),
                         at_label: None,
                     });
-                    open_tools.push(out.len() - 1);
+                    open_tools.insert(out.len() - 1, None);
                 }
             }
         }
@@ -692,7 +713,7 @@ fn push_grok(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut Vec<usi
                 .and_then(|x| x.as_str())
                 .unwrap_or("")
                 .to_string();
-            close_tool(out, open_tools, content, err);
+            close_tool(out, open_tools, None, content, err);
         }
         "thinking" | "reasoning" => {
             if let Some(t) = value_text(v.get("content")).or_else(|| {
@@ -714,17 +735,49 @@ fn push_grok(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut Vec<usi
     }
 }
 
+#[derive(Default)]
+struct OpenTools {
+    /// Formats without stable call IDs are paired in their existing LIFO order.
+    stack: Vec<usize>,
+    /// Codex emits the same `call_id` on function_call and function_call_output.
+    by_call_id: HashMap<String, usize>,
+}
+
+impl OpenTools {
+    fn insert(&mut self, event_idx: usize, call_id: Option<&str>) {
+        if let Some(call_id) = call_id.filter(|id| !id.is_empty()) {
+            self.by_call_id.insert(call_id.to_string(), event_idx);
+        } else {
+            self.stack.push(event_idx);
+        }
+    }
+
+    fn take(&mut self, call_id: Option<&str>) -> Option<usize> {
+        call_id
+            .and_then(|id| self.by_call_id.remove(id))
+            .or_else(|| self.stack.pop())
+    }
+}
+
 fn close_tool(
     out: &mut [TranscriptEvent],
-    open_tools: &mut Vec<usize>,
+    open_tools: &mut OpenTools,
+    call_id: Option<&str>,
     content: String,
     is_error: bool,
 ) {
-    let _ = content;
-    if let Some(idx) = open_tools.pop() {
-        if let Some(TranscriptEvent::ToolCall { is_error: ie, .. }) = out.get_mut(idx) {
+    if let Some(idx) = open_tools.take(call_id) {
+        if let Some(TranscriptEvent::ToolCall {
+            is_error: ie,
+            ask_human,
+            ..
+        }) = out.get_mut(idx)
+        {
             // 与 watch 一致：不展示 tool result；仅标记失败。
             *ie = is_error;
+            if let Some(ask_human) = ask_human {
+                apply_askhuman_result(ask_human, &content);
+            }
         }
     }
 }
@@ -816,6 +869,7 @@ pub(super) fn detect_askhuman(
     let mut message = String::new();
     let mut questions: Vec<String> = Vec::new();
     let mut is_ah = false;
+    let mut kind = AskHumanKind::Ask;
 
     if let Some(a) = args {
         // CLI 形态（Bash/Shell 命令，string 或 argv 数组）。仅当解析出**命令位**的 AskHuman
@@ -834,10 +888,11 @@ pub(super) fn detect_askhuman(
                 })
             });
         if let Some(cmd) = cmd_string {
-            if let Some((m, qs)) = parse_askhuman_cli(&cmd) {
+            if let Some((m, qs, parsed_kind)) = parse_askhuman_cli(&cmd) {
                 is_ah = true;
                 message = m;
                 questions = qs;
+                kind = parsed_kind;
             }
         }
         // MCP `ask` 形态：message + questions[]。
@@ -859,6 +914,14 @@ pub(super) fn detect_askhuman(
             }
             if message.is_empty() && questions.is_empty() {
                 message = summarize_args(name, args);
+            }
+        } else if name_l == "whats_next" {
+            // AskHuman localizes the fixed whats_next question at runtime, so it is absent from
+            // rollout arguments. Match the CLI parser: keep the report and use one implicit Q&A.
+            is_ah = true;
+            kind = AskHumanKind::WhatsNext;
+            if let Some(m) = a.get("message").and_then(Value::as_str) {
+                message = m.to_string();
             }
         }
     }
@@ -885,6 +948,7 @@ pub(super) fn detect_askhuman(
             .collect()
     };
     Some(AskHumanBlock {
+        kind,
         message: trunc(&message, MAX_TEXT_CHARS),
         questions: qa,
     })
@@ -956,7 +1020,8 @@ const NON_ASK_SUBCOMMANDS: &[&str] = &[
     "version",
 ];
 
-/// Parse an AskHuman CLI invocation into `(message, questions)`（spec gui-agent-console C14）。
+/// Parse an AskHuman CLI invocation into `(message, questions, kind)`
+/// (spec gui-agent-console C14).
 /// 判定（用户实证修正 2026-07-25：字面量/子命令全被误判）：
 /// 1. AskHuman 必须处于**命令位**（整条命令或 `&&`/`;`/`|` 某段的首 token，允许 env 前缀）；
 /// 2. 首位置参数是管理子命令 / `__` 隐藏 hook → 不算；
@@ -964,7 +1029,7 @@ const NON_ASK_SUBCOMMANDS: &[&str] = &[
 ///    或非空位置 message；纯旗标调用（--show-last 等）不算。
 ///
 /// 多段命令取第一个满足条件的段。不是 ask 调用返回 None。
-fn parse_askhuman_cli(cmd: &str) -> Option<(String, Vec<String>)> {
+fn parse_askhuman_cli(cmd: &str) -> Option<(String, Vec<String>, AskHumanKind)> {
     let tokens = shellish_tokens(cmd);
     // 按 shell 操作符切段（shellish_tokens 后操作符是独立 token 或粘连 token 的边界近似）。
     let mut segments: Vec<Vec<&str>> = vec![Vec::new()];
@@ -979,7 +1044,7 @@ fn parse_askhuman_cli(cmd: &str) -> Option<(String, Vec<String>)> {
 }
 
 /// 单段解析：命令位是 AskHuman 且具备提问特征才返回 Some。
-fn parse_ask_segment(seg: &[&str]) -> Option<(String, Vec<String>)> {
+fn parse_ask_segment(seg: &[&str]) -> Option<(String, Vec<String>, AskHumanKind)> {
     // 跳过 env 前缀（VAR=val）与常见包装器。
     let mut idx = 0;
     while idx < seg.len()
@@ -1004,6 +1069,7 @@ fn parse_ask_segment(seg: &[&str]) -> Option<(String, Vec<String>)> {
     let mut message = String::new();
     let mut questions: Vec<String> = Vec::new();
     let mut has_signal = false;
+    let mut kind = AskHumanKind::Ask;
     let mut positional: Vec<String> = Vec::new();
     let mut i = 0;
     while i < rest.len() {
@@ -1027,7 +1093,12 @@ fn parse_ask_segment(seg: &[&str]) -> Option<(String, Vec<String>)> {
                     i += 1;
                 }
             }
-            "--whats-next" | "--stdin" => {
+            "--whats-next" => {
+                has_signal = true;
+                kind = AskHumanKind::WhatsNext;
+                i += 1;
+            }
+            "--stdin" => {
                 has_signal = true;
                 i += 1;
             }
@@ -1056,13 +1127,42 @@ fn parse_ask_segment(seg: &[&str]) -> Option<(String, Vec<String>)> {
     if !has_signal {
         return None; // 纯旗标调用（--show-last / --settings 等）。
     }
-    Some((message, questions))
+    Some((message, questions, kind))
 }
 
 /// Split a multi-question output（`# Qn` 分组 + `---` 分隔）into per-question answers；
 /// 单问题输出整体回填到第一题。`n` 为期望题数（越界分组忽略）。
 fn parse_askhuman_answers(content: &str, n: usize) -> Vec<Option<String>> {
     let mut out: Vec<Option<String>> = vec![None; n];
+    let content = codex_output_payload(content);
+
+    // Codex wraps MCP CallToolResult content blocks in a JSON array. Unwrap the text blocks before
+    // parsing the CLI-compatible marker format returned by current AskHuman versions.
+    if let Ok(v) = serde_json::from_str::<Value>(content) {
+        if let Some(text) = mcp_text_content(&v) {
+            return parse_askhuman_answers(&text, n);
+        }
+        // Older AskHuman/Codex combinations exposed the structured CLI JSON form directly.
+        if let Some(answers) = v.get("answers").and_then(Value::as_array) {
+            for answer in answers {
+                let idx = answer
+                    .get("question_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as usize;
+                if idx < out.len() {
+                    out[idx] = json_answer_text(answer);
+                }
+            }
+            return out;
+        }
+        if n > 0 {
+            if let Some(answer) = json_answer_text(&v) {
+                out[0] = Some(answer);
+                return out;
+            }
+        }
+    }
+
     let has_groups = content
         .lines()
         .any(|l| l.trim().starts_with("# Q") && l.trim()[3..].trim().parse::<usize>().is_ok());
@@ -1104,43 +1204,100 @@ fn parse_askhuman_answers(content: &str, n: usize) -> Vec<Option<String>> {
 }
 
 fn parse_askhuman_answer(content: &str) -> Option<String> {
-    // JSON result
+    let content = codex_output_payload(content);
     if let Ok(v) = serde_json::from_str::<Value>(content) {
-        let mut parts = Vec::new();
-        if let Some(s) = v.get("user_input").and_then(|x| x.as_str()) {
-            if !s.is_empty() {
-                parts.push(s.to_string());
-            }
+        if let Some(text) = mcp_text_content(&v) {
+            return parse_askhuman_answer(&text);
         }
-        if let Some(arr) = v.get("selected_options").and_then(|x| x.as_array()) {
-            for o in arr {
-                if let Some(s) = o.as_str() {
-                    parts.push(s.to_string());
-                }
-            }
-        }
-        if !parts.is_empty() {
-            return Some(trunc(&parts.join("\n"), MAX_TOOL_RESULT_CHARS));
+        return json_answer_text(&v);
+    }
+
+    // Current output contract: the same plain marker blocks as the CLI. Read complete blocks
+    // instead of stopping at any `[` character, which may legitimately occur in an answer.
+    #[derive(Clone, Copy)]
+    enum AnswerSection {
+        Selected,
+        Input,
+        Ignored,
+    }
+    let mut section: Option<AnswerSection> = None;
+    let mut selected = Vec::new();
+    let mut input = Vec::new();
+    for line in content.lines() {
+        match line.trim() {
+            "[selected_options]" => section = Some(AnswerSection::Selected),
+            "[user_input]" => section = Some(AnswerSection::Input),
+            "[files]" | "[status]" => section = Some(AnswerSection::Ignored),
+            _ => match section {
+                Some(AnswerSection::Selected) => selected.push(line),
+                Some(AnswerSection::Input) => input.push(line),
+                Some(AnswerSection::Ignored) | None => {}
+            },
         }
     }
-    // Text markers
-    if let Some(i) = content.find("[user_input]") {
-        let rest = &content[i + "[user_input]".len()..];
-        let end = rest.find('[').unwrap_or(rest.len());
-        let s = rest[..end].trim();
-        if !s.is_empty() {
-            return Some(trunc(s, MAX_TOOL_RESULT_CHARS));
+
+    let mut parts = Vec::new();
+    let selected = selected.join("\n").trim().to_string();
+    if !selected.is_empty() {
+        parts.push(selected);
+    }
+    let input = input.join("\n").trim().to_string();
+    if !input.is_empty() {
+        parts.push(input);
+    }
+    (!parts.is_empty()).then(|| trunc(&parts.join("\n"), MAX_TOOL_RESULT_CHARS))
+}
+
+/// Codex prefixes tool results with timing metadata and an `Output:` section.
+fn codex_output_payload(content: &str) -> &str {
+    let content = content.trim();
+    content
+        .split_once("\nOutput:\n")
+        .map(|(_, output)| output.trim())
+        .unwrap_or(content)
+}
+
+/// Extract text from MCP content blocks (`[{"type":"text","text":"…"}]`). Also accepts the
+/// object-wrapped `{"content":[…]}` shape for low-cost compatibility with older clients.
+fn mcp_text_content(v: &Value) -> Option<String> {
+    let blocks = v
+        .as_array()
+        .or_else(|| v.get("content").and_then(Value::as_array))?;
+    let text = blocks
+        .iter()
+        .filter_map(|block| block.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
+}
+
+fn json_answer_text(answer: &Value) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(options) = answer.get("selected_options").and_then(Value::as_array) {
+        let options = options
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|option| !option.trim().is_empty())
+            .collect::<Vec<_>>();
+        if !options.is_empty() {
+            parts.push(options.join(", "));
         }
     }
-    if let Some(i) = content.find("[selected_options]") {
-        let rest = &content[i + "[selected_options]".len()..];
-        let end = rest.find('[').unwrap_or(rest.len());
-        let s = rest[..end].trim();
-        if !s.is_empty() {
-            return Some(trunc(s, MAX_TOOL_RESULT_CHARS));
+    if let Some(input) = answer.get("user_input").and_then(Value::as_str) {
+        if !input.trim().is_empty() {
+            parts.push(input.trim().to_string());
         }
     }
-    None
+    (!parts.is_empty()).then(|| trunc(&parts.join("\n"), MAX_TOOL_RESULT_CHARS))
+}
+
+fn apply_askhuman_result(ask_human: &mut AskHumanBlock, content: &str) {
+    let answers = parse_askhuman_answers(content, ask_human.questions.len().max(1));
+    for (question, answer) in ask_human.questions.iter_mut().zip(answers) {
+        if answer.is_some() {
+            question.answer = answer;
+        }
+    }
 }
 
 /// Clean user text; also return Cursor `<timestamp>` label if present.
@@ -1316,7 +1473,7 @@ mod tests {
             r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"a\nb"}]}}"#.to_string(),
         ];
         let mut events = Vec::new();
-        let mut open = Vec::new();
+        let mut open = OpenTools::default();
         for l in lines {
             let v: Value = serde_json::from_str(&l).unwrap();
             push_full(AgentKind::Claude, &v, &mut events, &mut open);
@@ -1374,10 +1531,144 @@ mod tests {
             "questions": [{ "question": "Q甲？" }, { "question": "Q乙？" }]
         });
         let ah = detect_askhuman("ask", Some(&args), Some("[user_input]\n答甲\n")).unwrap();
+        assert_eq!(ah.kind, AskHumanKind::Ask);
         assert_eq!(ah.message, "背景");
         assert_eq!(ah.questions.len(), 2);
         assert_eq!(ah.questions[0].answer.as_deref(), Some("答甲"));
         assert_eq!(ah.questions[1].answer, None);
+    }
+
+    /// Codex完整链路：MCP `ask` 调用先生成问答卡，当前纯文本 CLI 区块从 Codex content-block
+    /// wrapper 解出；结果按 call_id 回填，即使另一个工具调用夹在中间也不会串卡。
+    #[test]
+    fn codex_mcp_ask_round_trip_uses_call_id_and_text_blocks() {
+        let ask_args = serde_json::json!({
+            "message": "背景",
+            "questions": [{ "question": "继续吗？" }]
+        })
+        .to_string();
+        let output_blocks = serde_json::json!([{
+            "type": "text",
+            "text": "[selected_options]\n继续\n\n[user_input]\n并补一条测试"
+        }])
+        .to_string();
+        let lines = vec![
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "ask",
+                    "call_id": "call_ask",
+                    "arguments": ask_args
+                }
+            }),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "exec",
+                    "call_id": "call_exec",
+                    "arguments": "{\"command\":\"pwd\"}"
+                }
+            }),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call_ask",
+                    "output": format!("Wall time: 1.2 seconds\nOutput:\n{output_blocks}")
+                }
+            }),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call_exec",
+                    "output": "done"
+                }
+            }),
+        ];
+        let mut events = Vec::new();
+        let mut open = OpenTools::default();
+        for line in lines {
+            push_full(AgentKind::Codex, &line, &mut events, &mut open);
+        }
+
+        assert_eq!(events.len(), 2);
+        let ask = event_json(&events[0]);
+        assert_eq!(ask["type"], "ask");
+        assert_eq!(ask["kind"], "ask");
+        assert_eq!(ask["message"], "背景");
+        assert_eq!(ask["questions"][0]["text"], "继续吗？");
+        assert_eq!(ask["questions"][0]["answer"], "继续\n并补一条测试");
+        assert_eq!(event_json(&events[1])["type"], "tool");
+    }
+
+    /// MCP whats_next uses the same content-block and marker output path as ask. It becomes an
+    /// AskHuman card with an implicit fixed question; non-interactive AskHuman tools stay tools.
+    #[test]
+    fn codex_mcp_whats_next_is_ask_card_but_read_and_write_tools_are_not() {
+        let args = serde_json::json!({
+            "message": "All tests passed.",
+            "options": [{ "text": "Ship it", "recommended": true }]
+        })
+        .to_string();
+        let output_blocks = serde_json::json!([{
+            "type": "text",
+            "text": "[selected_options]\nEnd this turn"
+        }])
+        .to_string();
+        let lines = vec![
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "whats_next",
+                    "call_id": "call_next",
+                    "arguments": args
+                }
+            }),
+            serde_json::json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call_output",
+                    "call_id": "call_next",
+                    "output": format!("Wall time: 2 seconds\nOutput:\n{output_blocks}")
+                }
+            }),
+        ];
+        let mut events = Vec::new();
+        let mut open = OpenTools::default();
+        for line in lines {
+            push_full(AgentKind::Codex, &line, &mut events, &mut open);
+        }
+
+        let ask = event_json(&events[0]);
+        assert_eq!(ask["type"], "ask");
+        assert_eq!(ask["kind"], "whatsNext");
+        assert_eq!(ask["message"], "All tests passed.");
+        assert_eq!(ask["questions"][0]["text"], "");
+        assert_eq!(ask["questions"][0]["answer"], "End this turn");
+        assert!(detect_askhuman("show_last", Some(&serde_json::json!({})), None).is_none());
+        assert!(detect_askhuman(
+            "todo_add",
+            Some(&serde_json::json!({"text": "later"})),
+            None
+        )
+        .is_none());
+    }
+
+    /// 旧版结构化 JSON 很容易顺手兼容：按 question_index 回填，不影响当前纯文本主路径。
+    #[test]
+    fn parse_legacy_structured_mcp_answers() {
+        let content = concat!(
+            "Wall time: 1 seconds\nOutput:\n",
+            r#"{"answers":[{"question_index":1,"user_input":"第二题"},"#,
+            r#"{"question_index":0,"selected_options":["第一题选项"],"user_input":"补充"}]}"#
+        );
+        let answers = parse_askhuman_answers(content, 2);
+        assert_eq!(answers[0].as_deref(), Some("第一题选项\n补充"));
+        assert_eq!(answers[1].as_deref(), Some("第二题"));
     }
 
     #[test]
@@ -1389,10 +1680,11 @@ mod tests {
     /// heredoc / 操作符不当作 message；--stdin 场景 message 允许为空。
     #[test]
     fn cli_parser_ignores_shell_operators() {
-        let (m, qs) =
+        let (m, qs, kind) =
             parse_askhuman_cli("AskHuman -q \"继续吗？\" --stdin <<'EOF'").expect("is an ask");
         assert_eq!(m, "");
         assert_eq!(qs, vec!["继续吗？"]);
+        assert_eq!(kind, AskHumanKind::Ask);
     }
 
     /// 判定收紧（用户实证 2026-07-25）：字面量提及 / 管理子命令 / 纯旗标不算 ask；
@@ -1410,14 +1702,19 @@ mod tests {
         assert!(parse_askhuman_cli("AskHuman __agent-hook cursor activity").is_none());
         assert!(parse_askhuman_cli("AskHuman --show-last").is_none());
         // 链式：管理段被跳过，提问段命中。
-        let (m, qs) = parse_askhuman_cli(
+        let (m, qs, kind) = parse_askhuman_cli(
             "AskHuman agents monitor && AskHuman \"报告\" -q \"下一步？\" -o \"A\"",
         )
         .expect("second segment is an ask");
         assert_eq!(m, "报告");
         assert_eq!(qs, vec!["下一步？"]);
+        assert_eq!(kind, AskHumanKind::Ask);
         // whats-next 是提问。
-        assert!(parse_askhuman_cli("AskHuman --whats-next \"总结\" -o \"好\"").is_some());
+        let (message, questions, kind) =
+            parse_askhuman_cli("AskHuman --whats-next \"总结\" -o \"好\"").unwrap();
+        assert_eq!(message, "总结");
+        assert!(questions.is_empty());
+        assert_eq!(kind, AskHumanKind::WhatsNext);
         // 带路径的命令位。
         assert!(parse_askhuman_cli("/usr/local/bin/AskHuman -m \"选一个\"").is_some());
     }
@@ -1431,6 +1728,7 @@ mod tests {
             result_summary: None,
             is_error: false,
             ask_human: Some(AskHumanBlock {
+                kind: AskHumanKind::Ask,
                 message: "m".into(),
                 questions: vec![AskQA {
                     text: "q?".into(),

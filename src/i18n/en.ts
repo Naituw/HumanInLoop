@@ -679,6 +679,7 @@ export default {
       error: "Could not read the transcript",
       you: "You",
       unanswered: "(unanswered)",
+      whatsNextQuestion: "What should we do next?",
       expand: "Show more",
       collapse: "Collapse",
     },

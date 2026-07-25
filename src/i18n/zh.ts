@@ -659,6 +659,7 @@ export default {
       error: "无法读取会话记录",
       you: "你",
       unanswered: "（未回答）",
+      whatsNextQuestion: "接下来做什么？",
       expand: "展开全文",
       collapse: "收起",
     },

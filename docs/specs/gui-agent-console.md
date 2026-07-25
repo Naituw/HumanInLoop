@@ -39,7 +39,7 @@
 | C11 | Dev 环境 | 本功能在独立 worktree（`feat/gui-agent-console`）+ popup-only Dev Instance 开发，不挂 IM 测试渠道 |
 | C12 | 前瞻预留 | 为未来「提问收进控制台内联作答」的设想预留 5 个结构点（R1–R5，见 §5），**只选形状、不写功能代码**；弹窗集成本身未定案、不在本 spec 范围 |
 | C13 | 状态指示器视觉系统（原型定稿 2026-07-25） | 工作中＝移植 Cursor 的 `ui-ascii-loading-indicator`（sine_3x3：3×3 点阵、8 帧位掩码 `[189,220,90,78,45,291,306,433]`、175ms/帧，所有工作中行共用同一帧同步动画）；颜色低饱和且随主题（深色＝42% 绿混白、浅色＝70% 深绿混深灰，CSS 变量统一，详情页状态文字同色）；等待回答＝🙋（轻微浮动）；空闲＝同一点阵**静态 4 点**（中行 3 点＋右上 1 点）灰色（「动停了」隐喻）；已结束＝无指示物、整行灰显。不用彩色圆点区分状态 |
-| C14 | 完整会话视图（原型定稿 2026-07-25） | 详情区默认「最近动态」，标题行右侧按钮切「完整会话」（同位置变「返回」；切换会话自动回默认）；进入即定位最新，**每页 200 条向上分页**（顶部按钮加载更早，滚动位置锚定），标题行 sticky 显示已加载/总数；渲染：用户消息＝蓝底气泡、助手文字＝Markdown、工具调用＝足迹同款紧凑行；**AskHuman 为一等问答卡**（🙋 徽标＋提问＋蓝底「你」的回答；未回答显示占位）；多问题＝message 下 Q1/Q2/Qn 子块各带回答；长 message 4 行截断＋展开全文/收起。实现须把 `transcript_full::AskHumanBlock` 扩展为结构化 `{message, questions[{text, answer}]}`（MCP 读 `questions` 参数、答案按 `# Qn` 分组回填、CLI 解析 `-q`），daemon 侧按游标分页 |
+| C14 | 完整会话视图（原型定稿 2026-07-25） | 详情区默认「最近动态」，标题行右侧按钮切「完整会话」（同位置变「返回」；切换会话自动回默认）；进入即定位最新，**每页 200 条向上分页**（顶部按钮加载更早，滚动位置锚定），标题行 sticky 显示已加载/总数；渲染：用户消息＝蓝底气泡、助手文字＝Markdown、工具调用＝足迹同款紧凑行；**AskHuman 为一等问答卡**（🙋 徽标＋提问＋蓝底「你」的回答；未回答显示占位）；多问题＝message 下 Q1/Q2/Qn 子块各带回答；长 message 4 行截断＋展开全文/收起。实现须把 `transcript_full::AskHumanBlock` 扩展为结构化 `{kind, message, questions[{text, answer}]}`（MCP `ask` 读 `questions` 参数；MCP `whats_next` 与 CLI `--whats-next` 标为独立 kind，由前端按界面语言显示固定问题「接下来做什么？」；两种 MCP 工具都从 Codex content block 解出与 CLI 相同的文本区块，答案按 `# Qn` 分组回填；普通 CLI 解析 `-q`），daemon 侧按游标分页 |
 | C15 | 项目 diff 状态条 + stage（原型定稿 2026-07-25） | 输入框上方一条**项目级**「未暂存变更」状态条（文件数/新增数/±行数；无变更不显示）；展开＝文件列表（M/A/D 徽标＋每文件 ±行数＋行内「暂存」），再点单文件展开 hunk 视图（红绿底色、面板内滚动 ≤300px）；**单文件暂存直接执行、「全部暂存」行内二次确认**——GUI 点按钮已是明确意图，不走跨渠道 Confirm（IM `/stage` 的 Confirm 不变量不变）；复用 `gitutil::DiffModel`，GUI Host 直调不经 daemon；需补单文件 `git add <path>`（现仅 stage_all） |
 | C16 | diff 刷新时机（性能，用户强调） | 大仓库 git 可能很慢，**不频繁调用**：两级懒加载——状态条只跑 `numstat`，hunk 在单文件展开时才跑 `git diff -- <path>`；刷新触发＝选中会话 / 展开面板 / 焦点会话帧变化且含编辑-写入步（防抖合并 ≥2s）/ 窗口重获焦点；调用互斥（上次未返回不重发）、带超时；**不做常驻轮询** |
 
@@ -141,3 +141,9 @@
   `agents/cursor_vscdb.rs` 直读 Cursor 全局 `state.vscdb`（`composerData`/`bubbleId` 键，
   实时明文：官方标题 + 逐条文字 + 工具真实状态），activity/标题/完整会话三处路由优先走它、
   失败回退 jsonl；融合改按内容收敛（详见 im-watch spec 状态行小节）。
+- **2026-07-25（Codex MCP 完整会话修正）**：Codex rollout 的 MCP 工具名是短名
+  `ask` / `whats_next`，结果按 `call_id` 关联，并在 `Output:` 后包装为 MCP text content
+  block；其内文本才是与 CLI 一致的结果区块。完整会话改为按 `call_id` 配对，解开 content
+  block 后解析 `# Qn` / `[selected_options]` / `[user_input]`，两种交互工具都呈现为
+  AskHuman 问答卡；MCP 与 CLI 的 whats-next 卡由前端本地化补出固定问题「接下来做什么？」；
+  低成本兼容旧 `answers[]` JSON。`show_last` / `todo_add` 保持普通工具行。
