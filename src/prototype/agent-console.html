@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent 控制台 · 原型</title>
+    <style>
+      /* 首帧底色（与主应用 index.html 同思路，避免白闪） */
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #f0f0f2;
+      }
+      @media (prefers-color-scheme: dark) {
+        html,
+        body {
+          background: #1e1e1e;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/prototype/agent-console-main.ts"></script>
+  </body>
+</html>

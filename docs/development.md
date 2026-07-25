@@ -25,6 +25,26 @@ pnpm build && cargo build --release \
 cargo test --manifest-path src-tauri/Cargo.toml            # Rust unit tests
 ```
 
+### UI prototyping (browser-only, no Tauri)
+
+`src/prototype/` hosts standalone HTML entries that run in a plain browser with mock data and
+hot reload — no Tauri, no daemon. They share the app's design tokens (`src/styles/*`) and
+Markdown renderer, and are **excluded from release builds** (Vite only bundles `src/index.html`).
+
+```bash
+pnpm dev
+# open http://localhost:5180/prototype/agent-console.html
+```
+
+Current prototypes:
+
+- `agent-console.html` — the two-pane Agent console (spec `docs/specs/gui-agent-console.md`).
+  This is the visual/interaction baseline for `views/AgentsView.vue` + `views/console/*`.
+
+**Workflow:** iterate UI ideas on the prototype first (cheap, instant feedback, user can review
+in a browser), get the design confirmed, then port to the real views. Keep the prototype in
+sync when a design decision changes — it stays the reference for the next iteration round.
+
 ### Optional local git hooks (fmt + clippy)
 
 Linux CI fails the job on `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`. To catch that before push:
