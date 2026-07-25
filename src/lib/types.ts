@@ -559,7 +559,7 @@ export interface GeneralConfig {
   collaborationStyleCustomText: string;
   /** 回复历史保留条数上限。默认 200；0 = 停止新增记录（但保留旧记录）。 */
   historyLimit: number;
-  /** 待办执行历史保留条数（每项目）。默认 20；0 = 停止新增记录（保留旧历史）。 */
+  /** 待办执行历史保留条数（每项目）。默认 100；0 = 停止新增记录（保留旧历史）。 */
   todoHistoryLimit: number;
   /** Built-in popup sound. Empty disables it; macOS stores a name, Linux uses a toggle. */
   popupSound: string;

@@ -193,7 +193,7 @@ pub struct GeneralConfig {
     pub collaboration_style_custom_text: String,
     /// 回复历史保留条数上限。默认 200；`0` 表示停止新增记录（但保留并仍可查看旧记录）。
     pub history_limit: u32,
-    /// 待办执行历史保留条数（按项目各留 N 条，第 16 轮定案）。默认 20；`0` 同 history_limit
+    /// 待办执行历史保留条数（按项目各留 N 条，第 16 轮定案）。默认 100；`0` 同 history_limit
     /// 语义：停止新增记录，既有历史保留。
     pub todo_history_limit: u32,
     /// Built-in sound played when a popup appears. Empty string disables it.
@@ -217,7 +217,7 @@ fn default_history_limit() -> u32 {
 
 /// 待办执行历史默认保留条数（每项目）。
 fn default_todo_history_limit() -> u32 {
-    20
+    100
 }
 
 impl Default for GeneralConfig {
