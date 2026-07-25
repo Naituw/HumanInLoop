@@ -22,6 +22,22 @@ fn current_exe() -> String {
         .unwrap_or_else(|| "AskHuman".to_string())
 }
 
+/// Dev Instance（隔离实例）上下文：**绝不**读写用户级全局登录项。
+/// LaunchAgents / autostart 的 label 全用户唯一，dev 实例写入会把生产的开机自启劫持到
+/// worktree 二进制（launchd 用无 `ASKHUMAN_HOME` 的环境重启它 → 以生产 home 运行外来构建，
+/// 生产托盘/窗口被旧代码接管；卸载路径则会误删生产登录项）。用户实证 2026-07-25：并行
+/// worktree 实例反复劫持导致控制台无限 Loading。判定用 env + exe 路径双料（launchd 重启的
+/// 进程无 env，靠 `.askhuman-dev` 路径段兜底）。
+fn is_dev_instance_context() -> bool {
+    if std::env::var(crate::dev_instance::ASKHUMAN_HOME_ENV).is_ok_and(|v| !v.trim().is_empty()) {
+        return true;
+    }
+    std::env::current_exe().is_ok_and(|p| {
+        p.components()
+            .any(|c| c.as_os_str() == crate::dev_instance::DEV_DIR)
+    })
+}
+
 // ===== macOS：LaunchAgent plist =====
 
 #[cfg(target_os = "macos")]
@@ -66,6 +82,9 @@ fn plist_contents(exe: &str) -> String {
 
 #[cfg(target_os = "macos")]
 pub fn install() -> std::io::Result<()> {
+    if is_dev_instance_context() {
+        return Ok(()); // dev 实例不触碰全局登录项（见 is_dev_instance_context 注释）。
+    }
     let path = item_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -90,6 +109,9 @@ pub fn install() -> std::io::Result<()> {
 
 #[cfg(target_os = "macos")]
 pub fn uninstall() -> std::io::Result<()> {
+    if is_dev_instance_context() {
+        return Ok(()); // dev 实例不触碰全局登录项（见 is_dev_instance_context 注释）。
+    }
     let path = item_path();
     let domain = format!("gui/{}", unsafe { libc::getuid() });
     let _ = run(
@@ -129,6 +151,9 @@ Terminal=false\n"
 
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn install() -> std::io::Result<()> {
+    if is_dev_instance_context() {
+        return Ok(()); // dev 实例不触碰全局登录项（见 is_dev_instance_context 注释）。
+    }
     let path = item_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -138,6 +163,9 @@ pub fn install() -> std::io::Result<()> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn uninstall() -> std::io::Result<()> {
+    if is_dev_instance_context() {
+        return Ok(()); // dev 实例不触碰全局登录项（见 is_dev_instance_context 注释）。
+    }
     let path = item_path();
     if path.exists() {
         std::fs::remove_file(&path)?;
@@ -240,6 +268,9 @@ fn daemon_template_needs_update(installed: &str, exe: &str) -> bool {
 
 /// 写入/刷新 daemon 登录项文件（纯文件、不 launchctl）。幂等。
 pub fn install_daemon() -> std::io::Result<()> {
+    if is_dev_instance_context() {
+        return Ok(()); // dev 实例不触碰全局登录项（见 is_dev_instance_context 注释）。
+    }
     let path = daemon_item_path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -249,6 +280,9 @@ pub fn install_daemon() -> std::io::Result<()> {
 
 /// 删除 daemon 登录项文件（**不** bootout，避免强杀正在运行的 daemon）。幂等。
 pub fn uninstall_daemon() -> std::io::Result<()> {
+    if is_dev_instance_context() {
+        return Ok(()); // dev 实例不触碰全局登录项（见 is_dev_instance_context 注释）。
+    }
     let path = daemon_item_path();
     if path.exists() {
         std::fs::remove_file(&path)?;
@@ -291,6 +325,9 @@ pub fn needs_update() -> bool {
 
 /// 确保登录项与当前 exe 一致：缺失或需更新则（重）安装。幂等。
 pub fn ensure_installed() -> std::io::Result<()> {
+    if is_dev_instance_context() {
+        return Ok(()); // dev 实例不触碰全局登录项（见 is_dev_instance_context 注释）。
+    }
     if !is_installed() || needs_update() {
         install()
     } else {
@@ -377,5 +414,23 @@ mod tests {
         let d = daemon_contents("/home/u/.local/bin/AskHuman");
         assert!(d.contains("Exec=\"/home/u/.local/bin/AskHuman\" daemon start"));
         assert!(d.contains("X-GNOME-Autostart-enabled=true"));
+    }
+
+    /// Dev 实例上下文判定（防生产登录项劫持，用户实证 2026-07-25）：`ASKHUMAN_HOME` 置位
+    /// 即视为隔离实例。exe 路径分支（launchd 重启无 env 的兜底）无法在测试内伪造，仅测 env 分支。
+    #[test]
+    fn dev_instance_context_follows_home_env() {
+        // 与 paths.rs 的 env 测试同约定：串行修改进程 env，结束后恢复。
+        let key = crate::dev_instance::ASKHUMAN_HOME_ENV;
+        let prev = std::env::var_os(key);
+        std::env::set_var(key, "/tmp/x/.askhuman-dev/home");
+        assert!(is_dev_instance_context());
+        std::env::remove_var(key);
+        // 无 env 时结果取决于测试二进制路径（target/ 下不含 .askhuman-dev）→ false。
+        assert!(!is_dev_instance_context());
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
     }
 }

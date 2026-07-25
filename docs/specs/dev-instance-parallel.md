@@ -150,6 +150,12 @@
   - **设置 GUI**：在本 worktree cwd 下打开 `AskHuman --settings`（经 dispatcher 进实例后，设置读写的就是本树 `home/config.json`）；
   - 或 `AskHuman channel …` / 手改 config。
 - Daemon **只读本树物化后的 config**，运行时不打开 `dev-presets/`。
+- **禁止触碰用户级全局登录项**（2026-07-25 补，用户实证）：`~/Library/LaunchAgents` /
+  autostart 的 label 全用户唯一，实例进程写入会把**生产**的开机自启劫持到 worktree 二进制
+  （launchd 以无 `ASKHUMAN_HOME` 环境重启 → 外来构建以生产 home 运行，托盘/窗口被接管），
+  卸载路径则会误删生产登录项。`login_item.rs` 对全部读写入口做实例上下文守卫
+  （`ASKHUMAN_HOME` 置位或 exe 含 `.askhuman-dev` 路径段 → no-op）；生产进程启动时的
+  幂等同步（exe 比对）自然回写自愈。
 
 ### 7.2 机器级渠道预设（跨 WorkTree 复用模板 + 独占租约）
 
