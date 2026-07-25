@@ -632,7 +632,7 @@ export default {
     pendingCount: "待送达 {n} 条",
     revoke: "撤回",
     grokHint: "Grok 不支持发送消息",
-    idleHint: "会话已空闲，无法发送消息",
+    idleHint: "会话已空闲，请回到原始 Agent 界面发送消息",
     endedHint: "会话已结束",
     elapsed: "累计工作 {t}",
     durationHM: "{h} 小时 {m} 分",

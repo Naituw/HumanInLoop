@@ -652,7 +652,7 @@ export default {
     pendingCount: "{n} queued",
     revoke: "Revoke",
     grokHint: "Grok does not support messaging",
-    idleHint: "Session is idle; messaging is unavailable",
+    idleHint: "Session is idle — send the message from the Agent's own interface",
     endedHint: "Session has ended",
     elapsed: "active {t}",
     durationHM: "{h}h {m}m",
