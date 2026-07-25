@@ -9,6 +9,8 @@
 
 mod agents;
 mod app;
+// The takeover submits an ask through the daemon client, which is Unix-only.
+#[cfg(unix)]
 mod ask_question;
 mod autochannel;
 mod channels;
