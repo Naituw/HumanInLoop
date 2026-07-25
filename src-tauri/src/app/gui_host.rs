@@ -788,8 +788,10 @@ fn build_specs(
         true,
     ));
     // 「新建 Agent 任务」（spec gui-agent-task-launch G1/G12）：仅 macOS 且 Terminal.app 可用时
-    // 显示；不要求开启 agentTasks 实验功能。
-    if crate::integrations::agent_launch::terminal_available() {
+    // 显示；不要求开启 agentTasks 实验功能。开启生命周期追踪时归入下方 Agent 区（作为末项，
+    // 用户定案 2026-07-25）；未开启（无 Agent 区）时留在窗口区兜底。
+    let new_task_available = crate::integrations::agent_launch::terminal_available();
+    if new_task_available && !lifecycle_on {
         nodes.push(Node::item(
             "open_new_task",
             i18n::tr(lang, "tray.newTask").to_string(),
@@ -799,8 +801,8 @@ fn build_specs(
     // Agent 区仅在开启了生命周期追踪时显示——否则窗口必为空，徒增困惑。
     // 独立成组（用户验收反馈，spec gui-agent-console 反馈记录）：分隔线 +
     // 「打开 Agent 状态窗口」直达项 + 忙闲概览子菜单（标签即「工作中 w · 空闲 i」，
-    // 逐 agent：在控制台查看 / 发送消息 / 待办 / 聚焦终端；工作中在前）。
-    // 无活动 agent / 旧 daemon（缺摘要）→ 只留直达项。
+    // 逐 agent：在控制台查看 / 发送消息 / 待办 / 聚焦终端；工作中在前）+
+    // 「新建 Agent 任务」末项。无活动 agent / 旧 daemon（缺摘要）→ 无概览子菜单。
     if lifecycle_on {
         nodes.push(Node::separator("sep.agents_section"));
         nodes.push(Node::item(
@@ -884,6 +886,13 @@ fn build_specs(
                 .replace("{w}", &data.agents_working.to_string())
                 .replace("{i}", &data.agents_idle.to_string());
             nodes.push(Node::submenu("agents_menu", overview, true, children));
+        }
+        if new_task_available {
+            nodes.push(Node::item(
+                "open_new_task",
+                i18n::tr(lang, "tray.newTask").to_string(),
+                true,
+            ));
         }
     }
     nodes.push(Node::separator("sep.update"));
