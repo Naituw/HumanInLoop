@@ -713,7 +713,7 @@ export default {
     projectSectionWorkspace: "最近工作目录",
     projectSectionTodos: "有待办的项目",
     noProjects: "暂无可用工作目录",
-    noProjectsHint: "先在电脑上的 Agent 中打开一个项目，或在设置「实验」中添加目录。",
+    noProjectsHint: "先在电脑上的 Agent 中打开一个项目，或在设置「高级」中添加目录。",
     taskLabel: "任务",
     manualEntry: "直接输入新任务",
     todoTag: "【TODO】",

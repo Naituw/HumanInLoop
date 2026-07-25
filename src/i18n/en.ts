@@ -738,7 +738,7 @@ export default {
     projectSectionTodos: "Projects with todos",
     noProjects: "No workspace is available",
     noProjectsHint:
-      "Open a project in a local Agent first, or add a directory in Settings → Experimental.",
+      "Open a project in a local Agent first, or add a directory in Settings → Advanced.",
     taskLabel: "Task",
     manualEntry: "Enter a new task",
     todoTag: "【TODO】",

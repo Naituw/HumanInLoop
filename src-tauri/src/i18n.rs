@@ -425,8 +425,8 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         // /status 空状态（无工作中/空闲 agent）：附「需开启生命周期追踪」提示。
         "autoChannel.statusEmpty" => pick(
             lang,
-            "No working or idle agents right now.\n(Agent status relies on the experimental Lifecycle Tracking feature; if it is off, enable tracking for the relevant agent under Settings → Experimental.)",
-            "当前没有工作中或空闲的 agent。\n（agent 状态依赖「生命周期追踪」实验功能；如未开启，请在 设置 → 实验 中开启对应 Agent 的追踪。）",
+            "No working or idle agents right now.\n(Agent status relies on Lifecycle Tracking; if it is off, enable tracking for the relevant agent under Settings → Advanced.)",
+            "当前没有工作中或空闲的 agent。\n（agent 状态依赖「生命周期追踪」；如未开启，请在 设置 → 高级 中开启对应 Agent 的追踪。）",
         ),
         // /status <编号> 详情：未找到该编号。`{p}` 为渠道命令前缀（Slack 用 `!`，其余 `/`）。
         "autoChannel.statusDetailNotFound" => pick(
