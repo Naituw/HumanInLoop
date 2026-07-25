@@ -209,6 +209,7 @@ AskHuman/
         context_recovery.rs  压缩后提示、MCP token 注入与 Grok pending 上报
         title.rs             四家会话标题解析
         activity.rs          transcript 尾部活动解析
+        cursor_vscdb.rs      Cursor IDE 会话实时源（state.vscdb；活动/标题/完整会话）
         registry.rs          Agent 状态推导、持久化与快照
         interject.rs         插话队列、等待与持久化
         stop.rs              Stop Hook 捕获与原生 continuation

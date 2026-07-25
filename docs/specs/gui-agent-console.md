@@ -132,4 +132,12 @@
 - **2026-07-25（真机验收微调）**：diff 面板内文件头 sticky 置顶（长 diff 深处可随时收起）；
   标题解析剥 Cursor `<timestamp>`/`<user_query>` 包装（否则回退路径全被当注入块滤掉）；
   托盘 Agent 区独立成组——「打开 Agent 状态窗口」直达项 + 忙闲概览子菜单
-  （标签即「工作中 w · 空闲 i」；agent-interject spec D7 已同步修订）。
+  （标签即「工作中 w · 空闲 i」；agent-interject spec D7 已同步修订）；边栏项目头待办
+  徽标可点击（打开该项目待办窗口）。
+- **2026-07-25（最近动态数据源根治）**：用户实证「文字数小时不更新 + 工具一闪而过」。
+  根因：① Cursor IDE（Agent Window）的 agent-transcripts jsonl 在长回合内冻结（AskHuman
+  协议下回合永不结束 → 等于永不落盘；CLI 形态逐工具落盘不受影响）；② 实时 `currentTool`
+  与 transcript **文件 mtime** 比时刻，被无关写入秒级挤掉。根治：新增
+  `agents/cursor_vscdb.rs` 直读 Cursor 全局 `state.vscdb`（`composerData`/`bubbleId` 键，
+  实时明文：官方标题 + 逐条文字 + 工具真实状态），activity/标题/完整会话三处路由优先走它、
+  失败回退 jsonl；融合改按内容收敛（详见 im-watch spec 状态行小节）。

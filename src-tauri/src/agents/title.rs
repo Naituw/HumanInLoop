@@ -47,6 +47,10 @@ fn clean_title(s: &str) -> String {
 // ── Cursor ──
 
 fn cursor_title(session_id: &str) -> Option<String> {
+    // 0) IDE 形态：全局 state.vscdb 的官方标题（实时、与 IDE 恢复列表一致）。
+    if let Some(t) = super::cursor_vscdb::resolve_title(session_id) {
+        return Some(t);
+    }
     // 1) ~/.cursor/chats/*/<sid>/meta.json 的 title
     let chats = paths::cursor_dir().join("chats");
     if let Ok(entries) = fs::read_dir(&chats) {

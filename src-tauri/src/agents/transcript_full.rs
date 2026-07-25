@@ -125,7 +125,7 @@ fn event_time(v: &Value) -> Option<u64> {
 }
 
 /// Parse `2026-06-13T10:09:57.062Z` / `2026-06-13T10:09:57+08:00` → unix seconds (UTC).
-fn parse_iso8601_secs(s: &str) -> Option<u64> {
+pub(super) fn parse_iso8601_secs(s: &str) -> Option<u64> {
     let s = s.trim();
     if s.len() < 19 {
         return None;
@@ -180,6 +180,13 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> Option<i64> {
 }
 
 pub fn load_events(kind: AgentKind, session_id: &str) -> Result<TranscriptDoc, String> {
+    // Cursor IDE 形态：全局 state.vscdb 实时源优先（jsonl 长回合内冻结）；
+    // 未命中（CLI 会话 / 库缺失）回退 jsonl。
+    if kind == AgentKind::Cursor {
+        if let Ok(doc) = super::cursor_vscdb::load_events(session_id) {
+            return Ok(doc);
+        }
+    }
     let path =
         transcript_path(kind, session_id).ok_or_else(|| "transcript not found".to_string())?;
     let mut doc = load_path(kind, &path)?;
@@ -191,7 +198,13 @@ pub fn load_events(kind: AgentKind, session_id: &str) -> Result<TranscriptDoc, S
 }
 
 /// Transcript file mtime（控制台分页缓存的失效键，spec gui-agent-console C14）。
+/// Cursor IDE 形态取 vscdb 的 `lastUpdatedAt`（全局库文件 mtime 恒变，不能当键）。
 pub fn transcript_mtime(kind: AgentKind, session_id: &str) -> Option<std::time::SystemTime> {
+    if kind == AgentKind::Cursor {
+        if let Some(t) = super::cursor_vscdb::last_updated(session_id) {
+            return Some(t);
+        }
+    }
     transcript_path(kind, session_id)
         .and_then(|p| fs::metadata(p).ok())
         .and_then(|m| m.modified().ok())
@@ -718,7 +731,7 @@ fn close_tool(
 
 /// Watch 同款：类别词 + 对象。`args_summary` 存 **纯文本** `读取: file.rs`；
 /// 渲染层负责 **粗体类别** / *斜体对象*（与 watch 卡 `**类别**: *对象*` 一致）。
-fn format_tool_line(td: &super::activity::ToolDisplay) -> String {
+pub(super) fn format_tool_line(td: &super::activity::ToolDisplay) -> String {
     use super::activity::ToolLabel;
     let label = match &td.label {
         ToolLabel::Run => "运行",
@@ -794,7 +807,7 @@ fn summarize_args(name: &str, args: Option<&Value>) -> String {
     trunc(&s, MAX_ARG_CHARS)
 }
 
-fn detect_askhuman(
+pub(super) fn detect_askhuman(
     name: &str,
     args: Option<&Value>,
     result: Option<&str>,

@@ -105,7 +105,12 @@ Codex 完成时整条写入、Claude 渐进写入），**没有 token 级流**�
   `custom_tool_call_output` 闭合完成/失败状态。`apply_patch` 不按 JavaScript 正文展示，改读完成时的
   结构化 `event_msg.payload.type="patch_apply_end"`，按 `success` 标为完成/失败，并从 `changes` 只展示
   `首文件名 +N`（不读取或外发 diff 正文），避免同一次编辑重复出现。
-  hook 实时 `currentTool` 严格更新时并入为进行中末步。飞书卡用
+  hook 实时 `currentTool` 并入为进行中末步（2026-07-25 起按**内容收敛**：驻留到被 transcript
+  同款步接替 / turn-end 清除 / 10 分钟 TTL 兜底；旧「与文件 mtime 比时刻」会被无关写入秒级
+  挤掉造成闪烁）。**Cursor IDE（Agent Window）会话**（2026-07-25）：其 jsonl 在长回合内冻结
+  数小时，activity/标题/完整会话一律优先读 Cursor 全局 `state.vscdb` 实时源
+  （`agents/cursor_vscdb.rs`，只读 + 失败回退 jsonl；CLI 会话不在库中天然走 jsonl，且其
+  工具状态为真实值、不做「一律已完成」收敛）。飞书卡用
   `<font color='green|grey|red'>●</font>` 彩色圆点；`/status`（纯文本，全渠道）用 emoji 圆点
   🟢/⚪/🔴（无粗斜体）。AskHuman 提问 = 一次 Shell 调用：等待时绿点，答完变灰点 + 状态行
   🙋→🟢 + 步数 +1，三处可感知。Cursor/Claude 的 Shell 调用自带人话 `description` → 显示

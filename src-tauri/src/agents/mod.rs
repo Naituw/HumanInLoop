@@ -12,6 +12,7 @@
 pub mod activity;
 #[cfg(unix)]
 pub mod context_recovery;
+pub mod cursor_vscdb;
 pub mod detect;
 pub mod interject;
 pub mod registry;

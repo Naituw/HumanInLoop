@@ -103,7 +103,14 @@ pub enum ToolLabel {
 }
 
 /// 解析某家 agent 某 session 的「当前活动」。取不到（文件缺失 / 无文字也无工具）返回 `None`。
+/// Cursor 先试 IDE 的 vscdb 实时源（jsonl 在 IDE 长回合内会冻结数小时，spec gui-agent-console
+/// 反馈记录 2026-07-25）；未命中（CLI 会话 / 库缺失 / schema 变化）回退 jsonl。
 pub fn resolve_activity(kind: AgentKind, session_id: &str) -> Option<Activity> {
+    if kind == AgentKind::Cursor {
+        if let Some(a) = super::cursor_vscdb::resolve_activity(session_id) {
+            return Some(a);
+        }
+    }
     let path = transcript_path(kind, session_id)?;
     let lines = read_tail(&path, MAX_TAIL_BYTES);
     let mut activity = analyze(kind, &lines)?;
@@ -190,8 +197,10 @@ fn read_tail(path: &Path, max_bytes: u64) -> Vec<String> {
     lines
 }
 
-/// 尾部窗口内的一条「有意义事件」。
-enum Ev {
+/// 尾部窗口内的一条「有意义事件」。`pub(super)`：Cursor IDE 的 vscdb 适配器
+/// （`cursor_vscdb.rs`）把 bubble 转成同一事件流复用 `aggregate` 聚合。
+#[derive(Clone)]
+pub(super) enum Ev {
     /// 助手自然语言文字。
     Text(String),
     /// 工具调用。
@@ -219,7 +228,14 @@ fn analyze(kind: AgentKind, lines: &[String]) -> Option<Activity> {
         };
         push_events(kind, &v, &mut evs);
     }
+    // Cursor jsonl 的调用**跑完后**才落盘且从不写 tool_result（见 aggregate 注释）→ 全部收敛；
+    // vscdb 源自带真实状态，不走此收敛。
+    aggregate(&evs, kind == AgentKind::Cursor)
+}
 
+/// 事件流 → 「当前活动」聚合（jsonl 与 vscdb 两源共用）。`settle_all`：结尾把所有仍在跑的
+/// 步收敛为已完成（Cursor jsonl 语义——落盘即已结束；其它源维持末步真实状态）。
+pub(super) fn aggregate(evs: &[Ev], settle_all: bool) -> Option<Activity> {
     let mut last_text: Option<String> = None;
     let mut steps: Vec<ToolStep> = Vec::new();
     // 文字之后被挤出时间线的调用数（「省略 N 步」标注）。
@@ -234,7 +250,7 @@ fn analyze(kind: AgentKind, lines: &[String]) -> Option<Activity> {
             }
         }
     }
-    for ev in &evs {
+    for ev in evs {
         match ev {
             Ev::Text(t) => {
                 last_text = Some(t.clone());
@@ -270,31 +286,16 @@ fn analyze(kind: AgentKind, lines: &[String]) -> Option<Activity> {
                 // TODO 更新本身也是一次工具调用（不入时间线）：证明此前的步已结束。
                 // 其后续 tool_result（Claude 会写）落到无 Running 步上自然 no-op。
                 settle_running(&mut steps);
-                if *replace {
-                    todo_list = items.clone();
-                } else {
-                    // Cursor merge=true：按 id 就地更新，未知 id 追加（保持原有顺序）。
-                    for (id, item) in items {
-                        let hit = id.as_deref().and_then(|id| {
-                            todo_list
-                                .iter_mut()
-                                .find(|(eid, _)| eid.as_deref() == Some(id))
-                        });
-                        match hit {
-                            Some((_, existing)) => *existing = item.clone(),
-                            None => todo_list.push((id.clone(), item.clone())),
-                        }
-                    }
-                }
+                apply_todo_update(&mut todo_list, *replace, items);
             }
         }
     }
 
-    // Cursor 的 transcript 只在工具**跑完后**才落盘该次调用（实测 in-flight 探针不可见），
+    // Cursor jsonl 的 transcript 只在工具**跑完后**才落盘该次调用（实测 in-flight 探针不可见），
     // 且从不写 tool_result 事件：出现在 transcript 里的步必已结束 → 全部收敛为已完成。
     // 「进行中」只能来自实时 hook（`activity_parts` 并入的 `currentTool` 末步）。
-    // Claude / Codex / Grok 则在调用**开始**时即写盘 → 末步无结果 = 真在跑，维持进行中。
-    if kind == AgentKind::Cursor {
+    // Claude / Codex / Grok 在调用**开始**时即写盘、vscdb 源自带真实状态 → 维持进行中。
+    if settle_all {
         settle_running(&mut steps);
     }
 
@@ -315,6 +316,30 @@ fn analyze(kind: AgentKind, lines: &[String]) -> Option<Activity> {
         todos,
         at: None,
     })
+}
+
+/// TODO 重放一步（jsonl 聚合与 vscdb 适配器共用）：`replace` 整表替换；否则按 id 就地
+/// 更新、未知 id 追加（保持原有顺序，Cursor merge=true 语义）。
+pub(super) fn apply_todo_update(
+    ledger: &mut Vec<(Option<String>, TodoItem)>,
+    replace: bool,
+    items: &[(Option<String>, TodoItem)],
+) {
+    if replace {
+        *ledger = items.to_vec();
+        return;
+    }
+    for (id, item) in items {
+        let hit = id.as_deref().and_then(|id| {
+            ledger
+                .iter_mut()
+                .find(|(eid, _)| eid.as_deref() == Some(id))
+        });
+        match hit {
+            Some((_, existing)) => *existing = item.clone(),
+            None => ledger.push((id.clone(), item.clone())),
+        }
+    }
 }
 
 fn push_events(kind: AgentKind, v: &Value, out: &mut Vec<Ev>) {
@@ -587,8 +612,8 @@ pub(crate) fn is_todo_tool(name: &str) -> bool {
 /// 解析 TodoWrite / update_plan 参数为 TODO 更新事件。
 /// Cursor：`{merge, todos:[{id,content,status}]}`（merge=true 按 id 增量合并）；
 /// Claude：`{todos:[{content,status}]}`（恒整表）；Codex：`{plan:[{step,status}]}`（恒整表）。
-/// 空列表 / 无法解析 → None（忽略，不清空既有清单）。
-fn parse_todos(args: Option<&Value>) -> Option<Ev> {
+/// 空列表 / 无法解析 → None（忽略，不清空既有清单）。`pub(super)`：vscdb 适配器复用。
+pub(super) fn parse_todos(args: Option<&Value>) -> Option<Ev> {
     let o = parse_args(args)?;
     let arr = o.get("todos").or_else(|| o.get("plan"))?.as_array()?;
     let replace = !o.get("merge").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -652,12 +677,20 @@ pub(crate) fn classify_tool(name: &str, args: Option<&Value>) -> ToolDisplay {
 fn is_run(n: &str) -> bool {
     matches!(
         n,
-        "bash" | "shell" | "run_terminal_cmd" | "local_shell" | "local_shell_call" | "exec" | "run"
+        "bash"
+            | "shell"
+            | "run_terminal_cmd"
+            // Cursor IDE（vscdb 源）的工具名。
+            | "run_terminal_command_v2"
+            | "local_shell"
+            | "local_shell_call"
+            | "exec"
+            | "run"
     )
 }
 
 fn is_read(n: &str) -> bool {
-    matches!(n, "read" | "read_file" | "view" | "cat")
+    matches!(n, "read" | "read_file" | "read_file_v2" | "view" | "cat")
 }
 
 fn is_write(n: &str) -> bool {
@@ -665,6 +698,8 @@ fn is_write(n: &str) -> bool {
         n,
         "write"
             | "edit"
+            // Cursor IDE（vscdb 源）的工具名。
+            | "edit_file_v2"
             | "multiedit"
             | "str_replace"
             | "str_replace_editor"
