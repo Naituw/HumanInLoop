@@ -796,28 +796,20 @@ fn build_specs(
             true,
         ));
     }
-    // 「Agent 状态」入口仅在开启了生命周期追踪时显示——否则窗口必为空，徒增困惑。
-    // 忙闲数量直接并入标题（合并了原状态区的只读忙闲行）。
-    // 有活动 agent（daemon 下发摘要）时父项变**子菜单**（spec agent-interject D7）：
-    // 首项「打开状态窗口」+ 分隔线 + 逐 agent 子菜单（发送消息 / 聚焦终端；工作中在前）；
-    // 无活动 agent / 旧 daemon（缺摘要）→ 退回普通条目（点击即开窗口）。
+    // Agent 区仅在开启了生命周期追踪时显示——否则窗口必为空，徒增困惑。
+    // 独立成组（用户验收反馈，spec gui-agent-console 反馈记录）：分隔线 +
+    // 「打开 Agent 状态窗口」直达项 + 忙闲概览子菜单（标签即「工作中 w · 空闲 i」，
+    // 逐 agent：在控制台查看 / 发送消息 / 待办 / 聚焦终端；工作中在前）。
+    // 无活动 agent / 旧 daemon（缺摘要）→ 只留直达项。
     if lifecycle_on {
-        let label = if up && data.agents_working + data.agents_idle > 0 {
-            i18n::tr(lang, "tray.openAgentsCounts")
-                .replace("{w}", &data.agents_working.to_string())
-                .replace("{i}", &data.agents_idle.to_string())
-        } else {
-            i18n::tr(lang, "tray.openAgents").to_string()
-        };
-        if !up || data.agents.is_empty() {
-            nodes.push(Node::item("open_agents", label, true));
-        } else {
-            let mut children = vec![Node::item(
-                "open_agents",
-                i18n::tr(lang, "tray.openAgentsWindow").to_string(),
-                true,
-            )];
-            children.push(Node::separator("sep.agents"));
+        nodes.push(Node::separator("sep.agents_section"));
+        nodes.push(Node::item(
+            "open_agents",
+            i18n::tr(lang, "tray.openAgents").to_string(),
+            true,
+        ));
+        if up && !data.agents.is_empty() {
+            let mut children: Vec<Node> = Vec::new();
             for a in &data.agents {
                 // Agent 条目前缀用与 /watch 卡片一致的状态圆点，避免仅靠排序区分工作中/空闲。
                 // 编号可直接用于 `/msg <编号>`；标题截断 24 字符防菜单过宽。
@@ -840,6 +832,12 @@ fn build_specs(
                     project
                 );
                 let mut sub: Vec<Node> = Vec::new();
+                // 「在控制台查看」（spec gui-agent-console C10/R4）：打开控制台并定位该会话。
+                sub.push(Node::item(
+                    format!("goto:{}", a.session_id),
+                    i18n::tr(lang, "tray.agentOpenConsole").to_string(),
+                    true,
+                ));
                 // 「发送消息」：grok 无可靠传话通道（首期排除，spec agent-interject D1），且仅「工作中」
                 // 才显示——插话在 agent 下一次工具调用时送达，对空闲无意义（用户定案）。
                 if a.kind != "grok" && a.state == "working" {
@@ -882,7 +880,10 @@ fn build_specs(
                     ));
                 }
             }
-            nodes.push(Node::submenu("agents_menu", label, true, children));
+            let overview = i18n::tr(lang, "tray.agentOverview")
+                .replace("{w}", &data.agents_working.to_string())
+                .replace("{i}", &data.agents_idle.to_string());
+            nodes.push(Node::submenu("agents_menu", overview, true, children));
         }
     }
     nodes.push(Node::separator("sep.update"));
@@ -1010,6 +1011,22 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
                 let _ = ipc::write_msg(&mut w, &ClientMsg::FocusRequest { request_id }).await;
             }
         });
+        return;
+    }
+    // Agent 子菜单「在控制台查看」：打开（或聚焦）控制台并定位该会话（spec gui-agent-console C10/R4）。
+    if let Some(session_id) = id.strip_prefix("goto:") {
+        open_window(
+            app,
+            WindowKind::Agents,
+            false,
+            None,
+            Some(crate::gui_host::InterjectTarget {
+                session: session_id.to_string(),
+                agent: None,
+                cwd: None,
+            }),
+            None,
+        );
         return;
     }
     // Agent 子菜单「发送消息」：宿主本进程直接开（或聚焦）该 session 的插话 composer 窗口。
@@ -1229,7 +1246,9 @@ pub(crate) fn open_window(
         WindowKind::History => {
             crate::app::create_history_window(app, &cfg, all, param.as_deref(), pin_above_popup)
         }
-        WindowKind::Agents => crate::app::create_agents_window(app, &cfg),
+        WindowKind::Agents => {
+            crate::app::create_agents_window(app, &cfg, target.as_ref().map(|t| t.session.as_str()))
+        }
         WindowKind::Interject => match &target {
             Some(t) => crate::app::create_interject_window(app, &cfg, t, pin_above_popup),
             None => return, // session 缺失：无法定位目标 agent，忽略。

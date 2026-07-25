@@ -496,6 +496,12 @@ pub enum ClientMsg {
     },
     /// 状态窗口订阅 agent 快照（握手后发；之后 daemon 持续推 `AgentsState`，spec D20）。
     AgentsSubscribe,
+    /// 控制台焦点会话（在 agents 订阅连接上发送，spec gui-agent-console C8）：daemon 对焦点
+    /// 会话复用 watch 引擎按签名推 `AgentDetail` 帧；`None` = 取消焦点。随连接断开自动清理。
+    AgentsFocus {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+    },
     /// 菜单栏宿主订阅整合状态（**非保活**，spec D10）：连上即收一帧 `TrayState`，之后变化即推。
     /// 该订阅刻意**不计入 daemon 空闲保活**——图标不得把 daemon 续命（续命只由「有窗口」的
     /// 普通连接承担）。daemon 收到后在 `handle_tray_sub` 中抵消其对 `active` 的占用。
@@ -645,6 +651,11 @@ pub enum ServerMsg {
     /// `agents` 为记录数组，前端按类型分组、按状态排序渲染。
     AgentsState {
         agents: serde_json::Value,
+    },
+    /// 控制台焦点会话详情帧（D→agents 订阅者，spec gui-agent-console C8/R5）：tagged JSON
+    /// （`type: "watchFrame"` + 会话 id + Watch 帧字段），签名变化才推。未来可扩展新 type。
+    AgentDetail {
+        detail: serde_json::Value,
     },
     /// 菜单栏宿主整合状态（D→宿主，spec D10）：连上即一帧 + 变化即推。
     /// 字段名 snake_case（与既有结构体变体一致；IPC 两端同二进制）。宿主据 `running` 与

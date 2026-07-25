@@ -1105,6 +1105,14 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             crate::commands::history_init,
             crate::commands::agents_init,
             crate::commands::agents_start_subscription,
+            crate::commands::agents_focus,
+            crate::commands::focus_request,
+            crate::commands::interject_append,
+            crate::commands::interject_peek,
+            crate::commands::console_transcript,
+            crate::commands::console_diff_stat,
+            crate::commands::console_diff_file,
+            crate::commands::console_stage,
             crate::commands::get_history,
             crate::commands::get_history_projects,
             crate::commands::history_count,
@@ -1498,7 +1506,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                 #[cfg(unix)]
                 View::Agents => {
                     let config = AppConfig::load_without_secrets();
-                    create_agents_window(app, &config)?;
+                    create_agents_window(app, &config, None)?;
                     // 订阅不在此处启动：daemon 一连上就推一帧立即快照，若现在就连，emit 会早于
                     // 前端注册 `agents-updated` 监听（Tauri 事件不缓存）而丢首帧，窗口空等到下一次
                     // 周期推送（15s 内随机）。改由前端挂载、监听就绪后经 `agents_start_subscription`
@@ -2257,15 +2265,26 @@ fn urlencode(s: &str) -> String {
     out
 }
 
-/// 创建（或聚焦已存在的）Agent 状态窗口（实验性功能 spec D13）。
+/// 创建（或聚焦已存在的）Agent 控制台窗口（spec D13 / gui-agent-console）。
+/// `session` 为可选目标会话（R4 可寻址打开）：已开窗经 `agents-goto` 事件选中，
+/// 新建经 URL 参数传递。
 #[cfg(unix)]
-pub(crate) fn create_agents_window<R, M>(manager: &M, config: &AppConfig) -> tauri::Result<()>
+pub(crate) fn create_agents_window<R, M>(
+    manager: &M,
+    config: &AppConfig,
+    session: Option<&str>,
+) -> tauri::Result<()>
 where
     R: tauri::Runtime,
     M: Manager<R>,
 {
+    let session = session.filter(|s| !s.is_empty());
     if let Some(w) = manager.get_webview_window("agents") {
         let _ = w.set_focus();
+        if let Some(sid) = session {
+            use tauri::Emitter;
+            let _ = w.emit("agents-goto", serde_json::json!({ "session": sid }));
+        }
         return Ok(());
     }
     let theme = window_theme(config);
@@ -2274,11 +2293,16 @@ where
     let window_effect = config.general.window_effect;
     let effective_window_effect = effective_window_effect(window_effect);
     let mut url = String::from("index.html?view=agents");
+    if let Some(sid) = session {
+        url.push_str("&session=");
+        url.push_str(&urlencode(sid));
+    }
     append_window_effect_query(&mut url, effective_window_effect);
     let builder = WebviewWindowBuilder::new(manager, "agents", WebviewUrl::App(url.into()))
         .title(i18n::tr(lang, "title.agents"))
-        .inner_size(760.0, 560.0)
-        .min_inner_size(520.0, 360.0)
+        // 双栏控制台（spec gui-agent-console C1）：边栏 + 详情区需要更宽的默认尺寸。
+        .inner_size(980.0, 640.0)
+        .min_inner_size(760.0, 480.0)
         .center()
         .theme(theme);
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
@@ -2523,9 +2547,36 @@ pub(crate) fn start_agents_subscription(app: tauri::AppHandle) {
     spawn_agents_subscription(app, None);
 }
 
-/// 订阅 daemon 的 agent 快照推送，转成前端 `agents-updated` 事件（实验性功能 spec D20）。
-/// 断连后退避重连（必要时 `open_for_subscribe` 会自动拉起 daemon）。`stop` 为 Some 时（宿主）
-/// 被通知即整体退出（窗口关闭/重启订阅用）；为 None 时随进程退出。
+/// 控制台焦点槽：`(当前订阅周期的焦点发送端, 最近一次设置的焦点会话)`。
+/// 焦点经订阅连接送达 daemon（spec gui-agent-console C8）；断连重连后按 `.1` 补发恢复。
+#[cfg(unix)]
+type AgentsFocusSlot = std::sync::Mutex<(
+    Option<tokio::sync::mpsc::UnboundedSender<Option<String>>>,
+    Option<String>,
+)>;
+
+#[cfg(unix)]
+fn agents_focus_slot() -> &'static AgentsFocusSlot {
+    static SLOT: std::sync::OnceLock<AgentsFocusSlot> = std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new((None, None)))
+}
+
+/// 设置控制台焦点会话（None＝取消）：记录以供重连补发，并 best-effort 发给当前订阅周期。
+#[cfg(unix)]
+pub(crate) fn set_agents_focus(session_id: Option<String>) {
+    let Ok(mut slot) = agents_focus_slot().lock() else {
+        return;
+    };
+    slot.1 = session_id.clone();
+    if let Some(tx) = slot.0.as_ref() {
+        let _ = tx.send(session_id);
+    }
+}
+
+/// 订阅 daemon 的 agent 快照推送，转成前端 `agents-updated` 事件（实验性功能 spec D20）；
+/// 焦点会话详情帧转成 `agent-detail` 事件（spec gui-agent-console C8）。
+/// 断连后退避重连（必要时 `open_for_subscribe` 会自动拉起 daemon），重连补发当前焦点。
+/// `stop` 为 Some 时（宿主）被通知即整体退出（窗口关闭/重启订阅用）；为 None 时随进程退出。
 #[cfg(unix)]
 pub(crate) fn spawn_agents_subscription(
     app: tauri::AppHandle,
@@ -2545,15 +2596,40 @@ pub(crate) fn spawn_agents_subscription(
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                         return;
                     }
+                    // 焦点写任务：登记本周期发送端，补发当前焦点（重连恢复），随后按需转发。
+                    let (ftx, mut frx) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
+                    {
+                        let Ok(mut slot) = agents_focus_slot().lock() else {
+                            return;
+                        };
+                        if let Some(current) = slot.1.clone() {
+                            let _ = ftx.send(Some(current));
+                        }
+                        slot.0 = Some(ftx);
+                    }
+                    let writer_task = tokio::spawn(async move {
+                        while let Some(session_id) = frx.recv().await {
+                            if ipc::write_msg(&mut writer, &ClientMsg::AgentsFocus { session_id })
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
                     loop {
                         match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
                             Ok(Some(ServerMsg::AgentsState { agents })) => {
                                 let _ = app.emit("agents-updated", agents);
                             }
+                            Ok(Some(ServerMsg::AgentDetail { detail })) => {
+                                let _ = app.emit("agent-detail", detail);
+                            }
                             Ok(Some(_)) => {}
                             Ok(None) | Err(_) => break, // 断连 → 跳出去重连。
                         }
                     }
+                    writer_task.abort();
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             };

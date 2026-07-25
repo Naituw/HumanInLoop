@@ -513,10 +513,15 @@ onBeforeUnmount(() => {
               <svg class="chevron" :class="{ closed: collapsed.has(g.key) }" viewBox="0 0 12 12">
                 <path d="M4 2.5 L8 6 L4 9.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
               </svg>
-              <span class="proj-name">{{ g.label }}</span>
-              <span v-if="workingCount(g)" class="badge badge-working">{{ workingCount(g) }}</span>
-              <span v-if="g.todoCount" class="badge badge-todo" title="项目待办">☑{{ g.todoCount }}</span>
-            </button>
+          <span class="proj-name">{{ g.label }}</span>
+          <span v-if="workingCount(g)" class="badge badge-working">{{ workingCount(g) }}</span>
+        </button>
+        <button
+          v-if="g.todoCount"
+          class="badge badge-todo"
+          title="项目待办"
+          @click="showToast('（原型）打开该项目待办窗口')"
+        >☑{{ g.todoCount }}</button>
             <button class="plus-btn" title="在此项目新建任务" @click="openNewTask(g.path)">
               <svg viewBox="0 0 12 12"><path d="M6 2v8M2 6h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
             </button>
@@ -1067,9 +1072,16 @@ onBeforeUnmount(() => {
   color: #248a3d;
 }
 .badge-todo {
+  appearance: none;
+  border: none;
+  cursor: pointer;
   background: color-mix(in srgb, var(--text-primary) 8%, transparent);
   color: var(--text-tertiary);
   font-weight: 500;
+}
+.badge-todo:hover {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
 }
 .plus-btn {
   flex: 0 0 auto;

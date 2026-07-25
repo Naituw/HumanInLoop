@@ -52,6 +52,8 @@
   --clickable-shadow: 0 1px 4px rgba(0, 0, 0, 0.07), 0 0.5px 1.5px rgba(0, 0, 0, 0.05);
   --accent-orange: #ff9500;
   --accent-green: #34c759;
+  /* Agent 控制台「工作中」指示器（spec gui-agent-console C13）：低饱和绿，浅色取深灰绿。 */
+  --ind-working: color-mix(in srgb, #248a3d 70%, #3c3c3e);
   /* 推荐 Badge 文字色：浅色下用更鲜艳但仍清晰的绿（比 #34c759 更沉、比 #1a7f37 更亮更显眼）。 */
   --rec-badge-fg: #1c9b41;
   --diff-add-bg: #dafbe1;
@@ -88,6 +90,8 @@
   --clickable-shadow: 0 0 0 transparent;
   --accent-orange: #ff9f0a;
   --accent-green: #30d158;
+  /* 控制台「工作中」指示器：深色下近白带一点绿（C13）。 */
+  --ind-working: color-mix(in srgb, #30d158 42%, #f5f5f7);
   /* 深色下亮绿在深底上对比度已足够，沿用 accent-green。 */
   --rec-badge-fg: #30d158;
   --diff-add-bg: #173d25;
@@ -120,6 +124,7 @@
     --clickable-shadow: 0 0 0 transparent;
     --accent-orange: #ff9f0a;
     --accent-green: #30d158;
+    --ind-working: color-mix(in srgb, #30d158 42%, #f5f5f7);
     --rec-badge-fg: #30d158;
     --diff-add-bg: #173d25;
     --diff-delete-bg: #4a1c22;

@@ -899,6 +899,10 @@ pub fn history_init(state: State<AppState>) -> HistoryInit {
 pub struct AgentsInit {
     theme: String,
     lang: String,
+    /// 与弹窗一致的提交快捷键（控制台输入框 ⌘↵ 发送）。
+    popup_submit_key: String,
+    /// 「新建任务」入口是否可用（spec gui-agent-task-launch G1 同口径）：macOS 且 Terminal.app 存在。
+    new_task_supported: bool,
 }
 
 #[tauri::command]
@@ -910,6 +914,8 @@ pub fn agents_init() -> AgentsInit {
         lang: crate::i18n::Lang::resolve(&config.general.language)
             .code()
             .to_string(),
+        popup_submit_key: config.general.popup_submit_key.as_str().to_string(),
+        new_task_supported: crate::integrations::agent_launch::terminal_available(),
     }
 }
 
@@ -955,7 +961,11 @@ fn route_open_window(
                 WindowKind::History => {
                     crate::app::create_history_window(&fallback, &cfg, all, project.as_deref(), pin)
                 }
-                WindowKind::Agents => crate::app::create_agents_window(&fallback, &cfg),
+                WindowKind::Agents => crate::app::create_agents_window(
+                    &fallback,
+                    &cfg,
+                    target.as_ref().map(|t| t.session.as_str()),
+                ),
                 WindowKind::Interject => match &target {
                     Some(t) => crate::app::create_interject_window(&fallback, &cfg, t, pin),
                     None => Ok(()),
@@ -2208,6 +2218,248 @@ pub fn interject_clear(session_id: String) {
     crate::client::report_agent_event(crate::ipc::ClientMsg::InterjectClear { session_id });
     #[cfg(not(unix))]
     let _ = session_id;
+}
+
+// ===== Agent 控制台（spec gui-agent-console）=====
+
+/// 控制台焦点会话（C8）：daemon 对焦点会话按签名推 `agent-detail` 帧；`None`/空串＝取消焦点。
+#[tauri::command]
+pub fn agents_focus(session_id: Option<String>) {
+    #[cfg(unix)]
+    crate::app::set_agents_focus(session_id.filter(|s| !s.trim().is_empty()));
+    #[cfg(not(unix))]
+    let _ = session_id;
+}
+
+/// 「去回答」（C7）：请求 daemon 聚焦对应请求的弹窗（托盘「待答」子菜单同款链路，即发即走）。
+#[tauri::command]
+pub fn focus_request(request_id: String) {
+    #[cfg(unix)]
+    crate::client::report_agent_event(crate::ipc::ClientMsg::FocusRequest { request_id });
+    #[cfg(not(unix))]
+    let _ = request_id;
+}
+
+/// 控制台输入框发消息（C3 追加语义，同 IM `/msg`）：不覆盖既有待送达队列，即发即走。
+#[tauri::command]
+pub fn interject_append(session_id: String, text: String) {
+    #[cfg(unix)]
+    crate::client::report_agent_event(crate::ipc::ClientMsg::InterjectAppend { session_id, text });
+    #[cfg(not(unix))]
+    let _ = (session_id, text);
+}
+
+/// 待送达气泡内容查询（C3）：返回 `(全文, 条数)`；daemon 未运行 → `("", 0)`。
+#[tauri::command]
+pub async fn interject_peek(session_id: String) -> Result<(String, usize), String> {
+    #[cfg(unix)]
+    {
+        Ok(crate::client::interject_peek(session_id).await)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = session_id;
+        Ok((String::new(), 0))
+    }
+}
+
+/// 控制台 git 调用闸门（C16）：同一时刻只跑一个 git 任务；抢不到锁（上次未返回）直接
+/// 返回 busy 由前端跳过本次刷新，另有 10s 硬超时兜底慢仓库。
+#[cfg(unix)]
+fn diff_gate() -> &'static tokio::sync::Mutex<()> {
+    static GATE: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+#[cfg(unix)]
+async fn run_git_bounded<T, F>(f: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let Ok(_guard) =
+        tokio::time::timeout(std::time::Duration::from_millis(200), diff_gate().lock()).await
+    else {
+        return Err("busy".to_string());
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::task::spawn_blocking(f),
+    )
+    .await
+    .map_err(|_| "git timeout".to_string())?
+    .map_err(|e| e.to_string())?
+}
+
+/// 项目未暂存变更统计（C15 第一级）：状态条数据。`project` 为任意项目内目录（映射 git 根）。
+#[tauri::command]
+pub async fn console_diff_stat(project: String) -> Result<serde_json::Value, String> {
+    #[cfg(unix)]
+    {
+        run_git_bounded(move || {
+            let root = crate::gitutil::find_git_root(std::path::Path::new(&project))
+                .ok_or_else(|| "not a git repository".to_string())?;
+            let files = crate::gitutil::diff_stat(&root)?;
+            Ok(serde_json::json!({
+                "root": root.to_string_lossy(),
+                "files": files,
+            }))
+        })
+        .await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = project;
+        Err("unsupported platform".to_string())
+    }
+}
+
+/// 单文件 hunk 视图（C15 第二级，展开时才调）。`path` 应来自 `console_diff_stat` 输出。
+#[tauri::command]
+pub async fn console_diff_file(project: String, path: String) -> Result<serde_json::Value, String> {
+    #[cfg(unix)]
+    {
+        run_git_bounded(move || {
+            use crate::gitutil::{FileChangeKind, LineKind};
+            let root = crate::gitutil::find_git_root(std::path::Path::new(&project))
+                .ok_or_else(|| "not a git repository".to_string())?;
+            let f = crate::gitutil::diff_file(&root, &path)?;
+            let lines: Vec<serde_json::Value> = f
+                .lines
+                .iter()
+                .map(|l| {
+                    serde_json::json!({
+                        "kind": match l.kind {
+                            LineKind::Insert => "add",
+                            LineKind::Delete => "del",
+                            LineKind::Header => "header",
+                            LineKind::Equal => "context",
+                        },
+                        "text": l.text,
+                    })
+                })
+                .collect();
+            Ok(serde_json::json!({
+                "path": f.path,
+                "kind": match f.kind {
+                    FileChangeKind::Untracked => "A",
+                    FileChangeKind::Deleted => "D",
+                    FileChangeKind::Binary => "B",
+                    FileChangeKind::Modified => "M",
+                },
+                "skipped": f.skipped,
+                "skipReason": f.skip_reason,
+                "lines": lines,
+            }))
+        })
+        .await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (project, path);
+        Err("unsupported platform".to_string())
+    }
+}
+
+/// 暂存指定路径（C15）：单文件与「全部暂存」共用（后者传全量路径）。返回实际暂存数。
+#[tauri::command]
+pub async fn console_stage(project: String, paths: Vec<String>) -> Result<usize, String> {
+    #[cfg(unix)]
+    {
+        run_git_bounded(move || {
+            let root = crate::gitutil::find_git_root(std::path::Path::new(&project))
+                .ok_or_else(|| "not a git repository".to_string())?;
+            let r = crate::gitutil::stage_paths(&root, &paths)?;
+            Ok(r.paths.len())
+        })
+        .await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (project, paths);
+        Err("unsupported platform".to_string())
+    }
+}
+
+/// 完整会话分页缓存：`(kind, session) → (transcript mtime, 解析结果)`。mtime 变即重解析
+/// （解析受 `MAX_READ_BYTES` 上限保护，重解析成本有界）。
+#[cfg(unix)]
+type TxCache = std::collections::HashMap<
+    (String, String),
+    (
+        std::time::SystemTime,
+        std::sync::Arc<crate::agents::transcript_full::TranscriptDoc>,
+    ),
+>;
+
+#[cfg(unix)]
+fn tx_cache() -> &'static std::sync::Mutex<TxCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<TxCache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 控制台完整会话分页（C14）：`before` 为事件绝对下标游标（None＝末尾），返回
+/// `[max(0, before-limit), before)` 窗口 + 总数与截断标志；每页默认 200 条。
+#[tauri::command]
+pub async fn console_transcript(
+    kind: String,
+    session_id: String,
+    before: Option<usize>,
+    limit: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(unix)]
+    {
+        use crate::agents::transcript_full;
+        let agent = crate::agents::AgentKind::parse(&kind).ok_or("unknown agent kind")?;
+        let limit = limit.unwrap_or(200).clamp(1, 500);
+        tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+            let mtime = transcript_full::transcript_mtime(agent, &session_id)
+                .ok_or_else(|| "transcript not found".to_string())?;
+            let key = (kind.clone(), session_id.clone());
+            let cached = {
+                let cache = tx_cache().lock().unwrap();
+                cache
+                    .get(&key)
+                    .filter(|(t, _)| *t == mtime)
+                    .map(|(_, doc)| doc.clone())
+            };
+            let doc = match cached {
+                Some(doc) => doc,
+                None => {
+                    let doc =
+                        std::sync::Arc::new(transcript_full::load_events(agent, &session_id)?);
+                    let mut cache = tx_cache().lock().unwrap();
+                    // 缓存有界：超过 8 个会话时整体清空（控制台常用 1–2 个，简单粗暴即可）。
+                    if cache.len() >= 8 {
+                        cache.clear();
+                    }
+                    cache.insert(key, (mtime, doc.clone()));
+                    doc
+                }
+            };
+            let total = doc.events.len();
+            let end = before.unwrap_or(total).min(total);
+            let start = end.saturating_sub(limit);
+            let events: Vec<serde_json::Value> = doc.events[start..end]
+                .iter()
+                .map(transcript_full::event_json)
+                .collect();
+            Ok(serde_json::json!({
+                "events": events,
+                "start": start,
+                "total": total,
+                "truncatedHead": doc.truncated_head,
+                "partial": doc.partial,
+            }))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (kind, session_id, before, limit);
+        Err("unsupported platform".to_string())
+    }
 }
 
 /// 关闭某 session 的插话窗口（提交/取消后收尾）。窗口不存在时静默。

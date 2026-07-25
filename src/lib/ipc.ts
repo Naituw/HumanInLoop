@@ -40,10 +40,13 @@ import type {
   SlackWaitArgs,
   TelegramTestArgs,
   ThemeMode,
+  DiffFileView,
+  DiffStatPage,
   TodoDoneEntry,
   TodoEntry,
   TodoProjectInfo,
   TodosInit,
+  TranscriptPage,
   UpdateInfo,
   WindowEffect,
 } from "./types";
@@ -165,6 +168,43 @@ export const agentsInit = () => invoke<AgentsInit>("agents_init");
 
 export const agentsStartSubscription = () =>
   invoke<void>("agents_start_subscription");
+
+// ===== Agent 控制台（spec gui-agent-console）=====
+
+/** 控制台焦点会话（C8）：daemon 对焦点会话按签名推 `agent-detail` 帧；null＝取消焦点。 */
+export const agentsFocus = (sessionId: string | null) =>
+  invoke<void>("agents_focus", { sessionId });
+
+/** 「去回答」（C7）：请求 daemon 聚焦对应请求的弹窗（托盘同款链路）。 */
+export const focusRequest = (requestId: string) =>
+  invoke<void>("focus_request", { requestId });
+
+/** 控制台输入框发消息（C3 追加语义，同 IM /msg）。 */
+export const interjectAppend = (sessionId: string, text: string) =>
+  invoke<void>("interject_append", { sessionId, text });
+
+/** 待送达气泡内容查询：返回 [全文, 条数]；daemon 未运行 → ["", 0]。 */
+export const interjectPeek = (sessionId: string) =>
+  invoke<[string, number]>("interject_peek", { sessionId });
+
+/** 完整会话分页（C14）：`before` 为事件绝对下标游标（null＝末尾），每页默认 200 条。 */
+export const consoleTranscript = (
+  kind: string,
+  sessionId: string,
+  before: number | null,
+) => invoke<TranscriptPage>("console_transcript", { kind, sessionId, before, limit: null });
+
+/** 项目未暂存变更统计（C15 第一级）。busy/超时以 Err 返回，调用方跳过本次刷新。 */
+export const consoleDiffStat = (project: string) =>
+  invoke<DiffStatPage>("console_diff_stat", { project });
+
+/** 单文件 hunk 视图（C15 第二级，展开时才调）。 */
+export const consoleDiffFile = (project: string, path: string) =>
+  invoke<DiffFileView>("console_diff_file", { project, path });
+
+/** 暂存指定路径（单文件与全部共用），返回实际暂存数。 */
+export const consoleStage = (project: string, paths: string[]) =>
+  invoke<number>("console_stage", { project, paths });
 
 export const getHistory = (project: string | null, all: boolean) =>
   invoke<HistoryEntry[]>("get_history", { project, all });

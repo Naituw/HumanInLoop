@@ -1,4 +1,7 @@
 <script setup lang="ts">
+// Agent 控制台（spec gui-agent-console）：双栏布局——边栏（项目分组会话 + 最近项目 + ＋）
+// + 详情区（Watch 帧 / 交互区插槽）。数据面：daemon 快照订阅（agents-updated）+ 焦点会话
+// 详情帧（agent-detail，签名变化才推）。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -6,189 +9,212 @@ import { applyTheme } from "../lib/theme";
 import { applyLanguage } from "../i18n";
 import {
   agentForceIdle,
+  agentsFocus,
   agentsInit,
   agentsStartSubscription,
   focusAgentTerminal,
+  focusRequest,
+  interjectAppend,
   interjectClear,
-  openInterject,
+  interjectPeek,
+  newTaskProjects,
   openTodos,
+  todosProjects,
 } from "../lib/ipc";
 import { isFocusableTerminal } from "../lib/terminals";
 import type {
-  AgentKind,
+  AgentDetailFrame,
   AgentRecord,
-  AgentRunState,
   ThemeMode,
 } from "../lib/types";
+import Sidebar from "./console/Sidebar.vue";
+import StatusInd from "./console/StatusInd.vue";
+import WatchPane from "./console/WatchPane.vue";
+import TranscriptPane from "./console/TranscriptPane.vue";
+import DiffBar from "./console/DiffBar.vue";
+import InteractSlot from "./console/InteractSlot.vue";
+import NewTaskPane from "./console/NewTaskPane.vue";
+import {
+  anchor,
+  basename,
+  indState,
+  stateWeight,
+  type ConsoleFilter,
+  type ProjectGroup,
+  UNKNOWN_PROJECT_KEY,
+} from "./console/model";
 
 const { t } = useI18n();
 
+// ===== 数据 =====
 const agents = ref<AgentRecord[]>([]);
 // 是否已收到首帧快照（在此之前显示 Loading，而非"暂无 Agent"，避免误导）。
 const loaded = ref(false);
-// 每秒重算一次相对时间（与数据推送解耦）。
+// 每秒重算一次相对时间与累计时长（与数据推送解耦）。
 const nowMs = ref(Date.now());
+const newTaskSupported = ref(false);
+const submitBareEnter = ref(false);
 
-// 查看维度：状态（默认，运行中置顶）/ 类型 / 项目。
-type ViewMode = "status" | "type" | "project";
-const VIEW_MODES: ViewMode[] = ["status", "type", "project"];
-const STORAGE_KEY = "askhuman.agents.viewMode";
+// ===== 过滤（C6）=====
+const FILTERS: ConsoleFilter[] = ["all", "working", "idle"];
+const filter = ref<ConsoleFilter>("all");
 
-function loadMode(): ViewMode {
-  try {
-    const v = localStorage.getItem(STORAGE_KEY);
-    if (v === "status" || v === "type" || v === "project") return v;
-  } catch {
-    /* localStorage 不可用：用默认 */
+function passFilter(a: AgentRecord): boolean {
+  if (filter.value === "all") return true;
+  if (filter.value === "working") return a.state === "working";
+  return a.state === "idle";
+}
+
+// ===== 边栏分组（R3）=====
+const groups = computed<ProjectGroup[]>(() => {
+  const map = new Map<string, AgentRecord[]>();
+  for (const a of agents.value) {
+    if (!passFilter(a)) continue;
+    const key = a.cwd || UNKNOWN_PROJECT_KEY;
+    const arr = map.get(key) ?? [];
+    arr.push(a);
+    map.set(key, arr);
   }
-  return "status";
-}
-
-const mode = ref<ViewMode>(loadMode());
-watch(mode, (v) => {
-  try {
-    localStorage.setItem(STORAGE_KEY, v);
-  } catch {
-    /* 忽略持久化失败 */
-  }
-});
-
-// 分组折叠：按 `<mode>:<groupKey>` 记忆，跨维度互不影响，持久化到 localStorage。
-const COLLAPSE_KEY = "askhuman.agents.collapsed";
-function loadCollapsed(): Set<string> {
-  try {
-    const v = localStorage.getItem(COLLAPSE_KEY);
-    if (v) return new Set(JSON.parse(v) as string[]);
-  } catch {
-    /* 忽略 */
-  }
-  return new Set();
-}
-const collapsed = ref<Set<string>>(loadCollapsed());
-function collapseId(g: Group): string {
-  return `${mode.value}:${g.key}`;
-}
-function isCollapsed(g: Group): boolean {
-  return collapsed.value.has(collapseId(g));
-}
-function toggleCollapse(g: Group): void {
-  const id = collapseId(g);
-  const next = new Set(collapsed.value);
-  if (next.has(id)) next.delete(id);
-  else next.add(id);
-  collapsed.value = next; // 替换整集合以触发响应式更新
-  try {
-    localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...next]));
-  } catch {
-    /* 忽略持久化失败 */
-  }
-}
-
-// 类型分组顺序。
-const KIND_ORDER: AgentKind[] = ["claude", "codex", "cursor", "grok"];
-// 状态分组顺序（运行中置顶）。
-const STATE_ORDER: AgentRunState[] = ["working", "idle", "ended"];
-
-interface Group {
-  key: string;
-  label: string;
-  // 是否高亮（状态视图的「工作中」组用绿色强调）。
-  accent: boolean;
-  items: AgentRecord[];
-}
-
-// 用于排序/相对时间的「该记录的时间锚点」（秒）。
-function anchor(a: AgentRecord): number {
-  if (a.state === "ended") return a.endedAt ?? a.lastActivity;
-  return a.lastActivity;
-}
-
-// 任一分类下，组内一律按时间倒序（新→旧）。
-function byTimeDesc(x: AgentRecord, y: AgentRecord): number {
-  return anchor(y) - anchor(x);
-}
-
-const groups = computed<Group[]>(() => {
-  const list = agents.value;
-
-  if (mode.value === "type") {
-    return KIND_ORDER.map((k) => ({
-      key: k,
-      label: kindLabel(k),
-      accent: false,
-      items: list.filter((a) => a.kind === k).sort(byTimeDesc),
-    })).filter((g) => g.items.length > 0);
-  }
-
-  if (mode.value === "project") {
-    const map = new Map<string, AgentRecord[]>();
-    for (const a of list) {
-      const key = a.cwd ? projectName(a.cwd) : "";
-      const arr = map.get(key) ?? [];
-      arr.push(a);
-      map.set(key, arr);
-    }
-    const result: Group[] = [];
-    for (const [key, items] of map) {
-      result.push({
-        key: key || "__unknown__",
-        label: key || t("agents.unknownProject"),
-        accent: false,
-        items: items.sort(byTimeDesc),
-      });
-    }
-    // 组按「该组最近活动」倒序；未知项目排最后。
-    result.sort((x, y) => {
-      const xu = x.key === "__unknown__";
-      const yu = y.key === "__unknown__";
-      if (xu !== yu) return xu ? 1 : -1;
-      return anchor(y.items[0]) - anchor(x.items[0]);
+  const result: ProjectGroup[] = [];
+  for (const [key, items] of map) {
+    items.sort((x, y) => {
+      const w = stateWeight(x) - stateWeight(y);
+      return w !== 0 ? w : anchor(y) - anchor(x);
     });
-    return result;
+    result.push({
+      key,
+      label: key === UNKNOWN_PROJECT_KEY ? t("agents.unknownProject") : basename(key),
+      path: key === UNKNOWN_PROJECT_KEY ? "" : key,
+      items,
+    });
   }
-
-  // 默认：按状态（运行中置顶）。
-  return STATE_ORDER.map((s) => ({
-    key: s,
-    label: stateLabel(s),
-    accent: s === "working",
-    items: list.filter((a) => a.state === s).sort(byTimeDesc),
-  })).filter((g) => g.items.length > 0);
+  // 组按组内最近活动倒序；未知项目组沉底。
+  result.sort((x, y) => {
+    const xu = x.key === UNKNOWN_PROJECT_KEY;
+    const yu = y.key === UNKNOWN_PROJECT_KEY;
+    if (xu !== yu) return xu ? 1 : -1;
+    return anchor(y.items[0]) - anchor(x.items[0]);
+  });
+  return result;
 });
 
-const isEmpty = computed(() => agents.value.length === 0);
-const isLoading = computed(() => !loaded.value);
+// 「最近项目」（C5）：workspace 索引里不在会话分组中的项目。
+const recentAll = ref<{ path: string; label: string }[]>([]);
+const recent = computed(() => {
+  const used = new Set(agents.value.map((a) => a.cwd).filter(Boolean) as string[]);
+  return recentAll.value.filter((p) => !used.has(p.path)).slice(0, 8);
+});
 
-function viewLabel(m: ViewMode): string {
-  return t(`agents.view.${m}`);
+// 项目待办数徽标。
+const todoCounts = ref<Record<string, number>>({});
+
+async function loadSidebarExtras(): Promise<void> {
+  try {
+    const projects = await newTaskProjects();
+    recentAll.value = projects
+      .filter((p) => p.source === "workspace")
+      .map((p) => ({ path: p.path, label: p.label }));
+  } catch {
+    recentAll.value = [];
+  }
+  try {
+    const infos = await todosProjects();
+    const counts: Record<string, number> = {};
+    for (const info of infos) {
+      if (info.count > 0) counts[info.key] = info.count;
+    }
+    todoCounts.value = counts;
+  } catch {
+    todoCounts.value = {};
+  }
 }
 
-function kindLabel(kind: AgentKind): string {
+// ===== 选中与焦点订阅（C8）=====
+const selectedId = ref<string | null>(null);
+const sel = computed<AgentRecord | null>(
+  () => agents.value.find((a) => a.sessionId === selectedId.value) ?? null
+);
+const frame = ref<AgentDetailFrame | null>(null);
+// 收到当前帧的时刻（累计时长本地走秒的基准）。
+const frameAtMs = ref(0);
+
+/** 详情正文视图：最近动态（默认）/ 完整会话（C14）；切换会话自动回默认。 */
+const viewMode = ref<"latest" | "transcript">("latest");
+
+/** diff 状态条刷新信号（C16：帧含编辑步时前沿节流 2s 后递增）。 */
+const editTick = ref(0);
+let lastDiffBumpMs = 0;
+
+function selectSession(id: string): void {
+  paneMode.value = "detail";
+  if (selectedId.value === id) return;
+  selectedId.value = id;
+  confirmIdle.value = false;
+  viewMode.value = "latest";
+}
+
+watch(selectedId, (id) => {
+  frame.value = null;
+  agentsFocus(id).catch(() => {});
+  void refreshPending();
+});
+
+/** 键盘 ↑↓ 导航的可见会话平铺序（分组渲染序）。 */
+const flatVisible = computed<string[]>(() =>
+  groups.value.flatMap((g) => g.items.map((a) => a.sessionId))
+);
+
+function navigate(delta: number): void {
+  const list = flatVisible.value;
+  if (list.length === 0) return;
+  const idx = list.indexOf(selectedId.value ?? "");
+  const next = idx < 0 ? 0 : Math.min(list.length - 1, Math.max(0, idx + delta));
+  selectSession(list[next]);
+}
+
+function onKeydown(e: KeyboardEvent): void {
+  const target = e.target as HTMLElement | null;
+  if (target && (target.tagName === "TEXTAREA" || target.tagName === "INPUT")) return;
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    navigate(1);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    navigate(-1);
+  }
+}
+
+// ===== 详情头部 =====
+function kindLabel(kind: string): string {
   return t(`agents.kind.${kind}`);
 }
 
-function stateLabel(s: AgentRunState): string {
-  return t(`agents.state.${s}`);
+const detailState = computed(() => (sel.value ? indState(sel.value) : "ended"));
+
+function stateLabel(): string {
+  const s = detailState.value;
+  if (s === "waiting") return t("console.waitingTitle");
+  return t(`agents.state.${s === "ended" ? "ended" : s}`);
 }
 
-function projectName(cwd?: string | null): string {
-  if (!cwd) return "";
-  const parts = cwd.replace(/\/+$/, "").split("/");
-  return parts[parts.length - 1] || cwd;
+/** 累计有效工作时长：帧值（回退快照值）为基准，工作中时本地走秒（帧签名不含时长）。 */
+const elapsedSecs = computed<number | null>(() => {
+  const base = frame.value?.activeElapsedSecs ?? sel.value?.activeElapsedSecs ?? null;
+  if (base === null || base === undefined) return null;
+  const working = sel.value?.state === "working";
+  if (!working || frameAtMs.value === 0) return base;
+  return base + Math.max(0, Math.floor((nowMs.value - frameAtMs.value) / 1000));
+});
+
+function fmtDuration(secs: number): string {
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  if (h > 0) return t("console.durationHM", { h, m });
+  if (m > 0) return t("console.durationM", { m });
+  return t("console.durationS", { s: secs });
 }
 
-// 卡片是否展示某维度信息：分组所依据的维度在卡片上省略（组标题已表达）。
-function showKind(): boolean {
-  return mode.value !== "type";
-}
-function showState(): boolean {
-  return mode.value !== "status";
-}
-function showProject(a: AgentRecord): boolean {
-  return !!a.cwd && mode.value !== "project";
-}
-
-// 「聚焦终端」按钮：需有存活 pid、非「已结束」，且所在终端已被支持（不支持的终端不显示按钮）。
+// 「聚焦终端」：需有存活 pid、非「已结束」，且所在终端受支持。
 function canFocusTerminal(a: AgentRecord): boolean {
   return !!a.pid && a.state !== "ended" && isFocusableTerminal(a.terminal);
 }
@@ -198,29 +224,29 @@ async function onFocusTerminal(a: AgentRecord): Promise<void> {
   try {
     await focusAgentTerminal(a.pid);
   } catch (err) {
-    // v1：找不到 / 非 Terminal.app / 未授权自动化等一律静默（仅日志）。
     console.warn("focus terminal failed", err);
   }
 }
 
-// 「手动置空闲」：仅对「工作中」的 agent 显示（纠正漏 hook 卡死，如 Claude 被打断）。
-// 点击需二次确认（行内确认条），确认后发命令给 daemon；daemon 改状态后会推回新快照。
-const confirmIdleSession = ref<string | null>(null);
-
-function canForceIdle(a: AgentRecord): boolean {
-  return a.state === "working";
+async function onOpenTodos(a: AgentRecord): Promise<void> {
+  if (!a.cwd) return;
+  await onOpenTodosPath(a.cwd);
 }
 
-function requestForceIdle(a: AgentRecord): void {
-  confirmIdleSession.value = a.sessionId;
+/** 打开某项目的待办窗口（边栏项目头待办徽标 / 详情头待办按钮共用）。 */
+async function onOpenTodosPath(path: string): Promise<void> {
+  try {
+    await openTodos(path);
+  } catch (err) {
+    console.warn("open todos failed", err);
+  }
 }
 
-function cancelForceIdle(): void {
-  confirmIdleSession.value = null;
-}
+// 手动置空闲（行内二次确认）。
+const confirmIdle = ref(false);
 
-async function confirmForceIdle(a: AgentRecord): Promise<void> {
-  confirmIdleSession.value = null;
+async function doForceIdle(a: AgentRecord): Promise<void> {
+  confirmIdle.value = false;
   try {
     await agentForceIdle(a.sessionId);
   } catch (err) {
@@ -228,92 +254,172 @@ async function confirmForceIdle(a: AgentRecord): Promise<void> {
   }
 }
 
-// 「发送消息」（插话）：非 grok（无可靠传话通道，首期排除）、且仅「工作中」——插话只在 agent
-// 的下一次工具调用时送达，对空闲/已结束的 agent 发无意义（用户定案）。
-function canSendMessage(a: AgentRecord): boolean {
-  return a.kind !== "grok" && a.state === "working";
-}
-
-async function onSendMessage(a: AgentRecord): Promise<void> {
+// 「去回答」（C7）：聚焦对应提问弹窗。
+async function onGoAnswer(a: AgentRecord): Promise<void> {
+  if (!a.waitingRequestId) return;
   try {
-    await openInterject(a.sessionId, a.kind, a.cwd ?? null);
+    await focusRequest(a.waitingRequestId);
   } catch (err) {
-    console.warn("open interject failed", err);
+    console.warn("focus request failed", err);
   }
 }
 
-// 「项目待办」：打开待办窗口并预选该 agent 的项目（spec todo-whats-next D9）。需已知 cwd。
-function canOpenTodos(a: AgentRecord): boolean {
-  return !!a.cwd;
-}
+// ===== 插话（C3 追加语义）=====
+const pendingText = ref("");
+const pendingCount = ref(0);
 
-async function onOpenTodos(a: AgentRecord): Promise<void> {
-  if (!a.cwd) return;
+async function refreshPending(): Promise<void> {
+  const id = selectedId.value;
+  if (!id) {
+    pendingText.value = "";
+    pendingCount.value = 0;
+    return;
+  }
   try {
-    await openTodos(a.cwd);
-  } catch (err) {
-    console.warn("open todos failed", err);
+    const [text, entries] = await interjectPeek(id);
+    if (selectedId.value === id) {
+      pendingText.value = text;
+      pendingCount.value = entries;
+    }
+  } catch {
+    /* daemon 不可达：保持现状 */
   }
 }
 
-// 撤回待送达插话：行内二次确认后清空队列（daemon 推回新快照，徽标消失）。
-const confirmRevokeSession = ref<string | null>(null);
+// 快照里选中会话的 pendingInterject 变化 → 重新取气泡内容。
+watch(
+  () => sel.value?.pendingInterject ?? false,
+  () => {
+    void refreshPending();
+  }
+);
 
-function requestRevoke(a: AgentRecord): void {
-  confirmRevokeSession.value = a.sessionId;
+async function onSend(text: string): Promise<void> {
+  const a = sel.value;
+  if (!a) return;
+  try {
+    await interjectAppend(a.sessionId, text);
+  } catch (err) {
+    console.warn("interject append failed", err);
+  }
+  // daemon 广播快照会触发 refreshPending；这里再直接刷一次兜底（广播先于落队列极罕见）。
+  window.setTimeout(() => void refreshPending(), 200);
 }
 
-function cancelRevoke(): void {
-  confirmRevokeSession.value = null;
-}
-
-async function confirmRevoke(a: AgentRecord): Promise<void> {
-  confirmRevokeSession.value = null;
+async function onRevoke(): Promise<void> {
+  const a = sel.value;
+  if (!a) return;
   try {
     await interjectClear(a.sessionId);
   } catch (err) {
     console.warn("interject revoke failed", err);
   }
+  window.setTimeout(() => void refreshPending(), 200);
 }
 
-// 绝对时间（hover 提示用）：保留简洁的相对显示，同时可悬停看到精确时间。
-function absoluteTime(secs?: number | null): string {
-  if (!secs) return "";
-  return new Date(secs * 1000).toLocaleString();
+// ===== 「＋」新建任务（C4：内嵌右栏，项目锁定）=====
+/** 右栏面板：会话详情 / 内嵌新建任务表单。 */
+const paneMode = ref<"detail" | "newtask">("detail");
+const ntProject = ref("");
+/** 启动成功后 best-effort 自动选中新会话：按 cwd + 启动时间（±180s 内最新）匹配。 */
+let pendingLaunch: { path: string; sinceSecs: number } | null = null;
+
+function onPlus(projectPath: string): void {
+  ntProject.value = projectPath;
+  paneMode.value = "newtask";
 }
 
-// 后端时间戳为 unix 秒。
-function relativeTime(secs?: number | null): string {
-  if (!secs) return "";
-  const diff = Math.max(0, Math.floor(nowMs.value / 1000) - secs);
-  if (diff < 5) return t("agents.time.justNow");
-  if (diff < 60) return t("agents.time.secondsAgo", { n: diff });
-  const min = Math.floor(diff / 60);
-  if (min < 60) return t("agents.time.minutesAgo", { n: min });
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return t("agents.time.hoursAgo", { n: hr });
-  const d = Math.floor(hr / 24);
-  return t("agents.time.daysAgo", { n: d });
+function onLaunched(): void {
+  pendingLaunch = { path: ntProject.value, sinceSecs: Math.floor(Date.now() / 1000) };
+  paneMode.value = "detail";
 }
 
-let unlisten: UnlistenFn | null = null;
+/** 快照更新时消费 pendingLaunch：命中即选中新会话并清除。 */
+function trySelectLaunched(): void {
+  const p = pendingLaunch;
+  if (!p) return;
+  const now = Math.floor(Date.now() / 1000);
+  if (now - p.sinceSecs > 180) {
+    pendingLaunch = null;
+    return;
+  }
+  const candidates = agents.value.filter(
+    (a) =>
+      a.startedAt >= p.sinceSecs - 5 &&
+      !!a.cwd &&
+      (a.cwd === p.path || a.cwd.startsWith(`${p.path}/`))
+  );
+  if (candidates.length === 0) return;
+  candidates.sort((x, y) => y.startedAt - x.startedAt);
+  pendingLaunch = null;
+  selectSession(candidates[0].sessionId);
+}
+
+// ===== 生命周期 =====
+const isLoading = computed(() => !loaded.value);
+const isEmpty = computed(
+  () => agents.value.length === 0 && recent.value.length === 0
+);
+
+let unlistenAgents: UnlistenFn | null = null;
+let unlistenDetail: UnlistenFn | null = null;
 let unlistenSettings: UnlistenFn | null = null;
+let unlistenGoto: UnlistenFn | null = null;
 let ticker: number | undefined;
+// URL 预选（open_agents(session) 寻址，R4）：首帧快照到达后生效。
+let pendingSelect: string | null = null;
 
 onMounted(async () => {
+  pendingSelect = new URLSearchParams(window.location.search).get("session");
+
   // 先注册监听，再触发后端订阅：daemon 一连上就推首帧立即快照，监听必须先就绪才不丢帧。
-  unlisten = await listen<AgentRecord[]>("agents-updated", (e) => {
+  unlistenAgents = await listen<AgentRecord[]>("agents-updated", (e) => {
     agents.value = Array.isArray(e.payload) ? e.payload : [];
     loaded.value = true;
+    trySelectLaunched();
+    // 预选（URL / goto 事件）或默认选中最近活动的会话。
+    if (pendingSelect && agents.value.some((a) => a.sessionId === pendingSelect)) {
+      selectSession(pendingSelect);
+      pendingSelect = null;
+    } else if (!selectedId.value && agents.value.length > 0) {
+      const sorted = [...agents.value].sort(
+        (x, y) => stateWeight(x) - stateWeight(y) || anchor(y) - anchor(x)
+      );
+      selectSession(sorted[0].sessionId);
+    }
+  });
+  unlistenDetail = await listen<AgentDetailFrame>("agent-detail", (e) => {
+    if (e.payload?.sessionId === selectedId.value) {
+      frame.value = e.payload;
+      frameAtMs.value = Date.now();
+      // C16：帧含「编辑/写入」步 → 触发 diff 状态条刷新（2s 前沿节流）。
+      if (e.payload.steps?.some((s) => s.kind === "write")) {
+        const now = Date.now();
+        if (now - lastDiffBumpMs > 2000) {
+          lastDiffBumpMs = now;
+          editTick.value += 1;
+        }
+      }
+    }
+  });
+  unlistenGoto = await listen<{ session?: string | null }>("agents-goto", (e) => {
+    const session = e.payload?.session;
+    if (!session) return;
+    if (agents.value.some((a) => a.sessionId === session)) {
+      selectSession(session);
+    } else {
+      pendingSelect = session;
+    }
   });
   try {
     const init = await agentsInit();
     applyTheme(init.theme);
     applyLanguage(init.lang);
+    newTaskSupported.value = init.newTaskSupported;
+    submitBareEnter.value = init.popupSubmitKey === "enter";
   } catch {
     /* 读取失败：保持兜底外观 */
   }
-  // 设置变更实时生效（主题/语言与设置窗口同宿主进程广播）。
   unlistenSettings = await listen<{ theme?: ThemeMode; language?: string }>(
     "settings-updated",
     (e) => {
@@ -327,246 +433,202 @@ onMounted(async () => {
   } catch {
     /* 订阅启动失败：窗口停留在 Loading，由后端重连逻辑兜底 */
   }
+  void loadSidebarExtras();
+  window.addEventListener("keydown", onKeydown);
   ticker = window.setInterval(() => {
     nowMs.value = Date.now();
   }, 1000);
 });
 
 onBeforeUnmount(() => {
-  unlisten?.();
+  unlistenAgents?.();
+  unlistenDetail?.();
   unlistenSettings?.();
+  unlistenGoto?.();
+  window.removeEventListener("keydown", onKeydown);
   if (ticker) window.clearInterval(ticker);
+  agentsFocus(null).catch(() => {});
 });
 </script>
 
 <template>
-  <div class="agents">
-    <header class="ag-header" data-tauri-drag-region>
-      <span class="ag-title" data-tauri-drag-region>{{ t("agents.title") }}</span>
+  <div class="console">
+    <header class="con-header" data-tauri-drag-region>
+      <span class="con-title" data-tauri-drag-region>{{ t("agents.title") }}</span>
       <div v-if="!isLoading && !isEmpty" class="seg" role="tablist">
         <button
-          v-for="m in VIEW_MODES"
-          :key="m"
+          v-for="f in FILTERS"
+          :key="f"
           class="seg-btn"
-          :class="{ active: mode === m }"
+          :class="{ active: filter === f }"
           role="tab"
-          :aria-selected="mode === m"
-          @click="mode = m"
+          :aria-selected="filter === f"
+          @click="filter = f"
         >
-          {{ viewLabel(m) }}
+          {{ t(`console.filter.${f}`) }}
         </button>
       </div>
+      <span class="spacer" data-tauri-drag-region />
     </header>
 
-    <div class="ag-body">
-      <div v-if="isLoading" class="empty">
-        <span class="spinner" />
-        <p class="empty-hint">{{ t("agents.loading") }}</p>
-      </div>
+    <div v-if="isLoading" class="empty">
+      <span class="spinner" />
+      <p class="empty-hint">{{ t("agents.loading") }}</p>
+    </div>
 
-      <div v-else-if="isEmpty" class="empty">
-        <p class="empty-title">{{ t("agents.empty") }}</p>
-        <p class="empty-hint">{{ t("agents.emptyHint") }}</p>
-      </div>
+    <div v-else-if="isEmpty" class="empty">
+      <p class="empty-title">{{ t("agents.empty") }}</p>
+      <p class="empty-hint">{{ t("agents.emptyHint") }}</p>
+    </div>
 
-      <template v-else>
-        <section v-for="g in groups" :key="g.key" class="group">
-          <button
-            type="button"
-            class="group-title"
-            :class="{ accent: g.accent, collapsed: isCollapsed(g) }"
-            :aria-expanded="!isCollapsed(g)"
-            @click="toggleCollapse(g)"
-          >
-            <svg class="chevron" viewBox="0 0 12 12" aria-hidden="true">
-              <path d="M4 2.5 L8 6 L4 9.5" fill="none" stroke="currentColor" stroke-width="1.6"
-                stroke-linecap="round" stroke-linejoin="round" />
-            </svg>
-            <span class="group-label">{{ g.label }}</span>
-            <span class="group-count">{{ g.items.length }}</span>
-          </button>
-          <ul v-show="!isCollapsed(g)" class="card-list">
-            <li
-              v-for="a in g.items"
-              :key="a.sessionId"
-              class="card"
-              :class="a.state"
-            >
-              <div class="card-top">
-                <span class="dot" :class="a.state" />
-                <span v-if="showKind()" class="kind-badge">{{ kindLabel(a.kind) }}</span>
-                <span class="card-title">{{ a.title || t("agents.untitled") }}</span>
-                <span v-if="showState()" class="status-badge" :class="a.state">
-                  {{ stateLabel(a.state) }}
-                </span>
-                <button
-                  v-if="canSendMessage(a)"
-                  type="button"
-                  class="focus-btn msg-btn"
-                  :title="t('agents.sendMessage')"
-                  :aria-label="t('agents.sendMessage')"
-                  @click="onSendMessage(a)"
-                >
-                  <svg viewBox="0 0 16 16" aria-hidden="true">
-                    <path d="M2 3.5 C2 2.7 2.7 2 3.5 2 H12.5 C13.3 2 14 2.7 14 3.5 V9.5
-                      C14 10.3 13.3 11 12.5 11 H6 L3.2 13.4 C2.8 13.8 2 13.5 2 12.9 Z"
-                      fill="none" stroke="currentColor" stroke-width="1.3"
-                      stroke-linecap="round" stroke-linejoin="round" />
-                    <path d="M5 5.6 H11 M5 7.8 H9" stroke="currentColor" stroke-width="1.3"
-                      stroke-linecap="round" />
-                  </svg>
-                </button>
-                <button
-                  v-if="canOpenTodos(a)"
-                  type="button"
-                  class="focus-btn todo-btn"
-                  :title="t('agents.openTodos')"
-                  :aria-label="t('agents.openTodos')"
-                  @click="onOpenTodos(a)"
-                >
-                  <svg viewBox="0 0 16 16" aria-hidden="true">
-                    <rect x="2" y="2.5" width="12" height="11" rx="2" fill="none"
-                      stroke="currentColor" stroke-width="1.3" />
-                    <path d="M4.6 6 L6 7.4 L8.2 5" fill="none" stroke="currentColor"
-                      stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
-                    <path d="M9.8 6.6 H11.6 M4.8 10.4 H11.6" stroke="currentColor"
-                      stroke-width="1.3" stroke-linecap="round" />
-                  </svg>
-                </button>
-                <button
-                  v-if="canFocusTerminal(a)"
-                  type="button"
-                  class="focus-btn"
-                  :title="t('agents.focusTerminal')"
-                  :aria-label="t('agents.focusTerminal')"
-                  @click="onFocusTerminal(a)"
-                >
-                  <svg viewBox="0 0 16 16" aria-hidden="true">
-                    <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none"
-                      stroke="currentColor" stroke-width="1.3" />
-                    <path d="M4 6 L6.5 8 L4 10" fill="none" stroke="currentColor"
-                      stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" />
-                    <path d="M8 10.2 H11.5" stroke="currentColor" stroke-width="1.3"
-                      stroke-linecap="round" />
-                  </svg>
-                </button>
-                <button
-                  v-if="canForceIdle(a) && confirmIdleSession !== a.sessionId"
-                  type="button"
-                  class="focus-btn idle-btn"
-                  :title="t('agents.markIdle')"
-                  :aria-label="t('agents.markIdle')"
-                  @click="requestForceIdle(a)"
-                >
-                  <svg viewBox="0 0 16 16" aria-hidden="true">
-                    <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor"
-                      stroke-width="1.3" />
-                    <path d="M6 5.6 V10.4 M10 5.6 V10.4" stroke="currentColor"
-                      stroke-width="1.3" stroke-linecap="round" />
-                  </svg>
-                </button>
-              </div>
+    <div v-else class="con-body">
+      <Sidebar
+        :groups="groups"
+        :recent="recent"
+        :selected-id="selectedId"
+        :new-task-supported="newTaskSupported"
+        :todo-counts="todoCounts"
+        :now-ms="nowMs"
+        @select="selectSession"
+        @plus="onPlus"
+        @todos="onOpenTodosPath"
+      />
 
-              <div
-                v-if="canForceIdle(a) && confirmIdleSession === a.sessionId"
-                class="idle-confirm"
+      <main class="detail">
+        <NewTaskPane
+          v-if="paneMode === 'newtask'"
+          :project="ntProject"
+          @launched="onLaunched"
+          @close="paneMode = 'detail'"
+        />
+        <template v-else-if="sel">
+          <div class="dt-head">
+            <div class="dt-title-row">
+              <span class="kind-badge">{{ kindLabel(sel.kind) }}</span>
+              <span class="dt-title">{{ sel.title || t("agents.untitled") }}</span>
+              <span class="spacer" />
+              <button
+                v-if="canFocusTerminal(sel)"
+                class="icon-btn"
+                :title="t('agents.focusTerminal')"
+                :aria-label="t('agents.focusTerminal')"
+                @click="onFocusTerminal(sel)"
               >
-                <span class="idle-confirm-text">{{ t("agents.markIdleConfirm") }}</span>
-                <span class="idle-confirm-actions">
-                  <button type="button" class="ic-btn" @click="cancelForceIdle">
-                    {{ t("agents.confirmCancel") }}
-                  </button>
-                  <button type="button" class="ic-btn ic-ok" @click="confirmForceIdle(a)">
-                    {{ t("agents.confirmOk") }}
-                  </button>
-                </span>
-              </div>
+                <svg viewBox="0 0 16 16"><rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M4 6 L6.5 8 L4 10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M8 10.2 H11.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+              </button>
+              <button
+                v-if="sel.cwd"
+                class="icon-btn"
+                :title="t('agents.openTodos')"
+                :aria-label="t('agents.openTodos')"
+                @click="onOpenTodos(sel)"
+              >
+                <svg viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M4.6 6 L6 7.4 L8.2 5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.8 6.6 H11.6 M4.8 10.4 H11.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+              </button>
+              <button
+                v-if="sel.state === 'working'"
+                class="icon-btn warn"
+                :title="t('agents.markIdle')"
+                :aria-label="t('agents.markIdle')"
+                @click="confirmIdle = true"
+              >
+                <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M6 5.6 V10.4 M10 5.6 V10.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+              </button>
+            </div>
+            <div class="dt-meta">
+              <StatusInd v-if="detailState !== 'ended'" :state="detailState" />
+              <span class="dt-state" :class="detailState">{{ stateLabel() }}</span>
+              <span v-if="elapsedSecs !== null && elapsedSecs >= 60" class="dt-elapsed">
+                · {{ t("console.elapsed", { t: fmtDuration(elapsedSecs) }) }}
+              </span>
+              <span class="spacer" />
+              <span v-if="sel.cwd" class="dt-path" :title="sel.cwd">{{ sel.cwd }}</span>
+            </div>
+            <div v-if="confirmIdle && sel.state === 'working'" class="idle-confirm">
+              <span>{{ t("agents.markIdleConfirm") }}</span>
+              <span class="spacer" />
+              <button class="ic-btn" @click="confirmIdle = false">
+                {{ t("agents.confirmCancel") }}
+              </button>
+              <button class="ic-btn ic-ok" @click="doForceIdle(sel)">
+                {{ t("agents.confirmOk") }}
+              </button>
+            </div>
+          </div>
 
-              <div v-if="a.pendingInterject" class="ij-row">
-                <span class="ij-badge">{{ t("agents.pendingInterject") }}</span>
-                <template v-if="confirmRevokeSession === a.sessionId">
-                  <span class="idle-confirm-text">{{ t("agents.revokeConfirm") }}</span>
-                  <span class="idle-confirm-actions">
-                    <button type="button" class="ic-btn" @click="cancelRevoke">
-                      {{ t("agents.confirmCancel") }}
-                    </button>
-                    <button type="button" class="ic-btn ic-revoke" @click="confirmRevoke(a)">
-                      {{ t("agents.revokeOk") }}
-                    </button>
-                  </span>
-                </template>
-                <button v-else type="button" class="ij-revoke" @click="requestRevoke(a)">
-                  {{ t("agents.revokeInterject") }}
+          <!-- 等待回答横幅（C7）：两种正文视图下都常驻。 -->
+          <div v-if="sel.waitingRequestId" class="wait-banner">
+            <span class="wait-icon">🙋</span>
+            <span class="wait-main">
+              <span class="wait-title">{{ t("console.waitingTitle") }}</span>
+              <span v-if="sel.waitingPreview" class="wait-q">{{ sel.waitingPreview }}</span>
+            </span>
+            <button class="btn sm primary" @click="onGoAnswer(sel)">
+              {{ t("console.goAnswer") }}
+            </button>
+          </div>
+
+          <div v-if="viewMode === 'latest'" class="dt-body">
+            <WatchPane :frame="frame">
+              <template #heading-actions>
+                <button class="tx-open" @click="viewMode = 'transcript'">
+                  <svg viewBox="0 0 14 14"><path d="M2.5 3.5 H11.5 M2.5 7 H11.5 M2.5 10.5 H8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+                  {{ t("console.tx.open") }}
                 </button>
-              </div>
+              </template>
+            </WatchPane>
+          </div>
+          <TranscriptPane
+            v-else
+            :kind="sel.kind"
+            :session-id="sel.sessionId"
+            @close="viewMode = 'latest'"
+          />
 
-              <div v-if="showProject(a) || a.pid" class="meta">
-                <span v-if="showProject(a)" class="meta-item" :title="a.cwd ?? ''">
-                  <span class="meta-k">{{ t("agents.field.project") }}</span>
-                  <span class="meta-v">{{ projectName(a.cwd) }}</span>
-                </span>
-                <span v-if="a.pid" class="meta-item">
-                  <span class="meta-k">{{ t("agents.field.pid") }}</span>
-                  <span class="meta-v mono">{{ a.pid }}</span>
-                </span>
-              </div>
+          <DiffBar v-if="sel.cwd" :project="sel.cwd" :edit-tick="editTick" />
 
-              <div class="meta">
-                <span class="meta-item full">
-                  <span class="meta-k">{{ t("agents.field.session") }}</span>
-                  <span class="meta-v mono sid">{{ a.sessionId }}</span>
-                </span>
-              </div>
+          <InteractSlot
+            :record="sel"
+            :submit-bare-enter="submitBareEnter"
+            :pending-text="pendingText"
+            :pending-count="pendingCount"
+            :new-task-supported="newTaskSupported"
+            @send="onSend"
+            @revoke="onRevoke"
+            @new-task="onPlus"
+          />
+        </template>
 
-              <div class="meta times">
-                <span class="meta-item">
-                  <span class="meta-k">{{ t("agents.field.started") }}</span>
-                  <span class="meta-v" :title="absoluteTime(a.startedAt)">
-                    {{ relativeTime(a.startedAt) }}
-                  </span>
-                </span>
-                <span class="meta-item">
-                  <span class="meta-k">{{
-                    a.state === "ended"
-                      ? t("agents.state.ended")
-                      : t("agents.field.lastActivity")
-                  }}</span>
-                  <span
-                    class="meta-v"
-                    :title="absoluteTime(a.state === 'ended' ? a.endedAt : a.lastActivity)"
-                  >
-                    {{ relativeTime(a.state === "ended" ? a.endedAt : a.lastActivity) }}
-                  </span>
-                </span>
-              </div>
-            </li>
-          </ul>
-        </section>
-      </template>
+        <div v-else class="dt-empty">
+          <p>{{ t("console.selectHint") }}</p>
+        </div>
+      </main>
     </div>
   </div>
 </template>
 
 <style scoped>
-.agents {
+.console {
   display: flex;
   flex-direction: column;
   height: 100%;
   color: var(--text-primary);
 }
-.ag-header {
+.spacer {
+  flex: 1 1 auto;
+}
+.con-header {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
   padding: 10px 14px;
   border-bottom: var(--hairline) solid var(--border);
 }
-.macos .ag-header {
+.macos .con-header {
   padding-top: 30px;
 }
-.ag-title {
+.con-title {
   font-size: 14px;
   font-weight: 600;
   white-space: nowrap;
@@ -597,19 +659,13 @@ onBeforeUnmount(() => {
   color: var(--text-primary);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
 }
-.ag-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 12px 14px 18px;
-}
 .empty {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 100%;
+  flex: 1 1 auto;
   text-align: center;
 }
 .empty-title {
@@ -636,152 +692,52 @@ onBeforeUnmount(() => {
     transform: rotate(360deg);
   }
 }
-.group {
-  margin-bottom: 18px;
-}
-.group-title {
+.con-body {
+  flex: 1 1 auto;
   display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  margin: 0 0 8px;
-  padding: 2px 4px;
-  border: none;
-  background: transparent;
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-secondary);
-  cursor: pointer;
-  user-select: none;
+  min-height: 0;
 }
-.group-title:hover {
-  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
-}
-.group-title.accent {
-  color: #248a3d;
-}
-.group-label {
-  flex: 0 0 auto;
-}
-.chevron {
-  flex: 0 0 auto;
-  width: 12px;
-  height: 12px;
-  color: var(--text-secondary);
-  transition: transform 0.15s ease;
-  transform: rotate(90deg);
-}
-.group-title.collapsed .chevron {
-  transform: rotate(0deg);
-}
-.group-title.accent .chevron {
-  color: #248a3d;
-}
-.group-count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: 600;
-}
-.group-title.accent .group-count {
-  background: color-mix(in srgb, #30d158 20%, transparent);
-  color: #248a3d;
-}
-.card-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+.detail {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
 }
-.card {
-  padding: 10px 12px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm, 8px);
-  background: var(--bg-elevated);
+.dt-head {
+  flex: 0 0 auto;
+  padding: 12px 16px 10px;
+  border-bottom: var(--hairline) solid var(--border);
 }
-.card.ended {
-  opacity: 0.6;
-}
-.card-top {
+.dt-title-row {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 6px;
-}
-.dot {
-  flex: 0 0 auto;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--text-secondary);
-}
-.dot.working {
-  background: #30d158;
-  box-shadow: 0 0 0 3px color-mix(in srgb, #30d158 22%, transparent);
-}
-.dot.idle {
-  background: #ff9f0a;
-}
-.dot.ended {
-  background: var(--text-secondary);
 }
 .kind-badge {
   flex: 0 0 auto;
-  padding: 1px 7px;
+  padding: 1px 8px;
   border-radius: 5px;
-  font-size: 10px;
+  font-size: 10.5px;
   font-weight: 600;
   background: color-mix(in srgb, var(--text-primary) 9%, transparent);
   color: var(--text-secondary);
   white-space: nowrap;
 }
-.card-title {
-  flex: 1 1 auto;
+.dt-title {
   min-width: 0;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.status-badge {
-  flex: 0 0 auto;
-  padding: 1px 8px;
-  border-radius: 999px;
-  font-size: 10px;
-  font-weight: 600;
-}
-.status-badge.working {
-  background: color-mix(in srgb, #30d158 18%, transparent);
-  color: #248a3d;
-}
-.status-badge.idle {
-  background: color-mix(in srgb, #ff9f0a 18%, transparent);
-  color: #c77700;
-}
-.status-badge.ended {
-  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
-  color: var(--text-secondary);
-}
-.focus-btn {
+.icon-btn {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: none;
   border-radius: 6px;
@@ -789,91 +745,60 @@ onBeforeUnmount(() => {
   color: var(--text-secondary);
   cursor: pointer;
 }
-.focus-btn:hover {
+.icon-btn:hover {
   background: color-mix(in srgb, var(--text-primary) 10%, transparent);
   color: var(--text-primary);
 }
-.focus-btn svg {
-  width: 15px;
-  height: 15px;
-}
-.idle-btn:hover {
+.icon-btn.warn:hover {
   background: color-mix(in srgb, #ff9f0a 18%, transparent);
   color: #c77700;
 }
-.msg-btn:hover {
-  background: color-mix(in srgb, #0a84ff 14%, transparent);
-  color: #0a84ff;
+.icon-btn svg {
+  width: 15px;
+  height: 15px;
 }
-.todo-btn:hover {
-  background: color-mix(in srgb, #30d158 16%, transparent);
-  color: #248a3d;
-}
-.ij-row {
+.dt-meta {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin: 2px 0 6px;
-  padding: 5px 8px;
-  border-radius: 6px;
-  background: color-mix(in srgb, #0a84ff 10%, transparent);
+  gap: 6px;
+  margin-top: 7px;
+  font-size: 12px;
 }
-.ij-badge {
-  flex: 0 0 auto;
-  padding: 1px 8px;
-  border-radius: 999px;
-  font-size: 10px;
+.dt-state {
   font-weight: 600;
-  background: color-mix(in srgb, #0a84ff 18%, transparent);
-  color: #0a84ff;
-  white-space: nowrap;
 }
-.ij-row .idle-confirm-text {
-  flex: 1 1 auto;
+.dt-state.working {
+  color: var(--ind-working);
 }
-.ij-revoke {
-  appearance: none;
-  margin-left: auto;
-  border: none;
-  background: transparent;
+.dt-state.waiting {
+  color: var(--accent);
+}
+.dt-state.idle {
   color: var(--text-secondary);
+}
+.dt-state.ended {
+  color: var(--text-secondary);
+}
+.dt-elapsed {
+  color: var(--text-secondary);
+}
+.dt-path {
   font-size: 11px;
-  font-weight: 600;
-  padding: 2px 6px;
-  border-radius: 5px;
-  cursor: pointer;
-}
-.ij-revoke:hover {
-  background: color-mix(in srgb, var(--text-primary) 10%, transparent);
-  color: var(--text-primary);
-}
-.ic-revoke {
-  border-color: transparent;
-  background: #0a84ff;
-  color: #fff;
-}
-.ic-revoke:hover {
-  background: #0071e3;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 46%;
 }
 .idle-confirm {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 2px 0 6px;
-  padding: 6px 8px;
-  border-radius: 6px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  font-size: 12px;
   background: color-mix(in srgb, #ff9f0a 12%, transparent);
-}
-.idle-confirm-text {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-size: 11px;
-  color: var(--text-primary);
-}
-.idle-confirm-actions {
-  flex: 0 0 auto;
-  display: inline-flex;
-  gap: 6px;
 }
 .ic-btn {
   appearance: none;
@@ -897,42 +822,96 @@ onBeforeUnmount(() => {
 .ic-ok:hover {
   background: #f59300;
 }
-.meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 14px;
-  font-size: 11px;
-  margin-top: 3px;
+.dt-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 16px;
 }
-.meta.times {
-  color: var(--text-secondary);
-}
-.meta-item {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
-  min-width: 0;
-}
-.meta-item.full {
-  width: 100%;
-}
-.meta-k {
+.wait-banner {
   flex: 0 0 auto;
-  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  margin: 12px 16px 0;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
 }
-.meta-v {
+.tx-open {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.tx-open:hover {
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
   color: var(--text-primary);
-  white-space: nowrap;
+}
+.tx-open svg {
+  width: 12px;
+  height: 12px;
+}
+.wait-icon {
+  font-size: 17px;
+}
+.wait-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.wait-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent);
+}
+.wait-q {
+  font-size: 12px;
+  color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.meta-v.sid {
-  white-space: normal;
-  overflow: visible;
-  word-break: break-all;
+.btn {
+  appearance: none;
+  border: var(--hairline) solid var(--control-border);
+  background: var(--control-bg);
+  box-shadow: var(--clickable-shadow);
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 5px 14px;
+  border-radius: 7px;
+  cursor: pointer;
 }
-.mono {
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-variant-numeric: tabular-nums;
+.btn.sm {
+  font-size: 11.5px;
+  padding: 3px 10px;
+}
+.btn.primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: #fff;
+}
+.btn.primary:hover {
+  background: #0071e3;
+}
+.dt-empty {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
+  font-size: 13px;
 }
 </style>

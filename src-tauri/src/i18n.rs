@@ -1245,14 +1245,14 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "tray.openHistory" => pick(lang, "History", "历史记录"),
         "tray.openTodos" => pick(lang, "Todos", "待办"),
         "tray.newTask" => pick(lang, "New Agent Task", "新建 Agent 任务"),
-        "tray.openAgents" => pick(lang, "Agent Status", "Agent 状态"),
-        "tray.openAgentsCounts" => pick(
+        "tray.openAgents" => pick(lang, "Open Agent Status Window", "打开 Agent 状态窗口"),
+        // Agent 子菜单（spec agent-interject D7）：标签即忙闲概览。
+        "tray.agentOverview" => pick(
             lang,
-            "Agent Status ({w} working · {i} idle)",
-            "Agent 状态（工作 {w} · 空闲 {i}）",
+            "{w} working · {i} idle",
+            "工作中 {w} · 空闲 {i}",
         ),
-        // Agent 子菜单（spec agent-interject D7）。
-        "tray.openAgentsWindow" => pick(lang, "Open Status Window", "打开状态窗口"),
+        "tray.agentOpenConsole" => pick(lang, "View in Console", "在控制台查看"),
         "tray.agentSendMessage" => pick(lang, "Send Message…", "发送消息…"),
         "tray.agentSendMessagePending" => pick(
             lang,

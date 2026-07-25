@@ -201,6 +201,22 @@ struct ServerState {
     select: SelectState,
     /// IM-created launches waiting to be associated with their lifecycle session.
     pending_launches: Mutex<Vec<PendingLaunchWatch>>,
+    /// 控制台焦点会话表（spec gui-agent-console C8）：每个 agents 订阅者至多一条；
+    /// watch 引擎按签名推 `AgentDetail` 帧。随订阅连接断开清理，不持久化。
+    gui_focus: Mutex<Vec<GuiFocusEntry>>,
+    /// 上次广播时的「等待回答」会话集（排序去重）：变化才重推 AgentsState，
+    /// 使 `waitingRequestId` 徽标在提问创建/完结时即时刷新（watch 引擎 tick 内比对）。
+    last_waiting: Mutex<Vec<String>>,
+}
+
+/// 一条控制台焦点订阅（`tx` 即该 agents 订阅者的发送端；同一订阅者重设焦点就地更新）。
+struct GuiFocusEntry {
+    tx: tokio::sync::mpsc::UnboundedSender<ServerMsg>,
+    session_id: String,
+    /// 上一帧签名（内容不变不推）。
+    last_sig: String,
+    /// 上一帧是否工作中（引擎自适应 tick 用）。
+    working: bool,
 }
 
 impl ServerState {
@@ -791,6 +807,8 @@ async fn serve(_lock: LockGuard) -> i32 {
         watch: WatchState::default(),
         select: SelectState::default(),
         pending_launches: Mutex::new(Vec::new()),
+        gui_focus: Mutex::new(Vec::new()),
+        last_waiting: Mutex::new(Vec::new()),
     });
 
     // 空闲退出检查。
@@ -1433,6 +1451,8 @@ async fn control_loop(
             }
             // 状态窗口订阅：接管连接持续推送。
             ClientMsg::AgentsSubscribe => return Control::AgentsSub,
+            // 焦点会话消息只在 agents 订阅连接上有意义（handle_agents_sub 处理）；此处忽略。
+            ClientMsg::AgentsFocus { .. } => {}
             // 菜单栏宿主订阅：接管连接持续推送 TrayState（非保活）。
             ClientMsg::TraySubscribe => return Control::TraySub,
             ClientMsg::RefreshUpdateState => refresh_update_snapshot(state),

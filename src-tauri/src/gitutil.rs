@@ -147,6 +147,105 @@ pub fn stage_all(root: &Path) -> Result<StageResult, String> {
     Ok(StageResult { paths })
 }
 
+/// Stage only the given paths（spec gui-agent-console C15）。`paths` 必须来自本进程
+/// `diff_stat`/`list_unstaged_paths` 的输出：这里再按当前未暂存清单白名单过滤一次
+/// （不接受自由输入，杜绝把任意参数传给 git）。
+pub fn stage_paths(root: &Path, paths: &[String]) -> Result<StageResult, String> {
+    let known = list_unstaged_paths(root)?;
+    let selected: Vec<String> = paths
+        .iter()
+        .filter(|p| known.iter().any(|k| k == *p))
+        .cloned()
+        .collect();
+    if selected.is_empty() {
+        return Ok(StageResult { paths: selected });
+    }
+    let mut args: Vec<&str> = vec!["add", "--"];
+    for p in &selected {
+        args.push(p.as_str());
+    }
+    git(root, &args)?;
+    Ok(StageResult { paths: selected })
+}
+
+/// 一个文件的轻量统计（控制台 diff 状态条第一级，spec gui-agent-console C15/C16）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileStat {
+    /// git 根相对路径。
+    pub path: String,
+    /// `M` 修改 / `D` 工作树删除 / `A` 未跟踪新增 / `B` 二进制。
+    pub kind: String,
+    pub adds: usize,
+    pub dels: usize,
+}
+
+/// 未暂存变更的轻量统计：一次 `git status` + 一次 `git diff --numstat`（未跟踪文件按
+/// 有界读取数行）。不产出 hunk 正文——第二级按文件懒加载见 `diff_file`（C16 性能约束）。
+pub fn diff_stat(root: &Path) -> Result<Vec<FileStat>, String> {
+    let paths = list_unstaged_paths(root)?;
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let numstat = git(root, &["diff", "--numstat", "--no-color"]).unwrap_or_default();
+    let mut tracked: std::collections::HashMap<String, (i64, i64)> =
+        std::collections::HashMap::new();
+    for line in numstat.lines() {
+        let mut it = line.split('\t');
+        let (Some(a), Some(d), Some(p)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        let adds = a.trim().parse::<i64>().unwrap_or(-1);
+        let dels = d.trim().parse::<i64>().unwrap_or(-1);
+        tracked.insert(p.trim().to_string(), (adds, dels));
+    }
+    let mut out = Vec::new();
+    for rel in paths {
+        let abs = root.join(&rel);
+        if let Some((a, d)) = tracked.get(&rel) {
+            let binary = *a < 0 || *d < 0;
+            let deleted = !abs.exists();
+            let kind = if binary {
+                "B"
+            } else if deleted {
+                "D"
+            } else {
+                "M"
+            };
+            out.push(FileStat {
+                path: rel,
+                kind: kind.to_string(),
+                adds: (*a).max(0) as usize,
+                dels: (*d).max(0) as usize,
+            });
+        } else {
+            // 未跟踪：有界读行数（二进制 / 超限 → 0 行）。
+            let (adds, kind) = if is_probably_binary(&abs) {
+                (0, "B")
+            } else {
+                match read_text_limited(&abs, MAX_FILE_BYTES) {
+                    Ok(Some(text)) => (text.lines().count(), "A"),
+                    _ => (0, "A"),
+                }
+            };
+            out.push(FileStat {
+                path: rel,
+                kind: kind.to_string(),
+                adds,
+                dels: 0,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// 单文件 hunk 视图（控制台第二级懒加载）：只对该路径跑 `git diff` / 读未跟踪正文。
+/// `rel` 应来自本进程 `diff_stat` 的输出（调用方约束）；未知路径产出空 diff。
+pub fn diff_file(root: &Path, rel: &str) -> Result<FileDiff, String> {
+    let mut budget = MAX_LINES_PER_FILE;
+    Ok(diff_one(root, rel, &mut budget))
+}
+
 pub fn build_diff_model(root: &Path) -> Result<DiffModel, String> {
     let paths = list_unstaged_paths(root)?;
     let total_paths = paths.len();
@@ -340,6 +439,146 @@ pub fn build_diff_model(root: &Path) -> Result<DiffModel, String> {
     })
 }
 
+/// 单文件 diff 主体（与 `build_diff_model` 的逐文件逻辑同口径，但独立预算、
+/// 不影响 IM `/diff` 的全局截断语义）。
+fn diff_one(root: &Path, rel: &str, line_budget: &mut usize) -> FileDiff {
+    let abs = root.join(rel);
+    let is_untracked = !path_is_tracked(root, rel);
+
+    if is_untracked {
+        if is_probably_binary(&abs) {
+            return FileDiff {
+                path: rel.to_string(),
+                kind: FileChangeKind::Binary,
+                lines: Vec::new(),
+                skipped: true,
+                skip_reason: Some("binary".into()),
+            };
+        }
+        return match read_text_limited(&abs, MAX_FILE_BYTES) {
+            Ok(None) => FileDiff {
+                path: rel.to_string(),
+                kind: FileChangeKind::Untracked,
+                lines: Vec::new(),
+                skipped: true,
+                skip_reason: Some("too_large".into()),
+            },
+            Ok(Some(text)) => {
+                let mut lines = Vec::new();
+                let mut truncated = false;
+                for l in text.lines() {
+                    if *line_budget == 0 {
+                        truncated = true;
+                        break;
+                    }
+                    lines.push(DiffLine {
+                        kind: LineKind::Insert,
+                        text: l.to_string(),
+                    });
+                    *line_budget -= 1;
+                }
+                FileDiff {
+                    path: rel.to_string(),
+                    kind: FileChangeKind::Untracked,
+                    lines,
+                    skipped: truncated,
+                    skip_reason: truncated.then(|| "truncated".to_string()),
+                }
+            }
+            Err(_) => FileDiff {
+                path: rel.to_string(),
+                kind: FileChangeKind::Untracked,
+                lines: Vec::new(),
+                skipped: true,
+                skip_reason: Some("unreadable".into()),
+            },
+        };
+    }
+
+    // 已跟踪：超大工作树文件跳过内容。
+    if abs.is_file() {
+        if let Ok(meta) = std::fs::metadata(&abs) {
+            if meta.len() > MAX_TRACKED_FILE_BYTES {
+                return FileDiff {
+                    path: rel.to_string(),
+                    kind: FileChangeKind::Modified,
+                    lines: Vec::new(),
+                    skipped: true,
+                    skip_reason: Some(format!("large file ({} KB)", meta.len() / 1024)),
+                };
+            }
+        }
+    }
+
+    let raw = git(root, &["diff", "--no-color", "--", rel]).unwrap_or_default();
+    if raw.is_empty() {
+        let deleted = !abs.exists();
+        return FileDiff {
+            path: rel.to_string(),
+            kind: if deleted {
+                FileChangeKind::Deleted
+            } else {
+                FileChangeKind::Modified
+            },
+            lines: Vec::new(),
+            skipped: deleted,
+            skip_reason: deleted.then(|| "deleted".to_string()),
+        };
+    }
+    if raw.contains("Binary files ") || raw.contains("GIT binary patch") {
+        return FileDiff {
+            path: rel.to_string(),
+            kind: FileChangeKind::Binary,
+            lines: Vec::new(),
+            skipped: true,
+            skip_reason: Some("binary".into()),
+        };
+    }
+    if raw.len() as u64 > MAX_FILE_BYTES * 4 {
+        return FileDiff {
+            path: rel.to_string(),
+            kind: FileChangeKind::Modified,
+            lines: Vec::new(),
+            skipped: true,
+            skip_reason: Some(format!("large diff ({} KB)", raw.len() / 1024)),
+        };
+    }
+
+    let mut lines = Vec::new();
+    let mut file_truncated = false;
+    for (file_lines, l) in raw.lines().enumerate() {
+        if *line_budget == 0 || file_lines >= MAX_LINES_PER_FILE {
+            file_truncated = true;
+            break;
+        }
+        let (kind, text) = if l.starts_with("+++")
+            || l.starts_with("---")
+            || l.starts_with("diff ")
+            || l.starts_with("index ")
+            || l.starts_with("@@")
+        {
+            (LineKind::Header, l.to_string())
+        } else if let Some(rest) = l.strip_prefix('+') {
+            (LineKind::Insert, rest.to_string())
+        } else if let Some(rest) = l.strip_prefix('-') {
+            (LineKind::Delete, rest.to_string())
+        } else if let Some(rest) = l.strip_prefix(' ') {
+            (LineKind::Equal, rest.to_string())
+        } else {
+            (LineKind::Header, l.to_string())
+        };
+        lines.push(DiffLine { kind, text });
+        *line_budget = line_budget.saturating_sub(1);
+    }
+    FileDiff {
+        path: rel.to_string(),
+        kind: FileChangeKind::Modified,
+        lines,
+        skipped: file_truncated,
+        skip_reason: file_truncated.then(|| format!("truncated after {MAX_LINES_PER_FILE} lines")),
+    }
+}
+
 fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("git")
         .args(args)
@@ -477,5 +716,54 @@ mod tests {
         let a = paths_fingerprint(&["b".into(), "a".into()]);
         let b = paths_fingerprint(&["a".into(), "b".into()]);
         assert_eq!(a, b);
+    }
+
+    /// `diff_stat`（spec gui-agent-console C15）：已跟踪走 numstat、未跟踪按行数、分类正确。
+    #[test]
+    fn diff_stat_counts_tracked_and_untracked() {
+        let dir = init_repo();
+        let root = dir.path();
+        fs::write(root.join("a.txt"), "hello\nworld\nmore\n").unwrap();
+        fs::write(root.join("new.txt"), "one\ntwo\n").unwrap();
+        let stats = diff_stat(root).unwrap();
+        let a = stats.iter().find(|s| s.path == "a.txt").unwrap();
+        assert_eq!(a.kind, "M");
+        assert!(a.adds >= 2, "a.txt adds={}", a.adds);
+        let n = stats.iter().find(|s| s.path == "new.txt").unwrap();
+        assert_eq!(n.kind, "A");
+        assert_eq!(n.adds, 2);
+        assert_eq!(n.dels, 0);
+    }
+
+    /// `diff_file`：单文件 hunk 视图（红绿行分类），未跟踪整文件为 Insert。
+    #[test]
+    fn diff_file_returns_hunks_for_single_path() {
+        let dir = init_repo();
+        let root = dir.path();
+        fs::write(root.join("a.txt"), "hello\nchanged\n").unwrap();
+        let f = diff_file(root, "a.txt").unwrap();
+        assert!(f.lines.iter().any(|l| l.kind == LineKind::Insert));
+        fs::write(root.join("u.txt"), "x\ny\n").unwrap();
+        let u = diff_file(root, "u.txt").unwrap();
+        assert_eq!(u.kind, FileChangeKind::Untracked);
+        assert_eq!(u.lines.len(), 2);
+    }
+
+    /// `stage_paths`：只暂存白名单内路径；未知/越权路径被忽略。
+    #[test]
+    fn stage_paths_whitelists_known_paths_only() {
+        let dir = init_repo();
+        let root = dir.path();
+        fs::write(root.join("a.txt"), "hello\nchanged\n").unwrap();
+        fs::write(root.join("u.txt"), "u\n").unwrap();
+        let r = stage_paths(
+            root,
+            &["u.txt".into(), "../etc/passwd".into(), "-rf".into()],
+        )
+        .unwrap();
+        assert_eq!(r.paths, vec!["u.txt".to_string()]);
+        let rest = list_unstaged_paths(root).unwrap();
+        assert!(rest.iter().any(|p| p == "a.txt"), "a.txt 应仍未暂存");
+        assert!(!rest.iter().any(|p| p == "u.txt"));
     }
 }

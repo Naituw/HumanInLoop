@@ -410,6 +410,31 @@ pub fn force_agent_idle(session_id: String) {
     report_agent_event(ClientMsg::AgentForceIdle { session_id });
 }
 
+/// 查询某 session 的待送达插话全文（控制台气泡，spec gui-agent-console C3）：一问一答。
+/// daemon 未运行时**不拉起**（无 daemon 即无待送达），连不上 / 超时 → `("", 0)`。
+pub async fn interject_peek(session_id: String) -> (String, usize) {
+    let query = async {
+        let (mut reader, mut writer) = connect_split().await.ok()?;
+        ipc::write_msg(&mut writer, &ClientMsg::InterjectQuery { session_id })
+            .await
+            .ok()?;
+        loop {
+            match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
+                Ok(Some(ServerMsg::InterjectState { text, entries })) => {
+                    return Some((text, entries))
+                }
+                Ok(Some(_)) => continue,
+                _ => return None,
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_millis(800), query)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or((String::new(), 0))
+}
+
 /// 打开一条到 daemon 的连接（订阅状态窗口用，spec D20）：确保在跑后连接并拆分读写半。
 pub async fn open_for_subscribe() -> std::io::Result<(Reader, OwnedWriteHalf)> {
     ensure_running().await?;

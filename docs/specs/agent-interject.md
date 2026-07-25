@@ -163,10 +163,12 @@ Cursor 若按其文档语义改用 `agent_message` 也不断；代价是 Cursor 
 ### D7 入口与 composer 窗口
 
 - **AgentsView**：每个工作中、非 grok 的 agent 卡片加「发送消息」按钮；有待送达时显示徽标 + 撤回。
-- **托盘**：「Agent 状态（工作 w · 空闲 i）」父项改为**子菜单**——首项「打开状态窗口」（原点击行为）
-  + 分隔线 + 逐 agent 子菜单（标签＝类型+项目名，工作中在前，ended 不列）；每个 agent 下挂：
-  **发送消息**（仅工作中、非 grok）、**聚焦终端**（沿用现有 pid+受支持终端条件）。「置为空闲」需二次确认，
-  不进托盘、仍留状态窗口。`TrayState` 扩展 agent 摘要列表；菜单 diff 机制（`tray_menu.rs`）沿用。
+- **托盘**（2026-07 随 gui-agent-console 改版调整为独立分组）：分隔线 +
+  「打开 Agent 状态窗口」直达项 + **忙闲概览子菜单**（标签即「工作中 w · 空闲 i」）——
+  逐 agent 子菜单（标签＝类型+项目名，工作中在前，ended 不列）；每个 agent 下挂：
+  **在控制台查看**、**发送消息**（仅工作中、非 grok）、**添加待办**、**聚焦终端**
+  （沿用现有 pid+受支持终端条件）。「置为空闲」需二次确认，不进托盘、仍留状态窗口。
+  `TrayState` 扩展 agent 摘要列表；菜单 diff 机制（`tray_menu.rs`）沿用。
 - **composer 窗口**：GUI 宿主新窗口类型（`WindowKind::Interject`，URL 带 session 参数），
   **每 session 全局唯一**（聚焦或新建），观感按弹窗风格做；托盘/AgentsView 都经宿主路由
   （`host_open`），宿主不在则拉起，全程失败回退本进程建窗。

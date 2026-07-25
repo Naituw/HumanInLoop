@@ -57,9 +57,19 @@ pub enum TranscriptEvent {
     Meta(String),
 }
 
+/// Structured AskHuman interaction (spec gui-agent-console C14): shared message + per-question
+/// answers. A plain single-question ask keeps one entry with empty `text`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AskHumanBlock {
-    pub question: String,
+    /// Shared message shown above the questions (may be long Markdown).
+    pub message: String,
+    pub questions: Vec<AskQA>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AskQA {
+    pub text: String,
+    /// None while in-flight / cancelled.
     pub answer: Option<String>,
 }
 
@@ -178,6 +188,59 @@ pub fn load_events(kind: AgentKind, session_id: &str) -> Result<TranscriptDoc, S
         grok_backfill_times(path.parent(), &mut doc.events);
     }
     Ok(doc)
+}
+
+/// Transcript file mtime（控制台分页缓存的失效键，spec gui-agent-console C14）。
+pub fn transcript_mtime(kind: AgentKind, session_id: &str) -> Option<std::time::SystemTime> {
+    transcript_path(kind, session_id)
+        .and_then(|p| fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok())
+}
+
+/// 控制台事件 JSON（spec gui-agent-console C14）：按 `type` 打标
+/// （user/assistant/thinking/tool/ask/meta）；工具行 label/object 拆分与 IM 渲染器同源。
+pub fn event_json(ev: &TranscriptEvent) -> Value {
+    match ev {
+        TranscriptEvent::UserText { text, at, at_label } => serde_json::json!({
+            "type": "user", "text": text, "at": at, "atLabel": at_label,
+        }),
+        TranscriptEvent::AssistantText { text, at, at_label } => serde_json::json!({
+            "type": "assistant", "text": text, "at": at, "atLabel": at_label,
+        }),
+        TranscriptEvent::Thinking { text, at, at_label } => serde_json::json!({
+            "type": "thinking", "text": text, "at": at, "atLabel": at_label,
+        }),
+        TranscriptEvent::ToolCall {
+            args_summary,
+            result_summary,
+            is_error,
+            ask_human,
+            at,
+            at_label,
+            ..
+        } => {
+            if let Some(ah) = ask_human {
+                serde_json::json!({
+                    "type": "ask",
+                    "message": ah.message,
+                    "questions": ah
+                        .questions
+                        .iter()
+                        .map(|q| serde_json::json!({ "text": q.text, "answer": q.answer }))
+                        .collect::<Vec<_>>(),
+                    "at": at, "atLabel": at_label,
+                })
+            } else {
+                let (label, object) = split_tool_line(args_summary);
+                serde_json::json!({
+                    "type": "tool", "label": label, "object": object,
+                    "isError": is_error, "resultSummary": result_summary,
+                    "at": at, "atLabel": at_label,
+                })
+            }
+        }
+        TranscriptEvent::Meta(t) => serde_json::json!({ "type": "meta", "text": t }),
+    }
 }
 
 pub fn load_path(kind: AgentKind, path: &Path) -> Result<TranscriptDoc, String> {
@@ -737,36 +800,46 @@ fn detect_askhuman(
     result: Option<&str>,
 ) -> Option<AskHumanBlock> {
     let name_l = name.to_ascii_lowercase();
-    let mut question = String::new();
+    let mut message = String::new();
+    let mut questions: Vec<String> = Vec::new();
     let mut is_ah = name_l == "ask" || name_l.contains("askhuman");
 
     if let Some(a) = args {
-        if let Some(cmd) = a.get("command").and_then(|v| v.as_str()) {
+        // CLI 形态（Bash/Shell 命令，string 或 argv 数组）。
+        let cmd_string = a
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                a.get("command").and_then(|v| v.as_array()).map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+            });
+        if let Some(cmd) = cmd_string {
             if cmd.to_ascii_lowercase().contains("askhuman") {
                 is_ah = true;
-                question = extract_askhuman_cli_question(cmd);
+                let (m, qs) = parse_askhuman_cli(&cmd);
+                message = m;
+                questions = qs;
             }
         }
-        if let Some(arr) = a.get("command").and_then(|v| v.as_array()) {
-            let joined: Vec<&str> = arr.iter().filter_map(|x| x.as_str()).collect();
-            let s = joined.join(" ");
-            if s.to_ascii_lowercase().contains("askhuman") {
-                is_ah = true;
-                question = extract_askhuman_cli_question(&s);
-            }
-        }
+        // MCP `ask` 形态：message + questions[]。
         if name_l == "ask" {
             is_ah = true;
             if let Some(m) = a.get("message").and_then(|v| v.as_str()) {
-                question = m.to_string();
+                message = m.to_string();
             }
             if let Some(qs) = a.get("questions").and_then(|v| v.as_array()) {
                 for q in qs {
-                    if let Some(qt) = q.get("question").and_then(|x| x.as_str()) {
-                        if !question.is_empty() {
-                            question.push('\n');
-                        }
-                        question.push_str(qt);
+                    if let Some(qt) = q
+                        .get("question")
+                        .and_then(|x| x.as_str())
+                        .or_else(|| q.get("message").and_then(|x| x.as_str()))
+                    {
+                        questions.push(qt.to_string());
                     }
                 }
             }
@@ -775,42 +848,191 @@ fn detect_askhuman(
     if !is_ah {
         return None;
     }
-    if question.is_empty() {
-        question = summarize_args(name, args);
+    if message.is_empty() && questions.is_empty() {
+        message = summarize_args(name, args);
     }
-    let answer = result.and_then(parse_askhuman_answer);
+    let answers = result
+        .map(|r| parse_askhuman_answers(r, questions.len().max(1)))
+        .unwrap_or_default();
+    let qa: Vec<AskQA> = if questions.is_empty() {
+        // 无显式 -q / questions：单隐式问题（text 空）承载答案。
+        vec![AskQA {
+            text: String::new(),
+            answer: answers.first().cloned().flatten(),
+        }]
+    } else {
+        questions
+            .into_iter()
+            .enumerate()
+            .map(|(i, text)| AskQA {
+                text: trunc(&text, MAX_TEXT_CHARS),
+                answer: answers.get(i).cloned().flatten(),
+            })
+            .collect()
+    };
     Some(AskHumanBlock {
-        question: trunc(&question, MAX_TEXT_CHARS),
-        answer,
+        message: trunc(&message, MAX_TEXT_CHARS),
+        questions: qa,
     })
 }
 
-fn extract_askhuman_cli_question(cmd: &str) -> String {
-    // Best-effort: last quoted string or text after -m / message.
-    if let Some(i) = cmd.find(" -m ") {
-        return cmd[i + 4..]
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'')
-            .to_string();
+/// Quote-aware best-effort tokenizer for a shell-ish command line: double/single quotes and
+/// backslash escapes inside double quotes; no expansion. Never fails — returns whatever parsed.
+fn shellish_tokens(cmd: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut chars = cmd.chars().peekable();
+    let mut in_double = false;
+    let mut in_single = false;
+    let mut has_any = false;
+    while let Some(c) = chars.next() {
+        if in_single {
+            if c == '\'' {
+                in_single = false;
+            } else {
+                cur.push(c);
+            }
+            continue;
+        }
+        if in_double {
+            match c {
+                '"' => in_double = false,
+                '\\' => {
+                    if let Some(n) = chars.next() {
+                        cur.push(n);
+                    }
+                }
+                _ => cur.push(c),
+            }
+            continue;
+        }
+        match c {
+            '\'' => {
+                in_single = true;
+                has_any = true;
+            }
+            '"' => {
+                in_double = true;
+                has_any = true;
+            }
+            '\\' => {
+                if let Some(n) = chars.next() {
+                    cur.push(n);
+                }
+            }
+            c if c.is_whitespace() => {
+                if has_any || !cur.is_empty() {
+                    tokens.push(std::mem::take(&mut cur));
+                    has_any = false;
+                }
+            }
+            _ => cur.push(c),
+        }
     }
-    if let Some(i) = cmd.find(" --message ") {
-        return cmd[i + 11..]
-            .trim()
-            .trim_matches('"')
-            .trim_matches('\'')
-            .to_string();
+    if has_any || !cur.is_empty() {
+        tokens.push(cur);
     }
-    // positional after AskHuman
-    if let Some(i) = cmd.to_ascii_lowercase().find("askhuman") {
-        let rest = cmd[i..]
-            .split_whitespace()
-            .skip(1)
-            .collect::<Vec<_>>()
-            .join(" ");
-        return rest.trim_matches('"').to_string();
+    tokens
+}
+
+/// Parse an AskHuman CLI invocation into `(message, questions)`（spec gui-agent-console C14）。
+/// Best-effort：`-m/--message` 或首个位置参数为 message，`-q/--question` 逐条入列；
+/// `-o/-o!/-f` 跳过取值；shell 操作符 / heredoc 标记不当作 message。
+fn parse_askhuman_cli(cmd: &str) -> (String, Vec<String>) {
+    let tokens = shellish_tokens(cmd);
+    let Some(start) = tokens.iter().position(|t| {
+        let base = t.rsplit('/').next().unwrap_or(t);
+        base.to_ascii_lowercase().contains("askhuman")
+    }) else {
+        return (cmd.to_string(), Vec::new());
+    };
+    let mut message = String::new();
+    let mut questions: Vec<String> = Vec::new();
+    let mut positional: Vec<String> = Vec::new();
+    let mut i = start + 1;
+    while i < tokens.len() {
+        let tok = tokens[i].as_str();
+        match tok {
+            "-q" | "--question" => {
+                if let Some(v) = tokens.get(i + 1) {
+                    questions.push(v.clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            "-m" | "--message" => {
+                if let Some(v) = tokens.get(i + 1) {
+                    message = v.clone();
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            "-o" | "--option" | "-o!" | "--option!" | "-f" | "--file" => {
+                i += 2; // 跳过取值
+            }
+            _ => {
+                if !tok.starts_with('-')
+                    && !tok.contains("<<")
+                    && !tok
+                        .chars()
+                        .any(|c| matches!(c, '<' | '>' | '|' | '&' | ';'))
+                {
+                    positional.push(tok.to_string());
+                }
+                i += 1;
+            }
+        }
     }
-    cmd.to_string()
+    if message.is_empty() {
+        message = positional.into_iter().next().unwrap_or_default();
+    }
+    (message, questions)
+}
+
+/// Split a multi-question output（`# Qn` 分组 + `---` 分隔）into per-question answers；
+/// 单问题输出整体回填到第一题。`n` 为期望题数（越界分组忽略）。
+fn parse_askhuman_answers(content: &str, n: usize) -> Vec<Option<String>> {
+    let mut out: Vec<Option<String>> = vec![None; n];
+    let has_groups = content
+        .lines()
+        .any(|l| l.trim().starts_with("# Q") && l.trim()[3..].trim().parse::<usize>().is_ok());
+    if !has_groups {
+        if n > 0 {
+            out[0] = parse_askhuman_answer(content);
+        }
+        return out;
+    }
+    let mut current: Option<usize> = None;
+    let mut buf = String::new();
+    let flush = |q: Option<usize>, buf: &mut String, out: &mut Vec<Option<String>>| {
+        if let Some(qn) = q {
+            if qn >= 1 && qn <= out.len() {
+                out[qn - 1] = parse_askhuman_answer(buf);
+            }
+        }
+        buf.clear();
+    };
+    for line in content.lines() {
+        let lt = line.trim();
+        if let Some(rest) = lt.strip_prefix("# Q") {
+            if let Ok(qn) = rest.trim().parse::<usize>() {
+                flush(current.take(), &mut buf, &mut out);
+                current = Some(qn);
+                continue;
+            }
+        }
+        if lt == "---" {
+            continue;
+        }
+        if current.is_some() {
+            buf.push_str(line);
+            buf.push('\n');
+        }
+    }
+    flush(current, &mut buf, &mut out);
+    out
 }
 
 fn parse_askhuman_answer(content: &str) -> Option<String> {
@@ -854,7 +1076,9 @@ fn parse_askhuman_answer(content: &str) -> Option<String> {
 }
 
 /// Clean user text; also return Cursor `<timestamp>` label if present.
-fn clean_user(text: &str) -> (String, Option<String>) {
+/// `pub(super)`：title.rs 的「首条用户消息」回退共用同一清洗（Cursor 把用户输入包在
+/// `<timestamp>`/`<user_query>` 里，直接按「`<` 开头＝注入块」过滤会漏掉全部真实输入）。
+pub(super) fn clean_user(text: &str) -> (String, Option<String>) {
     let t = text.trim();
     if t.is_empty() {
         return (String::new(), None);
@@ -1051,13 +1275,91 @@ mod tests {
     fn detect_askhuman_cli() {
         let args = serde_json::json!({"command": "AskHuman -m \"pick one\""});
         let ah = detect_askhuman("Bash", Some(&args), None).unwrap();
-        assert!(ah.question.contains("pick one"));
+        assert!(ah.message.contains("pick one"));
+        assert_eq!(ah.questions.len(), 1);
+        assert!(ah.questions[0].text.is_empty());
+    }
+
+    /// CLI 多问题（spec gui-agent-console C14）：message 为位置参数，-q 逐条入列，
+    /// -o/-o! 取值被跳过；答案按 `# Qn` 分组回填对应题。
+    #[test]
+    fn detect_askhuman_cli_multi_question() {
+        let args = serde_json::json!({
+            "command": "AskHuman \"整体背景说明\" -q \"先修 port 吗？\" -o! \"修\" -o \"不修\" -q \"要加配置项吗？\""
+        });
+        let result =
+            "# Q1\n[selected_options]\n修\n\n---\n\n# Q2\n[user_input]\n不用，保持固定。\n";
+        let ah = detect_askhuman("Bash", Some(&args), Some(result)).unwrap();
+        assert_eq!(ah.message, "整体背景说明");
+        assert_eq!(ah.questions.len(), 2);
+        assert_eq!(ah.questions[0].text, "先修 port 吗？");
+        assert_eq!(ah.questions[0].answer.as_deref(), Some("修"));
+        assert_eq!(ah.questions[1].text, "要加配置项吗？");
+        assert_eq!(ah.questions[1].answer.as_deref(), Some("不用，保持固定。"));
+    }
+
+    /// MCP `ask` 多问题：message + questions[]；单段答案回填第一题。
+    #[test]
+    fn detect_askhuman_mcp_questions() {
+        let args = serde_json::json!({
+            "message": "背景",
+            "questions": [{ "question": "Q甲？" }, { "question": "Q乙？" }]
+        });
+        let ah = detect_askhuman("ask", Some(&args), Some("[user_input]\n答甲\n")).unwrap();
+        assert_eq!(ah.message, "背景");
+        assert_eq!(ah.questions.len(), 2);
+        assert_eq!(ah.questions[0].answer.as_deref(), Some("答甲"));
+        assert_eq!(ah.questions[1].answer, None);
     }
 
     #[test]
     fn parse_answer_markers() {
         let c = "[status] answered\n[user_input]\nyes please\n[files]\n";
         assert_eq!(parse_askhuman_answer(c).as_deref(), Some("yes please"));
+    }
+
+    /// heredoc / 操作符不当作 message；--stdin 场景 message 允许为空。
+    #[test]
+    fn cli_parser_ignores_shell_operators() {
+        let (m, qs) = parse_askhuman_cli("AskHuman -q \"继续吗？\" --stdin <<'EOF'");
+        assert_eq!(m, "");
+        assert_eq!(qs, vec!["继续吗？"]);
+    }
+
+    /// 事件 JSON：ask 块打 `type:"ask"`，普通工具行打 `type:"tool"` 且 label/object 拆分。
+    #[test]
+    fn event_json_tags_ask_and_tool() {
+        let ask = TranscriptEvent::ToolCall {
+            name: "Bash".into(),
+            args_summary: "运行: AskHuman".into(),
+            result_summary: None,
+            is_error: false,
+            ask_human: Some(AskHumanBlock {
+                message: "m".into(),
+                questions: vec![AskQA {
+                    text: "q?".into(),
+                    answer: Some("a".into()),
+                }],
+            }),
+            at: Some(1),
+            at_label: None,
+        };
+        let v = event_json(&ask);
+        assert_eq!(v["type"], "ask");
+        assert_eq!(v["questions"][0]["answer"], "a");
+        let tool = TranscriptEvent::ToolCall {
+            name: "Bash".into(),
+            args_summary: "运行: cargo test".into(),
+            result_summary: None,
+            is_error: false,
+            ask_human: None,
+            at: None,
+            at_label: None,
+        };
+        let v2 = event_json(&tool);
+        assert_eq!(v2["type"], "tool");
+        assert_eq!(v2["label"], "运行");
+        assert_eq!(v2["object"], "cargo test");
     }
 
     #[test]

@@ -75,7 +75,9 @@ pub(super) async fn watch_restore_and_run(state: Arc<ServerState>) {
         }
     }
     loop {
-        let wait = {
+        // IM 订阅与 GUI 焦点订阅共用同一引擎节奏：任一侧「工作中」→ 2s，只有空闲侧 → 10s，
+        // 两侧皆无 → 纯等 Notify。
+        let subs_wait = {
             let subs = state.watch.subs.lock().unwrap();
             let has_active = subs.iter().any(|s| !s.rewatchable);
             if !has_active {
@@ -85,6 +87,22 @@ pub(super) async fn watch_restore_and_run(state: Arc<ServerState>) {
             } else {
                 Some(Duration::from_secs(10))
             }
+        };
+        let focus_wait = {
+            let focus = state.gui_focus.lock().unwrap();
+            if focus.is_empty() {
+                None
+            } else if focus.iter().any(|f| f.working) {
+                Some(Duration::from_secs(2))
+            } else {
+                Some(Duration::from_secs(10))
+            }
+        };
+        let wait = match (subs_wait, focus_wait) {
+            (None, None) => None,
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (Some(a), Some(b)) => Some(a.min(b)),
         };
         match wait {
             None => state.watch.notify.notified().await,
@@ -104,6 +122,12 @@ pub(super) async fn watch_restore_and_run(state: Arc<ServerState>) {
 /// ≥5 退订。按渠道分组：每渠道各建一次传输客户端、各取各的淹没水位与在途提问。末尾幂等确保
 /// 回调路由在位。
 pub(super) async fn watch_tick(state: &Arc<ServerState>) {
+    // 「等待回答」集合变化 → 重推 AgentsState（waitingRequestId 徽标即时；提问创建/完结
+    // 本就 notify 引擎，此处集中比对，免散布广播调用点）。
+    waiting_badge_tick(state);
+    // GUI 控制台焦点会话帧（spec gui-agent-console C8）：与 IM 订阅同拍、同签名门控。
+    gui_focus_tick(state);
+
     let all_entries: Vec<WatchEntry> = state.watch.subs.lock().unwrap().clone();
     // 活跃 entry：引擎只驱动非 rewatchable 的订阅（rewatchable 保留仅供回调路由）。
     let entries: Vec<&WatchEntry> = all_entries.iter().filter(|e| !e.rewatchable).collect();
@@ -265,6 +289,126 @@ pub(super) async fn watch_tick(state: &Arc<ServerState>) {
         persist_watch_subs(state);
     }
     ensure_watch_routes(state).await;
+}
+
+/// 「等待回答」集合变化检测：与上次广播时比对（排序 session id 列表），变化即重推
+/// AgentsState 快照（`waitingRequestId` 注入在 `agents_snapshot_for_gui`）。
+fn waiting_badge_tick(state: &Arc<ServerState>) {
+    let mut waiting = state.registry.in_flight_agent_session_ids();
+    waiting.sort();
+    {
+        let mut last = state.last_waiting.lock().unwrap();
+        if *last == waiting {
+            return;
+        }
+        *last = waiting;
+    }
+    broadcast_agents_state(state);
+}
+
+/// GUI 控制台焦点会话一拍：对每个焦点订阅重算 Watch 帧，签名变化才推 `AgentDetail`
+/// （本地 IPC 无需编辑间隔）。发送失败（订阅端已消亡）即移除表项。
+fn gui_focus_tick(state: &Arc<ServerState>) {
+    let targets: Vec<(usize, String, String)> = {
+        let focus = state.gui_focus.lock().unwrap();
+        focus
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (i, f.session_id.clone(), f.last_sig.clone()))
+            .collect()
+    };
+    if targets.is_empty() {
+        return;
+    }
+    let snapshot = state.agents.snapshot();
+    let waiting = state.registry.in_flight_agent_session_ids();
+    for (idx, session_id, last_sig) in targets {
+        let rec = find_agent_by_session(&snapshot, &session_id);
+        let seq = rec
+            .and_then(|r| r.get("seq").and_then(|v| v.as_u64()))
+            .unwrap_or(0);
+        let frame = crate::watch::build_frame(seq, rec, waiting.contains(&session_id));
+        let sig = crate::watch::signature(&frame);
+        if sig == last_sig {
+            continue;
+        }
+        let detail = frame_detail_json(&session_id, &frame);
+        let mut focus = state.gui_focus.lock().unwrap();
+        // 表可能已被并发更新（重设焦点 / 断开）：按下标 + session 双重校验后就地更新。
+        let Some(f) = focus.get_mut(idx).filter(|f| f.session_id == session_id) else {
+            continue;
+        };
+        if f.tx.send(ServerMsg::AgentDetail { detail }).is_err() {
+            focus.remove(idx);
+            continue;
+        }
+        f.last_sig = sig;
+        f.working = frame.phase == crate::watch::WatchPhase::Working;
+    }
+}
+
+/// Watch 帧 → 控制台 detail JSON（tagged，spec gui-agent-console R5）。工具类别以结构化
+/// kind 下发（run/read/write/other），本地化由前端 i18n 完成；步/待办状态用与前端约定的
+/// 字符串枚举。
+fn frame_detail_json(session_id: &str, f: &crate::watch::WatchFrame) -> serde_json::Value {
+    use crate::agents::activity::{StepState, TodoState, ToolLabel};
+    use crate::watch::WatchPhase;
+    let steps: Vec<serde_json::Value> = f
+        .steps
+        .iter()
+        .map(|s| {
+            let (kind, name) = match &s.tool.label {
+                ToolLabel::Run => ("run", None),
+                ToolLabel::Read => ("read", None),
+                ToolLabel::Write => ("write", None),
+                ToolLabel::Other(n) => ("other", Some(n.clone())),
+            };
+            serde_json::json!({
+                "kind": kind,
+                "name": name,
+                "object": s.tool.object,
+                "state": match s.state {
+                    StepState::Running => "running",
+                    StepState::Done => "done",
+                    StepState::Failed => "failed",
+                },
+            })
+        })
+        .collect();
+    let todos: Vec<serde_json::Value> = f
+        .todos
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "content": t.content,
+                "state": match t.state {
+                    TodoState::InProgress => "inProgress",
+                    TodoState::Completed => "completed",
+                    TodoState::Pending | TodoState::Cancelled => "pending",
+                },
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "type": "watchFrame",
+        "sessionId": session_id,
+        "seq": f.seq,
+        "kindLabel": f.kind_label,
+        "phase": match f.phase {
+            WatchPhase::Working => "working",
+            WatchPhase::Idle => "idle",
+            WatchPhase::Waiting => "waiting",
+            WatchPhase::Ended => "ended",
+        },
+        "title": f.title,
+        "project": f.project,
+        "text": f.text,
+        "steps": steps,
+        "stepsOmitted": f.steps_omitted,
+        "todos": todos,
+        "activeElapsedSecs": f.active_elapsed_secs,
+        "at": f.at,
+    })
 }
 
 /// 幂等确保各渠道 watch 卡按钮回调路由在位：在渠道 Router 上注册一条专用路由并认领本渠道
@@ -1316,4 +1460,40 @@ pub(super) async fn match_pending_launch_watch(
     let Some(seq) = seq else { return };
     let config = state.config_snapshot();
     handle_watch_cmd(state, &matched.channel, Some(seq), &config, Lang::current()).await;
+}
+
+#[cfg(test)]
+mod gui_focus_tests {
+    use super::frame_detail_json;
+
+    /// detail JSON（spec gui-agent-console C8/R5）：tagged 结构、结构化工具类别、状态枚举串。
+    #[test]
+    fn frame_detail_json_is_tagged_and_structured() {
+        let rec = serde_json::json!({
+            "seq": 7,
+            "kind": "cursor",
+            "sessionId": "s-detail-test",
+            "state": "working",
+            "title": "重构空闲退出",
+            "cwd": "/tmp/HumanInLoop",
+            "activeElapsedSecs": 360,
+        });
+        let frame = crate::watch::build_frame(7, Some(&rec), false);
+        let v = frame_detail_json("s-detail-test", &frame);
+        assert_eq!(v["type"], "watchFrame");
+        assert_eq!(v["sessionId"], "s-detail-test");
+        assert_eq!(v["seq"], 7);
+        assert_eq!(v["phase"], "working");
+        assert_eq!(v["kindLabel"], "Cursor");
+        assert_eq!(v["title"], "重构空闲退出");
+        assert_eq!(v["project"], "HumanInLoop");
+        assert_eq!(v["activeElapsedSecs"], 360);
+        assert!(v["steps"].is_array());
+        assert!(v["todos"].is_array());
+        // waiting 覆盖 working；ended 定格。
+        let waiting = crate::watch::build_frame(7, Some(&rec), true);
+        assert_eq!(frame_detail_json("s", &waiting)["phase"], "waiting");
+        let gone = crate::watch::build_frame(7, None, false);
+        assert_eq!(frame_detail_json("s", &gone)["phase"], "ended");
+    }
 }

@@ -44,10 +44,11 @@ AskHuman/
     main.ts                  挂载 App、引入全局样式
     App.vue                  按 URL 路由 popup/settings/history/agents/interject/todos
     views/PopupView.vue      提问与回答弹窗（编排层；状态与区块组件在 views/popup/）
-    views/AgentsView.vue     Agent 生命周期状态窗口
+    views/AgentsView.vue     Agent 控制台（双栏：边栏+详情；spec gui-agent-console）
+    views/console/           控制台子组件（边栏/指示器/Watch 帧/完整会话/diff 条/交互区/内嵌任务）
     views/InterjectView.vue  Agent 插话编辑器
     views/TodosView.vue      项目待办窗口（项目选择 + 增删清空）
-    views/NewTaskView.vue    新建 Agent 任务窗口（GUI 单页表单，spec gui-agent-task-launch）
+    views/NewTaskView.vue    新建 Agent 任务窗口壳（表单主体在 views/newtask/NewTaskForm.vue，与控制台内嵌版共用）
     views/SettingsView.vue   设置页（编排层；各 tab 组件与域逻辑在 views/settings/）
     views/HistoryView.vue    回复历史列表、搜索与筛选
     components/HistoryDetail.vue  单条历史的只读详情
@@ -234,6 +235,7 @@ AskHuman/
 - 渠道测试与识别：`telegram_test`；钉钉、飞书、Slack 各自的 `*_test` / `*_detect_prepare` / `*_detect_wait`；共用 `detect_cancel`
 - 版本自更新：`get_app_version`、`update_check`、`update_get_notes`、`update_apply`、`update_dismiss`、`popup_update_state`、`restart_settings`
 - Agent 生命周期：`agents_init`、`agent_lifecycle_status` / `install` / `uninstall`、`agent_force_idle`
+- Agent 控制台（spec gui-agent-console）：`agents_focus`（焦点会话，daemon 推 `agent-detail` 帧）、`focus_request`（去回答）、`interject_append` / `interject_peek`（输入框追加与待送达气泡）、`console_transcript`（完整会话分页）、`console_diff_stat` / `console_diff_file` / `console_stage`（项目 diff 状态条与暂存）
 - 新建 Agent 任务（GUI）：`open_new_task`、`new_task_init`、`new_task_projects`(+`_refreshed`)、`project_key_of`、`new_task_launch`
 
 Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-popup-ui.md`：
@@ -300,6 +302,9 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 - 生命周期状态被 `/status`、watch、插话、托盘/状态窗口和 Daemon 空闲退出共同使用；修改事件或状态模型时必须检查这些消费者。
 - Daemon 启动时幂等迁移已开启但过期的 hooks。只有工作中 Agent 或状态窗口连接阻止闲退；graceful drain 不受 Agent 存活影响。
 - 入口为设置「高级」Tab、`AskHuman agents monitor` 和 `agents/registry.rs`；状态窗口由 GUI Host 承载并订阅 Daemon 快照。
+- 状态窗口已改版为双栏「Agent 控制台」（spec `docs/specs/gui-agent-console.md`）：边栏项目分组会话
+  + 详情区 Watch 帧（agents 订阅上的焦点会话子订阅复用 IM Watch 引擎推帧）+ 完整会话分页 +
+  项目 diff 状态条 + 插话输入 + 内嵌新建任务；快照对 GUI 额外注入 `waitingRequestId`/`waitingPreview`。
 
 ## Agent 插话（Interject，Unix）
 

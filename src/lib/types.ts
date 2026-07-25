@@ -378,10 +378,14 @@ export interface HistoryInit {
   projectName: string;
 }
 
-/** Agent 状态窗口 init 负载（实验性功能）。 */
+/** Agent 控制台（状态窗口）init 负载。 */
 export interface AgentsInit {
   theme: ThemeMode;
   lang: string;
+  /** 与弹窗一致的提交快捷键（输入框 ⌘↵ 发送）。 */
+  popupSubmitKey: PopupSubmitKey;
+  /** 「新建任务」入口是否可用（macOS 且 Terminal.app 存在）。 */
+  newTaskSupported: boolean;
 }
 
 export type AgentKind = "claude" | "codex" | "cursor" | "grok";
@@ -414,6 +418,104 @@ export interface AgentRecord {
   currentTool?: { name: string; object?: string | null; at: number } | null;
   /** 有待送达的插话消息（daemon 注入；驱动「待送达」徽标与撤回按钮）。 */
   pendingInterject?: boolean;
+  /** 在途 AskHuman 提问的请求 id（daemon 注入，spec gui-agent-console C7/R2）：
+   *  🙋 徽标 + 「去回答」精确聚焦对应弹窗。 */
+  waitingRequestId?: string | null;
+  /** 在途提问的摘要预览（等待横幅展示；可缺省）。 */
+  waitingPreview?: string | null;
+  /** 累计有效工作时长（秒，registry snapshot 含当前区间的生效总值）。 */
+  activeElapsedSecs?: number | null;
+}
+
+// ===== Agent 控制台（spec gui-agent-console）=====
+
+/** 焦点会话详情帧的工具步（daemon `frame_detail_json`）。 */
+export interface DetailStep {
+  /** 结构化类别：run/read/write/other（本地化由前端完成）。 */
+  kind: "run" | "read" | "write" | "other" | string;
+  /** kind=other 时的原始工具名。 */
+  name?: string | null;
+  object?: string | null;
+  state: "running" | "done" | "failed" | string;
+}
+
+/** 焦点会话详情帧的 TODO 条目。 */
+export interface DetailTodo {
+  content: string;
+  state: "pending" | "inProgress" | "completed" | string;
+}
+
+/** 完整会话事件（console_transcript 输出，tagged；spec gui-agent-console C14）。 */
+export type TranscriptEventJson =
+  | { type: "user"; text: string; at?: number | null; atLabel?: string | null }
+  | { type: "assistant"; text: string; at?: number | null; atLabel?: string | null }
+  | { type: "thinking"; text: string; at?: number | null; atLabel?: string | null }
+  | {
+      type: "tool";
+      label: string;
+      object?: string | null;
+      isError: boolean;
+      resultSummary?: string | null;
+      at?: number | null;
+      atLabel?: string | null;
+    }
+  | {
+      type: "ask";
+      message: string;
+      questions: { text: string; answer?: string | null }[];
+      at?: number | null;
+      atLabel?: string | null;
+    }
+  | { type: "meta"; text: string };
+
+/** 完整会话一页（`[start, start+events.length)` 窗口）。 */
+export interface TranscriptPage {
+  events: TranscriptEventJson[];
+  start: number;
+  total: number;
+  truncatedHead: boolean;
+  partial: boolean;
+}
+
+/** 项目未暂存变更统计的一行（console_diff_stat；spec gui-agent-console C15）。 */
+export interface DiffFileStat {
+  path: string;
+  /** M 修改 / D 删除 / A 新增 / B 二进制。 */
+  kind: "M" | "D" | "A" | "B" | string;
+  adds: number;
+  dels: number;
+}
+
+export interface DiffStatPage {
+  /** git 根（stage 调用沿用）。 */
+  root: string;
+  files: DiffFileStat[];
+}
+
+/** 单文件 hunk 视图（console_diff_file）。 */
+export interface DiffFileView {
+  path: string;
+  kind: string;
+  skipped: boolean;
+  skipReason?: string | null;
+  lines: { kind: "add" | "del" | "context" | "header" | string; text: string }[];
+}
+
+/** 焦点会话详情帧（tagged，daemon 签名变化才推；spec gui-agent-console C8/R5）。 */
+export interface AgentDetailFrame {
+  type: "watchFrame" | string;
+  sessionId: string;
+  seq: number;
+  kindLabel: string;
+  phase: "working" | "idle" | "waiting" | "ended" | string;
+  title?: string | null;
+  project?: string | null;
+  text?: string | null;
+  steps: DetailStep[];
+  stepsOmitted: number;
+  todos: DetailTodo[];
+  activeElapsedSecs?: number | null;
+  at?: number | null;
 }
 
 /** 插话 composer 窗口 init 负载。 */

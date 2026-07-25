@@ -633,6 +633,62 @@ impl RequestRegistry {
         ids
     }
 
+    /// 在途请求的 `(agent session_id, request_id, 预览)` 映射（同 session 多请求取最早登记的）。
+    /// 供状态窗口快照注入 `waitingRequestId`/`waitingPreview`（spec gui-agent-console C7/R2）：
+    /// 边栏 🙋 徽标 + 等待横幅摘要 + 「去回答」精确聚焦对应弹窗。
+    pub fn in_flight_agent_requests(&self) -> Vec<(String, String, String)> {
+        let mut rows: Vec<(u64, (String, String, String))> = {
+            let inner = self.inner.lock().unwrap();
+            inner
+                .by_id
+                .values()
+                .filter_map(|entry| {
+                    entry
+                        .agent_session_id
+                        .as_ref()
+                        .filter(|sid| !sid.is_empty())
+                        .map(|sid| {
+                            (
+                                entry.seq,
+                                (
+                                    sid.clone(),
+                                    entry.request_id.clone(),
+                                    preview_of(entry.request()),
+                                ),
+                            )
+                        })
+                })
+                .chain(
+                    inner
+                        .confirm_by_id
+                        .values()
+                        .filter(|entry| !entry.agent_session_id.is_empty())
+                        .map(|entry| {
+                            (
+                                entry.seq,
+                                (
+                                    entry.agent_session_id.clone(),
+                                    entry.request_id.clone(),
+                                    truncate_chars(
+                                        &entry.request.detail.summary,
+                                        PREVIEW_MAX_CHARS,
+                                    ),
+                                ),
+                            )
+                        }),
+                )
+                .collect()
+        };
+        rows.sort_by_key(|(seq, _)| *seq);
+        let mut out: Vec<(String, String, String)> = Vec::new();
+        for (_, row) in rows {
+            if !out.iter().any(|(s, _, _)| s == &row.0) {
+                out.push(row);
+            }
+        }
+        out
+    }
+
     /// 在途请求摘要（按创建顺序，托盘「待答」子菜单用）：每条 `{id, 预览}`。
     pub fn pending_infos(&self) -> Vec<PendingRequestInfo> {
         let mut entries: Vec<(u64, PendingRequestInfo)> = {
@@ -959,5 +1015,41 @@ mod tests {
         assert!(entry.mark_starting_failed("popup", "timeout"));
         assert!(!entry.mark_ready("popup", String::new()));
         assert!(!entry.is_ready("popup"));
+    }
+
+    /// `in_flight_agent_requests`（spec gui-agent-console C7/R2）：session → request_id 映射，
+    /// 按登记顺序、同 session 去重取最早，ask 与 confirm 都计入。
+    #[test]
+    fn in_flight_agent_requests_maps_sessions_in_seq_order() {
+        let ask = |sid: &str| -> TaskRequest {
+            serde_json::from_value(json!({
+                "message": {"text": "q", "files": []},
+                "questions": [{"message": "continue?", "predefinedOptions": []}],
+                "isMarkdown": true,
+                "source": "Cursor",
+                "lang": "en",
+                "project": "/tmp/project",
+                "agentKind": "cursor",
+                "agentSessionId": sid,
+            }))
+            .unwrap()
+        };
+        let registry = RequestRegistry::new();
+        let (a1, _rx1) = registry.create(ask("s-ask"));
+        let (a2, _rx2) = registry.create(ask("s-ask")); // 同 session 第二条：应被去重忽略
+        let (c1, _rx3) = registry.create_confirm(confirm_task()).unwrap(); // session-1
+        let rows = registry.in_flight_agent_requests();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "s-ask");
+        assert_eq!(rows[0].1, a1.request_id);
+        assert!(!rows[0].2.is_empty(), "ask preview should be non-empty");
+        assert_eq!(rows[1].0, "session-1");
+        assert_eq!(rows[1].1, c1.request_id);
+        assert_ne!(rows[0].1, a2.request_id);
+        // 完结后消失。
+        registry.remove(&a1.request_id);
+        registry.remove(&a2.request_id);
+        registry.remove_confirm(&c1.request_id);
+        assert!(registry.in_flight_agent_requests().is_empty());
     }
 }

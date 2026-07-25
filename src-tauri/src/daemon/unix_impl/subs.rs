@@ -12,21 +12,34 @@ pub(super) fn has_agent_subs(state: &Arc<ServerState>) -> bool {
 }
 
 /// 构造给状态窗口的 agent 全量快照：注册表 snapshot + 注入插话「待送达」徽标
-/// （`pendingInterject: true`，spec agent-interject D7；IM /status 等其它 snapshot 消费方不注入）。
+/// （`pendingInterject: true`，spec agent-interject D7）与在途提问的 `waitingRequestId`
+/// （spec gui-agent-console C7/R2）；IM /status 等其它 snapshot 消费方不注入。
 pub(super) fn agents_snapshot_for_gui(state: &Arc<ServerState>) -> serde_json::Value {
     let mut snap = state.agents.snapshot();
     let pending = state.interject.pending_sessions();
-    if !pending.is_empty() {
+    let waiting = state.registry.in_flight_agent_requests();
+    if !pending.is_empty() || !waiting.is_empty() {
         if let Some(arr) = snap.as_array_mut() {
             for rec in arr.iter_mut() {
-                let hit = rec
+                let sid = rec
                     .get("sessionId")
                     .and_then(|v| v.as_str())
-                    .map(|sid| pending.iter().any(|p| p == sid))
-                    .unwrap_or(false);
-                if hit {
+                    .unwrap_or("")
+                    .to_string();
+                if sid.is_empty() {
+                    continue;
+                }
+                if pending.iter().any(|p| p == &sid) {
                     if let Some(obj) = rec.as_object_mut() {
                         obj.insert("pendingInterject".to_string(), serde_json::json!(true));
+                    }
+                }
+                if let Some((_, rid, preview)) = waiting.iter().find(|(s, _, _)| s == &sid) {
+                    if let Some(obj) = rec.as_object_mut() {
+                        obj.insert("waitingRequestId".to_string(), serde_json::json!(rid));
+                        if !preview.is_empty() {
+                            obj.insert("waitingPreview".to_string(), serde_json::json!(preview));
+                        }
                     }
                 }
             }
@@ -47,7 +60,8 @@ pub(super) fn broadcast_agents_state(state: &Arc<ServerState>) {
     broadcast_tray_state(state);
 }
 
-/// 状态窗口订阅连接：注册发送端、立即推一次快照，随后专用写任务持续推送；读端用于探测断开。
+/// 状态窗口订阅连接：注册发送端、立即推一次快照，随后专用写任务持续推送；读端接收
+/// `AgentsFocus`（控制台焦点会话，spec gui-agent-console C8）并探测断开。
 /// 该连接保持期间计入 `active`（连同「工作中」agent 一起阻止 daemon 闲退，spec D18）。
 pub(super) async fn handle_agents_sub(
     mut reader: Reader,
@@ -71,15 +85,49 @@ pub(super) async fn handle_agents_sub(
         agents: agents_snapshot_for_gui(state),
     });
 
-    // 读端仅用于探测断开；窗口正常不发消息。
-    wait_cli_eof(&mut reader).await;
+    // 读循环：焦点会话更新 + 断开探测（其它消息忽略）。
+    loop {
+        match ipc::read_msg::<_, ClientMsg>(&mut reader).await {
+            Ok(Some(ClientMsg::AgentsFocus { session_id })) => {
+                set_gui_focus(state, &tx, session_id);
+                // 引擎即醒：焦点帧首拍立即推（last_sig 为空必然与新帧不同）。
+                state.watch.notify.notify_one();
+            }
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break, // 关窗 / 宿主崩溃：连接断开。
+        }
+    }
 
-    // 收尾：从订阅表移除本端（按指针标识），结束写任务。
+    // 收尾：从订阅表与焦点表移除本端（按指针标识），结束写任务。
     if let Ok(mut subs) = state.agent_subs.lock() {
         subs.retain(|s| !s.same_channel(&tx));
     }
+    if let Ok(mut focus) = state.gui_focus.lock() {
+        focus.retain(|f| !f.tx.same_channel(&tx));
+    }
     drop(tx);
     let _ = writer.await;
+}
+
+/// 更新某订阅者的焦点会话（None＝取消）。同一订阅者重设焦点就地替换并重置签名
+/// （切换会话后首帧必推）。
+fn set_gui_focus(
+    state: &Arc<ServerState>,
+    tx: &tokio::sync::mpsc::UnboundedSender<ServerMsg>,
+    session_id: Option<String>,
+) {
+    let Ok(mut focus) = state.gui_focus.lock() else {
+        return;
+    };
+    focus.retain(|f| !f.tx.same_channel(tx));
+    if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
+        focus.push(GuiFocusEntry {
+            tx: tx.clone(),
+            session_id: sid,
+            last_sig: String::new(),
+            working: true, // 首拍前保守按工作中取 2s 节奏，首帧后校正。
+        });
+    }
 }
 
 /// 是否有菜单栏宿主在订阅 TrayState。
