@@ -274,6 +274,7 @@ pub fn create_internal_confirm(
         project: project.to_string(),
         agent_kind: Some(agent_kind.to_string()),
         agent_pid: None,
+        agent_console_session_id: None,
         perf_id: String::new(),
         perf_autodismiss: false,
         created_at_ms,
@@ -396,6 +397,7 @@ impl RequestRegistry {
     pub fn create(
         &self,
         task: TaskRequest,
+        agent_console_session_id: Option<String>,
     ) -> (Arc<RequestEntry>, UnboundedReceiver<RenderOutcome>) {
         let request_id = uuid::Uuid::new_v4().to_string();
         let token = uuid::Uuid::new_v4().to_string();
@@ -447,6 +449,7 @@ impl RequestRegistry {
             project: task.project,
             agent_kind: task.agent_kind,
             agent_pid: task.agent_pid,
+            agent_console_session_id,
             // 方案6：透传 perf 上下文，热 helper 领用时据此开启埋点（无 env 也能量化热路径）。
             perf_id: task.perf_id,
             perf_autodismiss: task.perf_autodismiss,
@@ -506,6 +509,7 @@ impl RequestRegistry {
     pub fn create_confirm(
         &self,
         task: ConfirmTask,
+        agent_console_session_id: Option<String>,
     ) -> Result<(Arc<ConfirmEntry>, UnboundedReceiver<ConfirmOutcome>), String> {
         const REQUIRED_CONTEXT: [&str; 6] = [
             "agent",
@@ -570,6 +574,7 @@ impl RequestRegistry {
             project: task.project.clone(),
             agent_kind: Some(task.agent_kind.clone()),
             agent_pid: None,
+            agent_console_session_id,
             perf_id: String::new(),
             perf_autodismiss: false,
             created_at_ms,
@@ -990,7 +995,7 @@ mod tests {
         }))
         .unwrap();
         let registry = RequestRegistry::new();
-        let (entry, _rx) = registry.create(task);
+        let (entry, _rx) = registry.create(task, Some("conversation-1".into()));
         assert_eq!(
             entry.coordinator.recovery_binding(),
             (
@@ -1000,6 +1005,10 @@ mod tests {
             )
         );
         assert_eq!(entry.agent_session_id.as_deref(), Some("conversation-1"));
+        assert_eq!(
+            entry.show.agent_console_session_id.as_deref(),
+            Some("conversation-1")
+        );
     }
 
     fn ask_task(session: Option<&str>, question: &str) -> TaskRequest {
@@ -1019,7 +1028,7 @@ mod tests {
     #[test]
     fn identical_ask_from_same_session_attaches_to_the_live_request() {
         let registry = RequestRegistry::new();
-        let (entry, _rx) = registry.create(ask_task(Some("s1"), "continue?"));
+        let (entry, _rx) = registry.create(ask_task(Some("s1"), "continue?"), None);
         let key = entry.session_key.clone().unwrap();
         assert_eq!(key, "sid:s1");
         assert_eq!(entry.waiter_count(), 1);
@@ -1053,7 +1062,7 @@ mod tests {
     #[test]
     fn ask_without_session_never_coalesces() {
         let registry = RequestRegistry::new();
-        let (entry, _rx) = registry.create(ask_task(None, "continue?"));
+        let (entry, _rx) = registry.create(ask_task(None, "continue?"), None);
         assert!(entry.session_key.is_none());
         assert!(registry.try_attach("sid:s1", &entry.fingerprint).is_none());
     }
@@ -1061,7 +1070,7 @@ mod tests {
     #[tokio::test]
     async fn finalizing_request_is_not_attachable() {
         let registry = RequestRegistry::new();
-        let (entry, _rx) = registry.create(ask_task(Some("s1"), "continue?"));
+        let (entry, _rx) = registry.create(ask_task(Some("s1"), "continue?"), None);
         let key = entry.session_key.clone().unwrap();
         entry
             .coordinator
@@ -1075,7 +1084,7 @@ mod tests {
         let registry = RequestRegistry::new();
         let mut task = confirm_task();
         task.spec.context.retain(|field| field.id != "tool");
-        let error = registry.create_confirm(task).err().unwrap();
+        let error = registry.create_confirm(task, None).err().unwrap();
         assert!(error.contains("missing context: tool"));
         assert_eq!(registry.active_count(), 0);
     }
@@ -1084,7 +1093,9 @@ mod tests {
     fn confirm_registry_owns_identity_deadline_and_typed_gui_token() {
         let registry = RequestRegistry::new();
         let before = tokio::time::Instant::now();
-        let (entry, _rx) = registry.create_confirm(confirm_task()).unwrap();
+        let (entry, _rx) = registry
+            .create_confirm(confirm_task(), Some("session-1".into()))
+            .unwrap();
         assert_eq!(entry.request.id, entry.request_id);
         assert_eq!(
             entry.request.expires_at_ms - entry.request.created_at_ms,
@@ -1093,6 +1104,10 @@ mod tests {
         assert!(entry.deadline >= before + std::time::Duration::from_secs(86_399));
         assert_eq!(registry.in_flight_agent_pids(), vec![42]);
         assert_eq!(registry.in_flight_agent_session_ids(), vec!["session-1"]);
+        assert_eq!(
+            entry.show.agent_console_session_id.as_deref(),
+            Some("session-1")
+        );
         assert!(matches!(
             registry.attach_gui(&entry.token),
             Some(InteractionEntry::Confirm(_))
@@ -1116,7 +1131,7 @@ mod tests {
         };
         task.popup_edit = Some(intent);
         let registry = RequestRegistry::new();
-        let (entry, _rx) = registry.create_confirm(task).unwrap();
+        let (entry, _rx) = registry.create_confirm(task, None).unwrap();
         assert!(entry.show.popup_edit.is_some());
         let request_json = serde_json::to_string(&entry.request).unwrap();
         assert!(!request_json.contains("popupEdit"));
@@ -1141,13 +1156,13 @@ mod tests {
         intent.agent_kind = "codex".into();
         task.popup_edit = Some(intent);
         let registry = RequestRegistry::new();
-        assert!(registry.create_confirm(task).is_err());
+        assert!(registry.create_confirm(task, None).is_err());
     }
 
     #[test]
     fn late_ready_cannot_revive_a_failed_delivery() {
         let registry = RequestRegistry::new();
-        let (entry, _rx) = registry.create_confirm(confirm_task()).unwrap();
+        let (entry, _rx) = registry.create_confirm(confirm_task(), None).unwrap();
         entry.start_delivery("popup");
         assert!(entry.mark_starting_failed("popup", "timeout"));
         assert!(!entry.mark_ready("popup", String::new()));
@@ -1172,9 +1187,9 @@ mod tests {
             .unwrap()
         };
         let registry = RequestRegistry::new();
-        let (a1, _rx1) = registry.create(ask("s-ask"));
-        let (a2, _rx2) = registry.create(ask("s-ask")); // 同 session 第二条：应被去重忽略
-        let (c1, _rx3) = registry.create_confirm(confirm_task()).unwrap(); // session-1
+        let (a1, _rx1) = registry.create(ask("s-ask"), None);
+        let (a2, _rx2) = registry.create(ask("s-ask"), None); // 同 session 第二条：应被去重忽略
+        let (c1, _rx3) = registry.create_confirm(confirm_task(), None).unwrap(); // session-1
         let rows = registry.in_flight_agent_requests();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].0, "s-ask");

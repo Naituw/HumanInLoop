@@ -340,12 +340,16 @@ pub struct ShowPayload {
     /// 当前项目 key（供历史窗口默认过滤当前项目）。
     #[serde(default)]
     pub project: String,
-    /// 发起本次提问的 agent 家族（claude/codex/cursor），探测不到为 None。弹窗据此显示来源 agent badge。
+    /// 发起本次提问的 agent 家族（claude/codex/cursor/grok），探测不到为 None。弹窗据此显示来源 agent badge。
     #[serde(default)]
     pub agent_kind: Option<String>,
     /// 发起本次提问的 agent 进程 pid（进程树 walk 得到），探测不到为 None。弹窗据此判断 / 执行「聚焦终端」。
     #[serde(default)]
     pub agent_pid: Option<u32>,
+    /// Agent 状态窗口可寻址的精确会话。仅当调用方的 `(kind, session_id)` 已命中 daemon
+    /// `AgentRegistry` 中的活动记录时下发；未追踪或绑定不可信时为 None，弹窗据此隐藏快捷入口。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_console_session_id: Option<String>,
     /// 性能埋点关联 id（方案6 热路径用）：冷 helper 经 env 拿到，热 helper 没有 env，故由 Show 透传，
     /// 领用时写入 perf 运行时上下文，使热进程的 `fe.painted`/`gui.win_show` 与 CLI 的 `cli.start` 同 id 关联。
     #[serde(default)]

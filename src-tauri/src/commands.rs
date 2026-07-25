@@ -26,10 +26,12 @@ pub struct PopupInit {
     project: String,
     /// workspace 目录名（`project` 的 basename），标题区展示用。
     project_name: String,
-    /// 发起本次提问的 agent 家族（claude/codex/cursor）；None 则不显示 agent badge。
+    /// 发起本次提问的 agent 家族（claude/codex/cursor/grok）；None 则不显示 agent badge。
     agent_kind: Option<String>,
     /// 发起本次提问的 agent 进程 pid；前端「聚焦终端」用。
     agent_pid: Option<u32>,
+    /// 已严格匹配到 Agent 状态窗口活动记录的会话 ID；None 时不显示快捷入口。
+    agent_console_session_id: Option<String>,
     /// 界面语言原始值（`auto`/`en`/`zh`）。让弹窗直接据此 `applyLanguage`，免去前端再走 `get_settings()`
     /// （钥匙串）。`auto` 由前端解析为系统语言。
     language: String,
@@ -68,6 +70,7 @@ pub fn popup_init(app: AppHandle, state: State<AppState>) -> PopupInit {
         project,
         agent_kind,
         agent_pid,
+        agent_console_session_id,
         language,
         warm,
         created_at_ms,
@@ -80,6 +83,7 @@ pub fn popup_init(app: AppHandle, state: State<AppState>) -> PopupInit {
                 s.project,
                 s.agent_kind,
                 s.agent_pid,
+                s.agent_console_session_id,
                 s.lang,
                 true,
                 s.created_at_ms,
@@ -89,6 +93,7 @@ pub fn popup_init(app: AppHandle, state: State<AppState>) -> PopupInit {
                 None,
                 String::new(),
                 String::new(),
+                None,
                 None,
                 None,
                 default_lang,
@@ -104,6 +109,7 @@ pub fn popup_init(app: AppHandle, state: State<AppState>) -> PopupInit {
             state.project.clone(),
             state.agent_kind.clone(),
             state.agent_pid,
+            state.agent_console_session_id.clone(),
             default_lang,
             false,
             state.created_at_ms,
@@ -117,6 +123,7 @@ pub fn popup_init(app: AppHandle, state: State<AppState>) -> PopupInit {
         project,
         agent_kind,
         agent_pid,
+        agent_console_session_id,
         language,
         warm,
         created_at_ms,
@@ -127,6 +134,7 @@ pub fn popup_init(app: AppHandle, state: State<AppState>) -> PopupInit {
         state.project.clone(),
         state.agent_kind.clone(),
         state.agent_pid,
+        state.agent_console_session_id.clone(),
         default_lang,
         false,
         state.created_at_ms,
@@ -154,6 +162,7 @@ pub fn popup_init(app: AppHandle, state: State<AppState>) -> PopupInit {
         project_name,
         agent_kind,
         agent_pid,
+        agent_console_session_id,
         language,
         speech_language: cfg.general.speech_language.clone(),
         speech_shortcut: cfg.general.speech_shortcut.clone(),
@@ -965,6 +974,7 @@ fn route_open_window(
                     &fallback,
                     &cfg,
                     target.as_ref().map(|t| t.session.as_str()),
+                    pin,
                 ),
                 WindowKind::Interject => match &target {
                     Some(t) => crate::app::create_interject_window(&fallback, &cfg, t, pin),
@@ -1003,6 +1013,54 @@ fn effective_popup_project(app: &AppHandle, state: &State<AppState>) -> String {
         }
     }
     state.project.clone()
+}
+
+/// Resolve the popup's daemon-validated Agent Window target. Warm helpers keep per-request context
+/// in `WarmPopup.show`; cold helpers keep it in `AppState`.
+#[cfg(unix)]
+fn effective_popup_agent_console_session(
+    app: &AppHandle,
+    state: &State<AppState>,
+) -> Option<String> {
+    if let Some(w) = app.try_state::<crate::app::WarmPopup>() {
+        if let Some(session_id) = w.show.lock().ok().and_then(|show| {
+            show.as_ref()
+                .and_then(|payload| payload.agent_console_session_id.clone())
+        }) {
+            return Some(session_id);
+        }
+    }
+    state.agent_console_session_id.clone()
+}
+
+/// Open or focus the Agent Window at the exact session matched by the daemon for this popup.
+/// The frontend supplies no session identifier of its own; absence means the shortcut is invalid.
+#[tauri::command]
+pub fn open_agent_console(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let session_id = effective_popup_agent_console_session(&app, &state)
+            .filter(|session_id| !session_id.trim().is_empty())
+            .ok_or_else(|| "no matched agent session".to_string())?;
+        route_open_window(
+            app,
+            crate::gui_host::WindowKind::Agents,
+            false,
+            None,
+            Some(crate::gui_host::InterjectTarget {
+                session: session_id,
+                agent: None,
+                cwd: None,
+            }),
+            None,
+        );
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (app, state);
+        Err("unsupported".to_string())
+    }
 }
 
 /// 从弹窗导航栏打开独立历史窗口：路由到统一宿主（全局单窗），默认过滤到弹窗所属项目。

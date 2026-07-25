@@ -1703,7 +1703,16 @@ async fn handle_submit_confirm(
         }
     }
 
-    let (entry, mut final_rx) = match state.registry.create_confirm(task) {
+    let agent_console_session_id = AgentKind::parse(&task.agent_kind).and_then(|kind| {
+        state
+            .agents
+            .has_active_session(kind, &task.agent_session_id)
+            .then(|| task.agent_session_id.clone())
+    });
+    let (entry, mut final_rx) = match state
+        .registry
+        .create_confirm(task, agent_console_session_id)
+    {
         Ok(created) => created,
         Err(error) => {
             log(&format!("invalid confirmation request: {error}"));
@@ -1880,6 +1889,14 @@ async fn handle_submit(
         state.agents.persist();
         broadcast_agents_state(state);
     }
+    // Agent Window shortcut is exposed only for an exact active registry match. Every supported
+    // family reaches this path through the same authoritative kind + session binding.
+    let agent_console_session_id = match (kind_env, sid_env.as_deref()) {
+        (Some(kind), Some(session_id)) if state.agents.has_active_session(kind, session_id) => {
+            Some(session_id.to_string())
+        }
+        _ => None,
+    };
     let lang = Lang::resolve(&task.lang);
 
     // 重复提问收敛（spec duplicate-ask-coalescing）：agent 那一轮被中断后往往原样重发同一个
@@ -1924,7 +1941,7 @@ async fn handle_submit(
         }
     }
 
-    let (entry, mut final_rx) = state.registry.create(task);
+    let (entry, mut final_rx) = state.registry.create(task, agent_console_session_id);
     let request_id = entry.request_id.clone();
     let session_key = entry.session_key.clone();
     crate::perf::mark(&perf_id, "dmn.created");

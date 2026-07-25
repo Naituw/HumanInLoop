@@ -1231,7 +1231,8 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
 /// 在宿主进程内打开（或聚焦）指定窗口，并刷新窗口计数 / 续命。须在主线程调用。
 /// `param` 按窗口类型复用：历史窗口 = 调用方项目 key（默认过滤到该项目，None 用宿主自身项目）；
 /// 设置窗口 = 初始定位 tab（如 "channel"，None 用默认 tab）；待办/新建任务窗口 = 预选项目 key。
-/// `target` 仅插话窗口使用（session 必填；缺失则忽略本次请求）；`todo` 仅新建任务窗口使用。
+/// `target.session` 用于 Agent 窗口预选或插话窗口唯一键；`target.agent/cwd` 仅插话窗口使用；
+/// `todo` 仅新建任务窗口使用。
 pub(crate) fn open_window(
     app: &AppHandle,
     kind: WindowKind,
@@ -1242,7 +1243,7 @@ pub(crate) fn open_window(
 ) {
     let cfg = AppConfig::load_without_secrets();
     // 弹窗在「另一个进程」（daemon 拉起的助手），宿主无 popup 窗口可探测；改据 daemon 在途请求数
-    // 判定：置顶开启且有在途请求（即有弹窗在屏）→ 让设置/历史与弹窗同级，浮于其上。
+    // 判定：置顶开启且有在途请求（即有弹窗在屏）→ 让辅助窗口与弹窗同级，浮于其上。
     let pin_above_popup = cfg.general.always_on_top
         && app
             .try_state::<HostState>()
@@ -1255,9 +1256,12 @@ pub(crate) fn open_window(
         WindowKind::History => {
             crate::app::create_history_window(app, &cfg, all, param.as_deref(), pin_above_popup)
         }
-        WindowKind::Agents => {
-            crate::app::create_agents_window(app, &cfg, target.as_ref().map(|t| t.session.as_str()))
-        }
+        WindowKind::Agents => crate::app::create_agents_window(
+            app,
+            &cfg,
+            target.as_ref().map(|t| t.session.as_str()),
+            pin_above_popup,
+        ),
         WindowKind::Interject => match &target {
             Some(t) => crate::app::create_interject_window(app, &cfg, t, pin_above_popup),
             None => return, // session 缺失：无法定位目标 agent，忽略。

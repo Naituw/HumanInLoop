@@ -22,9 +22,15 @@ daemon 的 `PopupFocusArbiter` 是跨 helper 的唯一焦点所有者：最早�
 `.brand-time` 显示提问创建时刻的相对时间，满 24 小时后转绝对时间，hover 显示精确时间。时间锚点由 daemon `RequestRegistry::create()` 记录，经 `ShowPayload.created_at_ms` 和 `PopupInit.createdAtMs` 送到前端；冷弹窗和单进程路径以构造时刻兜底。
 
 - **Agent badge**：来自 `AppState.agent_kind`。若 `PopupInit.agentTerminal` 表明对应终端可激活，badge 可调用 `focus_agent_terminal(agentPid)` 聚焦 Agent 终端。
+- **Agent Window 入口**：daemon 仅在调用方 `(agent_kind, agent_session_id)` 精确命中活动
+  `AgentRegistry` 记录时下发 `agentConsoleSessionId`；四家 Agent 共用同一门控，不按 pid / cwd
+  模糊猜测。顶栏右侧据此显示快捷按钮，经 GUI Host 打开全局唯一 Agent Window 并定位该 session，
+  Popup 本身保持等待。置顶 Popup 场景下目标窗口临时使用同级置顶，避免开在其后方。
 - **workspace badge**：来自 `AppState.project`（git 根或 cwd），显示目录名、hover 展示完整路径，点击通过 `open_path` 在文件管理器打开。
 
-这些字段通过 `PopupInit{project, projectName, agentKind, agentPid, agentTerminal}` 上送；预热 Popup 的上下文读取边界另见 `docs/specs/popup-prewarm.md`。
+这些字段通过 `PopupInit{project, projectName, agentKind, agentPid, agentConsoleSessionId}` 上送；
+终端类型在首屏后由 `popup_agent_terminal` 异步解析；预热 Popup 的上下文读取边界另见
+`docs/specs/popup-prewarm.md`。
 
 普通 IM Message / Question 卡通过独立的每请求 `ConversationOrigin` 复用相同 source / Agent / 项目，项目
 显示 basename，标题规则与 MCP 最多 200ms 的 IM-only 解析等待见

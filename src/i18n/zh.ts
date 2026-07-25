@@ -62,6 +62,7 @@ export default {
     prev: "上一个",
     next: "下一个",
     nav: {
+      agentConsole: "在 Agent 窗口中查看",
       pin: "窗口置顶",
       todos: "项目待办",
       settings: "设置",

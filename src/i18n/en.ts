@@ -65,6 +65,7 @@ export default {
     prev: "Previous",
     next: "Next",
     nav: {
+      agentConsole: "View in Agent Window",
       pin: "Keep on top",
       todos: "Project todos",
       settings: "Settings",

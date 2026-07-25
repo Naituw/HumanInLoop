@@ -740,6 +740,20 @@ impl AgentRegistry {
         inner.active.iter().map(|r| r.session_id.clone()).collect()
     }
 
+    /// 弹窗 → Agent 状态窗口的严格寻址门控：只有家族与会话 ID 同时命中活动记录才算匹配。
+    /// 不按 pid / cwd / 家族单独猜测，避免并发会话时把快捷入口指向错误 Agent。
+    pub fn has_active_session(&self, kind: AgentKind, session_id: &str) -> bool {
+        if session_id.is_empty() {
+            return false;
+        }
+        self.inner
+            .lock()
+            .unwrap()
+            .active
+            .iter()
+            .any(|record| record.kind == kind && record.session_id == session_id)
+    }
+
     /// 权限授权管理面板的分组增强（spec codex-permission-remember §6.3）：按 session_id 在
     /// 活动与已结束记录中查标题 / 项目名（标题惰性解析并缓存）。不在册返回 None，面板回退
     /// 显示缩短的 session id。
@@ -967,6 +981,48 @@ mod tests {
             120,
         );
         assert_eq!(r.working_count(), 0);
+    }
+
+    #[test]
+    fn active_session_match_requires_exact_kind_for_every_agent_family() {
+        let r = reg();
+        for (index, kind) in [
+            AgentKind::Claude,
+            AgentKind::Codex,
+            AgentKind::Cursor,
+            AgentKind::Grok,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let session_id = format!("session-{index}");
+            r.apply_event(
+                kind,
+                LifecycleEvent::SessionStart,
+                &session_id,
+                None,
+                None,
+                100 + index as u64,
+            );
+            assert!(r.has_active_session(kind, &session_id));
+            assert!(!r.has_active_session(AgentKind::Codex, "missing"));
+            let other_kind = if kind == AgentKind::Claude {
+                AgentKind::Codex
+            } else {
+                AgentKind::Claude
+            };
+            assert!(!r.has_active_session(other_kind, &session_id));
+        }
+        assert!(!r.has_active_session(AgentKind::Codex, ""));
+        r.apply_event(
+            AgentKind::Codex,
+            LifecycleEvent::SessionEnd,
+            "session-1",
+            None,
+            None,
+            200,
+        );
+        assert!(!r.has_active_session(AgentKind::Codex, "session-1"));
     }
 
     #[test]

@@ -295,10 +295,12 @@ export interface PopupInit {
   project: string;
   /** workspace 目录名（标题区展示）。 */
   projectName: string;
-  /** 发起本次提问的 agent 家族（claude/codex/cursor）；空表示未识别，不显示 agent badge。 */
+  /** 发起本次提问的 agent 家族（claude/codex/cursor/grok）；空表示未识别，不显示 agent badge。 */
   agentKind?: string | null;
   /** 发起本次提问的 agent 进程 pid；「聚焦终端」用。 */
   agentPid?: number | null;
+  /** daemon 严格匹配到活动 Agent 记录的会话 ID；有值才显示 Agent Window 快捷入口。 */
+  agentConsoleSessionId?: string | null;
   /** 界面语言原始值（auto/en/zh）；弹窗据此 applyLanguage，免再走 get_settings()。 */
   language?: string;
   /** 语音识别语言（BCP-47，如 zh-CN；auto 跟随系统）。 */

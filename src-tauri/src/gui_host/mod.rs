@@ -32,7 +32,7 @@ pub enum HostMsg {
     /// 打开（或聚焦已存在的）指定窗口。`all` 仅历史窗口使用（默认展示全部项目）；
     /// `project` 按窗口类型复用：历史窗口=调用方项目 key（空串=未知项目，宿主里的历史窗口
     /// 默认过滤到该项目而非宿主自身 cwd）；设置窗口=初始定位 tab（如 "channel"）。
-    /// `session`/`agent`/`cwd` 仅插话窗口使用：目标 agent 的 session_id（窗口唯一键）、
+    /// `session` 用于 Agent 窗口预选或插话窗口唯一键；`agent`/`cwd` 仅插话窗口使用：
     /// 家族（头部胶囊）与工作目录（头部项目名）。`todo` 仅新建任务窗口使用：预选待办 id。
     /// 旧宿主忽略未知字段（serde default 兼容）。
     OpenWindow {
@@ -139,7 +139,8 @@ mod unix_impl {
     ///
     /// 流程：连宿主 → 发 `OpenWindow` → 返回；连不上则 `spawn --gui-host` 后轮询重连。
     /// 全程失败返回 `Err`，调用方据此回退到「本进程直接建窗」兜底（保证至少能打开窗口）。
-    /// `target` 仅插话窗口使用（session/agent/cwd）、`todo` 仅新建任务窗口使用，其余窗口传 `None`。
+    /// `target.session` 也用于 Agent 窗口预选；`target.agent/cwd` 仅插话窗口使用；
+    /// `todo` 仅新建任务窗口使用，其余窗口传 `None`。
     pub fn host_open(
         kind: WindowKind,
         all: bool,

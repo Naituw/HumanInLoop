@@ -14,6 +14,7 @@ import {
   confirmPopupReady,
   cancelPopup,
   openSettings,
+  openAgentConsole,
   openHistory,
   openTodos,
   openPath,
@@ -546,8 +547,9 @@ export function usePopupCore() {
   // 来源 agent：家族标识 + pid + 所在终端类型（决定 badge 是否可点击激活 tab）。
   const agentKind = ref("");
   const agentPid = ref<number | null>(null);
+  const agentConsoleSessionId = ref("");
   const agentTerminal = ref<string | null>(null);
-  // agent badge 文案：本地化家族名（Claude Code / Codex / Cursor）；未知家族回退原始标识。
+  // agent badge 文案：本地化家族名（Claude Code / Codex / Cursor / Grok）；未知家族回退原始标识。
   const agentLabel = computed(() => {
     const k = agentKind.value;
     if (!k) return "";
@@ -558,6 +560,9 @@ export function usePopupCore() {
   const agentFocusable = computed(
     () => !!agentPid.value && isFocusableTerminal(agentTerminal.value)
   );
+  const agentConsoleAvailable = computed(
+    () => agentConsoleSessionId.value.length > 0
+  );
 
   // 点击 agent badge：聚焦该 agent 所在终端的 tab（失败静默，仅日志）。
   async function onFocusAgentTerminal() {
@@ -567,6 +572,13 @@ export function usePopupCore() {
     } catch (err) {
       console.warn("focus agent terminal failed", err);
     }
+  }
+
+  // daemon 已严格匹配会话时才会显示；后端从自身状态取目标 session，前端不参与寻址。
+  function openAgentConsoleWindow() {
+    openAgentConsole().catch((err) => {
+      console.warn("open agent console failed", err);
+    });
   }
 
   // 点击 workspace badge：在文件管理器打开该目录。
@@ -1872,6 +1884,7 @@ export function usePopupCore() {
     projectPath.value = init.project;
     agentKind.value = init.agentKind ?? "";
     agentPid.value = init.agentPid ?? null;
+    agentConsoleSessionId.value = init.agentConsoleSessionId ?? "";
     createdAtMs.value = init.createdAtMs ?? 0;
     // 领用/渲染即刻校准 now，避免 tick 首帧前相对时间偏大。
     nowMs.value = Date.now();
@@ -2301,6 +2314,8 @@ export function usePopupCore() {
     // 顶栏动作
     pinned,
     togglePin,
+    agentConsoleAvailable,
+    openAgentConsoleWindow,
     openSettingsWindow,
     openTodosWindow,
     openHistoryWindow,

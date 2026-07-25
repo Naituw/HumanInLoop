@@ -154,6 +154,9 @@ export const updateTheme = (theme: ThemeMode) =>
 export const openSettings = (tab?: string) =>
   invoke<void>("open_settings", { tab: tab ?? null });
 
+/** 打开 Agent Window 并定位到 daemon 为当前弹窗严格匹配的会话。 */
+export const openAgentConsole = () => invoke<void>("open_agent_console");
+
 export const popupImTipVisible = () =>
   invoke<boolean>("popup_im_tip_visible");
 

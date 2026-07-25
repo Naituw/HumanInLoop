@@ -41,10 +41,12 @@ pub struct AppState {
     /// 当前项目 key（回复历史归类 / 历史窗口默认过滤）。Daemon 模式由调用方上送；
     /// 单进程 / 独立窗口在本进程计算（向上找 .git 根、回退 cwd）。
     pub project: String,
-    /// 发起本次提问的 agent 家族（claude/codex/cursor），仅弹窗（Daemon 上送）有值；其它窗口为 None。
+    /// 发起本次提问的 agent 家族（claude/codex/cursor/grok），仅弹窗（Daemon 上送）有值；其它窗口为 None。
     pub agent_kind: Option<String>,
     /// 发起本次提问的 agent 进程 pid，仅弹窗（Daemon 上送）有值；用于「聚焦终端」与终端可激活性判断。
     pub agent_pid: Option<u32>,
+    /// 已严格匹配到 AgentRegistry 活动记录的会话 ID。仅用于弹窗打开并定位 Agent 状态窗口。
+    pub agent_console_session_id: Option<String>,
     /// 提问创建时刻（epoch 毫秒）：弹窗相对时间的锚点。冷/单进程路径取弹窗构造时刻；GUI helper 取 `Show`
     /// 透传的创建时刻。非弹窗窗口（设置/历史/Agents/GuiHost）不使用，置 0。
     pub created_at_ms: u64,
@@ -467,6 +469,7 @@ fn run_gui_ask(request: AskRequest, config: AppConfig, messaging_active: bool) -
         project: crate::project::detect(),
         agent_kind: None,
         agent_pid: None,
+        agent_console_session_id: None,
         // 单进程弹窗无 daemon：以构造时刻为提问时间锚点。
         created_at_ms: crate::perf::now_ms() as u64,
     };
@@ -706,6 +709,7 @@ pub fn run_settings(config: AppConfig) -> ! {
         project: crate::project::detect(),
         agent_kind: None,
         agent_pid: None,
+        agent_console_session_id: None,
         created_at_ms: 0,
     };
     if let Err(e) = launch(state, View::Settings, None) {
@@ -735,6 +739,7 @@ pub fn run_history(project: String, all: bool, config: AppConfig) -> ! {
         project,
         agent_kind: None,
         agent_pid: None,
+        agent_console_session_id: None,
         created_at_ms: 0,
     };
     if let Err(e) = launch(state, View::History { all }, None) {
@@ -765,6 +770,7 @@ pub fn run_todos(project: String, config: AppConfig) -> ! {
         project,
         agent_kind: None,
         agent_pid: None,
+        agent_console_session_id: None,
         created_at_ms: 0,
     };
     if let Err(e) = launch(state, View::Todos, None) {
@@ -795,6 +801,7 @@ pub fn run_agents(config: AppConfig) -> ! {
         project: crate::project::detect(),
         agent_kind: None,
         agent_pid: None,
+        agent_console_session_id: None,
         created_at_ms: 0,
     };
     if let Err(e) = launch(state, View::Agents, None) {
@@ -830,6 +837,7 @@ pub fn run_gui_host(config: AppConfig) -> ! {
         project: crate::project::detect(),
         agent_kind: None,
         agent_pid: None,
+        agent_console_session_id: None,
         created_at_ms: 0,
     };
     if let Err(e) = launch(state, View::GuiHost, None) {
@@ -887,6 +895,7 @@ pub fn run_gui_helper(_endpoint: String, token: String, warm: bool) -> ! {
             project: String::new(),
             agent_kind: None,
             agent_pid: None,
+            agent_console_session_id: None,
             // 待命态：领用时由 `Show` 注入真正的创建时刻（popup_init 读 WarmPopup.show）。
             created_at_ms: 0,
         };
@@ -954,6 +963,7 @@ pub fn run_gui_helper(_endpoint: String, token: String, warm: bool) -> ! {
         project: show.project,
         agent_kind: show.agent_kind,
         agent_pid: show.agent_pid,
+        agent_console_session_id: show.agent_console_session_id,
         created_at_ms: show.created_at_ms,
     };
     let popup_ipc = PopupIpc {
@@ -1046,6 +1056,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             crate::commands::set_theme,
             crate::commands::update_theme,
             crate::commands::open_settings,
+            crate::commands::open_agent_console,
             crate::commands::popup_im_tip_visible,
             crate::commands::popup_im_tip_dismiss,
             crate::commands::apply_window_effect,
@@ -1507,7 +1518,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                 #[cfg(unix)]
                 View::Agents => {
                     let config = AppConfig::load_without_secrets();
-                    create_agents_window(app, &config, None)?;
+                    create_agents_window(app, &config, None, false)?;
                     // 订阅不在此处启动：daemon 一连上就推一帧立即快照，若现在就连，emit 会早于
                     // 前端注册 `agents-updated` 监听（Tauri 事件不缓存）而丢首帧，窗口空等到下一次
                     // 周期推送（15s 内随机）。改由前端挂载、监听就绪后经 `agents_start_subscription`
@@ -2087,8 +2098,8 @@ mod window_effect_tests {
     }
 }
 
-/// 「设置/历史窗口是否应浮于置顶弹窗之上」的进程内判定：当前进程内存在 popup 窗口且弹窗置顶。
-/// 仅适用于弹窗助手进程（弹窗与设置/历史同进程）；统一 GUI 宿主里弹窗在另一进程，需另行判定。
+/// 「辅助窗口是否应浮于置顶弹窗之上」的进程内判定：当前进程内存在 popup 窗口且弹窗置顶。
+/// 仅适用于弹窗助手进程（弹窗与辅助窗口同进程）；统一 GUI 宿主里弹窗在另一进程，需另行判定。
 pub(crate) fn popup_pin<R, M>(manager: &M, config: &AppConfig) -> bool
 where
     R: tauri::Runtime,
@@ -2268,12 +2279,13 @@ fn urlencode(s: &str) -> String {
 
 /// 创建（或聚焦已存在的）Agent 控制台窗口（spec D13 / gui-agent-console）。
 /// `session` 为可选目标会话（R4 可寻址打开）：已开窗经 `agents-goto` 事件选中，
-/// 新建经 URL 参数传递。
+/// 新建经 URL 参数传递。`pin_above_popup` 与设置/历史窗口同义，保证从置顶弹窗打开时可见。
 #[cfg(unix)]
 pub(crate) fn create_agents_window<R, M>(
     manager: &M,
     config: &AppConfig,
     session: Option<&str>,
+    pin_above_popup: bool,
 ) -> tauri::Result<()>
 where
     R: tauri::Runtime,
@@ -2281,6 +2293,7 @@ where
 {
     let session = session.filter(|s| !s.is_empty());
     if let Some(w) = manager.get_webview_window("agents") {
+        let _ = w.set_always_on_top(pin_above_popup);
         let _ = w.set_focus();
         if let Some(sid) = session {
             use tauri::Emitter;
@@ -2305,6 +2318,7 @@ where
         .inner_size(980.0, 640.0)
         .min_inner_size(760.0, 480.0)
         .center()
+        .always_on_top(pin_above_popup)
         .theme(theme);
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     let win = apply_surface(builder, window_bg, effective_window_effect).build()?;

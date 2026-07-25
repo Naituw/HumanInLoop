@@ -42,6 +42,7 @@
 | C14 | 完整会话视图（原型定稿 2026-07-25） | 详情区默认「最近动态」，标题行右侧按钮切「完整会话」（同位置变「返回」；切换会话自动回默认）；进入即定位最新，**每页 200 条向上分页**（顶部按钮加载更早，滚动位置锚定），标题行 sticky 显示已加载/总数；渲染：用户消息＝蓝底气泡、助手文字＝Markdown、工具调用＝足迹同款紧凑行；**AskHuman 为一等问答卡**（🙋 徽标＋提问＋蓝底「你」的回答；未回答显示占位）；多问题＝message 下 Q1/Q2/Qn 子块各带回答；长 message 4 行截断＋展开全文/收起。实现须把 `transcript_full::AskHumanBlock` 扩展为结构化 `{kind, message, questions[{text, answer}]}`（MCP `ask` 读 `questions` 参数；MCP `whats_next` 与 CLI `--whats-next` 标为独立 kind，由前端按界面语言显示固定问题「接下来做什么？」；两种 MCP 工具都从 Codex content block 解出与 CLI 相同的文本区块，答案按 `# Qn` 分组回填；普通 CLI 解析 `-q`），daemon 侧按游标分页 |
 | C15 | 项目 diff 状态条 + stage（原型定稿 2026-07-25） | 输入框上方一条**项目级**「未暂存变更」状态条（文件数/新增数/±行数；无变更不显示）；展开＝文件列表（M/A/D 徽标＋每文件 ±行数＋行内「暂存」），再点单文件展开 hunk 视图（红绿底色、面板内滚动 ≤300px）；**单文件暂存直接执行、「全部暂存」行内二次确认**——GUI 点按钮已是明确意图，不走跨渠道 Confirm（IM `/stage` 的 Confirm 不变量不变）；复用 `gitutil::DiffModel`，GUI Host 直调不经 daemon；需补单文件 `git add <path>`（现仅 stage_all） |
 | C16 | diff 刷新时机（性能，用户强调） | 大仓库 git 可能很慢，**不频繁调用**：两级懒加载——状态条只跑 `numstat`，hunk 在单文件展开时才跑 `git diff -- <path>`；刷新触发＝选中会话 / 展开面板 / 焦点会话帧变化且含编辑-写入步（防抖合并 ≥2s）/ 窗口重获焦点；调用互斥（上次未返回不重发）、带超时；**不做常驻轮询** |
+| C17 | Popup 反向快捷入口（2026-07-25） | 普通 ask、whats-next 与 Agent 权限确认共用的 Popup 顶栏，在 daemon 能把调用方 `(agent_kind, agent_session_id)` **精确命中活动 AgentRegistry 记录**时显示「在 Agent 窗口中查看」；按钮位于右侧动作区的**置顶右侧、待办左侧**。四家 Agent 统一口径，不按 pid / cwd / 家族模糊猜测。点击保持 Popup 打开，经 GUI Host 打开或聚焦全局唯一 Agent Window 并定位该 session；未追踪、无可信绑定、Windows 均隐藏。左侧 Agent badge 的「聚焦终端」语义不变 |
 
 ## 3. 布局示意
 
@@ -78,7 +79,8 @@
 
 1. 等待回答横幅 +「去回答」聚焦弹窗（C7）；
 2. 项目组头带待办数徽标；「＋」表单里待办可直接选为任务来源（新建任务窗口已支持）；
-3. 键盘导航：↑↓ 切会话、⌘N 新任务、⌘↵ 发送；窗口记住尺寸。
+3. Popup 在严格匹配会话时提供反向入口，形成「控制台 → 去回答」与「Popup → 查看会话」双向寻址（C17）；
+4. 键盘导航：↑↓ 切会话、⌘N 新任务、⌘↵ 发送；窗口记住尺寸。
 
 ## 5. 前瞻预留（C12，用户定案 2026-07-24）
 
@@ -92,7 +94,7 @@
 - **R3 通用分组模型**：边栏分组用 `{key, label, kind, items}` 通用形状；未来「其它提问」
   （归不到会话的提问）是新增一种组，不改渲染结构。
 - **R4 可寻址的窗口打开**：`open_agents(session?)` 携带可选目标会话（C10 本就需要）；
-  未来「有提问 → 激活窗口并定位会话」复用同一入口。
+  C17 的 Popup 反向入口已复用该能力；未来「有提问 → 自动激活窗口并定位会话」仍可复用。
 - **R5 可扩展的子订阅消息**：焦点会话推送用带类型标签的 detail 消息（非裸 `WatchFrame`），
   未来在同一订阅上附加提问负载只是加字段/变体。
 
@@ -147,3 +149,8 @@
   block 后解析 `# Qn` / `[selected_options]` / `[user_input]`，两种交互工具都呈现为
   AskHuman 问答卡；MCP 与 CLI 的 whats-next 卡由前端本地化补出固定问题「接下来做什么？」；
   低成本兼容旧 `answers[]` JSON。`show_last` / `todo_add` 保持普通工具行。
+- **2026-07-25（Popup 反向入口）**：Popup 顶栏新增条件 Agent Window 入口。daemon 只在
+  `agent_kind + agent_session_id` 命中活动 registry 记录时下发可寻址 session；Codex `_meta.threadId`、
+  Claude/Cursor 一次性 token、Grok 唯一 claim 与 CLI env 都进入同一门控，不做 pid/project 猜测。
+  入口覆盖 ask、whats-next 和权限确认，保持原 Agent badge 聚焦终端行为；打开窗口时沿用 Popup
+  置顶层级并通过 URL / `agents-goto` 定位会话。

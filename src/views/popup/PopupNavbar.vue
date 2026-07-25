@@ -32,6 +32,8 @@ const {
   onContentClick,
   pinned,
   togglePin,
+  agentConsoleAvailable,
+  openAgentConsoleWindow,
   openTodosWindow,
   openHistoryWindow,
   openSettingsWindow,
@@ -158,6 +160,19 @@ const {
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 17v5" />
           <path d="M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.8a2 2 0 0 0-1.1-1.8l-1.8-.9A2 2 0 0 1 15 10.8V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+        </svg>
+      </button>
+      <button
+        v-if="agentConsoleAvailable"
+        class="nav-btn"
+        type="button"
+        :title="t('popup.nav.agentConsole')"
+        :aria-label="t('popup.nav.agentConsole')"
+        @click="openAgentConsoleWindow"
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="4" width="18" height="16" rx="3" />
+          <path d="M7 13h2l2-4 3 7 2-4h2" />
         </svg>
       </button>
       <button
