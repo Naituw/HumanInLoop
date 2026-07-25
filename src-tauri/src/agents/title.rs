@@ -301,8 +301,12 @@ fn first_user_message(path: &Path) -> Option<String> {
             continue;
         }
         if let Some(text) = extract_text(&v) {
-            let t = text.trim();
-            if is_injected_block(t) {
+            // Cursor 把用户输入包在 `<timestamp>…</timestamp>` + `<user_query>` 里：先用
+            // transcript 同款清洗剥壳（其它家族原样通过），再判注入块，否则真实输入会被
+            // 「`<` 开头＝注入块」误滤而永远取不到标题（用户验收反馈）。
+            let (cleaned, _) = super::transcript_full::clean_user(&text);
+            let t = cleaned.trim();
+            if t.is_empty() || is_injected_block(t) {
                 continue; // 跳过注入块（见 is_injected_block）
             }
             return Some(t.to_string());
@@ -474,6 +478,22 @@ mod tests {
         ];
         std::fs::write(&f, lines.join("\n")).unwrap();
         assert_eq!(first_user_message(&f).as_deref(), Some("实际的第一句话"));
+    }
+
+    /// Cursor 把用户输入包在 `<timestamp>…</timestamp>` + `<user_query>` 里（用户验收反馈：
+    /// 全部消息被当注入块滤掉 → 永远「未命名」）：回退路径须剥壳后取到真实问题。
+    #[test]
+    fn first_user_message_unwraps_cursor_timestamp_and_user_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("s.jsonl");
+        let lines = [
+            r#"{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Friday, Jul 24, 2026, 11:07 PM (UTC+8)</timestamp>\n<user_query>\n我想优化一下 agent 状态窗口\n</user_query>"}]}}"#,
+        ];
+        std::fs::write(&f, lines.join("\n")).unwrap();
+        assert_eq!(
+            first_user_message(&f).as_deref(),
+            Some("我想优化一下 agent 状态窗口")
+        );
     }
 
     #[test]
