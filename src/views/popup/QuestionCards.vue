@@ -21,6 +21,7 @@ const {
   setActive,
   setCardRef,
   setSentinelRef,
+  dropTargetQ,
 } = usePopupContext();
 </script>
 
@@ -30,6 +31,7 @@ const {
     :key="qi"
     :ref="(el) => setCardRef(el as HTMLElement | null, qi)"
     class="q-card"
+    :class="{ 'drop-target': dropTargetQ === qi }"
     :data-q-index="qi"
     @mousedown="setActive(qi, false)"
   >

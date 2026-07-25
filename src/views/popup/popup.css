@@ -860,6 +860,12 @@
 .q-card.flash::before {
   animation: q-flash 0.55s ease-out;
 }
+/* 拖拽悬停：复用闪光层做常显高亮 + 虚线描边，指明附件会落进哪一题（松手即消失）。 */
+.q-card.drop-target::before {
+  opacity: 1;
+  outline: 1.5px dashed color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: -1.5px;
+}
 @keyframes q-flash {
   from {
     opacity: 1;

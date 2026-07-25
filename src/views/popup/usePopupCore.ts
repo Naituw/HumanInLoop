@@ -28,6 +28,7 @@ import {
   todosRemove,
 } from "../../lib/ipc";
 import { isFocusableTerminal } from "../../lib/terminals";
+import { isWindows } from "../../lib/platform";
 import { matchShortcut } from "../../lib/shortcut";
 import { applyLanguage } from "../../i18n";
 import { renderMarkdown, handleCodeCopyClick } from "../../lib/markdown";
@@ -585,6 +586,8 @@ export function usePopupCore() {
   // 关 / 单问题 → 旧版「一次一题 + 上/下一步」（sequential）。
   const verticalEnabled = ref(false);
   const verticalMode = computed(() => verticalEnabled.value && isMulti.value);
+  // 拖拽悬停中的目标题（纵向布局才有意义）：驱动卡片高亮，松手前即可看出落点。
+  const dropTargetQ = ref<number | null>(null);
   // Passive scrolling only changes `current` (the viewport card). While an editor retains DOM
   // focus, every user action stays owned by that editor until an explicit cross-question action.
   const actionQuestionIndex = computed(() =>
@@ -1045,15 +1048,37 @@ export function usePopupCore() {
   // DOM 级 drop 仅阻止默认（真正落盘走原生 onDragDropEvent，带落点坐标）。
   function onDrop(_e: DragEvent) {}
 
-  // 原生拖放落点 → 命中的问题卡片索引（physical 坐标需除以 DPR 转 CSS 像素）。
-  function questionAtPoint(physX: number, physY: number): number {
+  /**
+   * 落点坐标 → 命中的问题卡片索引，未命中返回 null。
+   *
+   * Tauri 把落点标注为 `PhysicalPosition`，但各平台底层给的单位并不一致：macOS 的
+   * `draggingLocation()` 与 Linux 的 GTK 控件坐标都是逻辑像素（与 CSS 像素同尺度），只有
+   * Windows 的 IDropTarget 给的是真·物理像素。所以先按平台选一种解释，再用另一种兜底——
+   * 上游哪天统一了单位也不至于又只能拖到第一题。
+   */
+  function cardIndexAt(x: number, y: number): number | null {
+    const el = document.elementFromPoint(x, y) as HTMLElement | null;
+    const card = el?.closest?.(".q-card") as HTMLElement | null;
+    if (card?.dataset.qIndex == null) return null;
+    const idx = Number(card.dataset.qIndex);
+    return Number.isNaN(idx) ? null : idx;
+  }
+
+  function questionAtPoint(x: number, y: number): number {
     if (!verticalMode.value) return current.value;
     const dpr = window.devicePixelRatio || 1;
-    const el = document.elementFromPoint(physX / dpr, physY / dpr) as HTMLElement | null;
-    const card = el?.closest?.(".q-card") as HTMLElement | null;
-    if (card?.dataset.qIndex != null) {
-      const idx = Number(card.dataset.qIndex);
-      if (!Number.isNaN(idx)) return idx;
+    const candidates: [number, number][] = isWindows
+      ? [
+          [x / dpr, y / dpr],
+          [x, y],
+        ]
+      : [
+          [x, y],
+          [x / dpr, y / dpr],
+        ];
+    for (const [cx, cy] of candidates) {
+      const idx = cardIndexAt(cx, cy);
+      if (idx != null) return idx;
     }
     return current.value;
   }
@@ -2014,13 +2039,25 @@ export function usePopupCore() {
     void loadTodos();
     await attach.initAttachmentPreviewListeners();
     unlistenDrop = await getCurrentWebview().onDragDropEvent((event) => {
-      if (event.payload.type !== "drop") return;
+      // 拖出自家附件时不接管（那是往外拖，不是往里放）。
       if (attach.draggingOut.value) {
-        attach.draggingOut.value = false;
+        if (event.payload.type === "drop") attach.draggingOut.value = false;
+        dropTargetQ.value = null;
         return;
       }
+      if (event.payload.type === "over") {
+        const pos = event.payload.position;
+        // 纵向布局下高亮即将落入的那张卡，松手前就能看出附件会进哪一题。
+        dropTargetQ.value = verticalMode.value
+          ? questionAtPoint(pos?.x ?? 0, pos?.y ?? 0)
+          : null;
+        return;
+      }
+      const wasOver = dropTargetQ.value;
+      dropTargetQ.value = null;
+      if (event.payload.type !== "drop") return;
       const pos = event.payload.position;
-      const qIndex = questionAtPoint(pos?.x ?? 0, pos?.y ?? 0);
+      const qIndex = wasOver ?? questionAtPoint(pos?.x ?? 0, pos?.y ?? 0);
       addDroppedPaths(event.payload.paths, qIndex);
     });
     // 设置变更实时生效（同进程内设置窗口保存后广播 general 配置）。
@@ -2221,6 +2258,7 @@ export function usePopupCore() {
     onScroll,
     onContentWheel,
     onDrop,
+    dropTargetQ,
     setActive,
     goPrev,
     goNext,
