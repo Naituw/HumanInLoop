@@ -565,8 +565,9 @@ fn menu_signature(
         data.agents_idle,
         data.im_connections.join(","),
         data.update_available as u8,
-        // update_latest 仅在 update_available 时入签名，避免无更新时的噪声变化触发刷新。
-        if data.update_available {
+        // Available / pending rows both name the target version. Ignore the cached remote value
+        // only when neither row is visible, avoiding irrelevant menu refreshes.
+        if data.update_available || data.pending {
             data.update_latest.as_str()
         } else {
             ""
@@ -689,12 +690,25 @@ fn build_specs(
             i18n::tr(lang, "tray.version").replace("{v}", &data.version),
             false,
         ));
+    }
+    // Keep the running daemon version truthful, then explain directly underneath why it can still
+    // be old after the new binary was installed. The exact reason comes from daemon drain state.
+    if data.pending {
+        nodes.push(Node::item(
+            "st.update_pending",
+            pending_update_text(up, data, lang),
+            false,
+        ));
+    }
+    if up {
         nodes.push(Node::item(
             "st.uptime",
             i18n::tr(lang, "tray.uptime").replace("{d}", &fmt_uptime(data.uptime_secs)),
             false,
         ));
-        if data.draining {
+        // A pending update has a more specific drain explanation immediately below the version.
+        // Keep this generic row for manual stop/restart drains.
+        if data.draining && !data.pending {
             nodes.push(Node::item(
                 "st.draining",
                 i18n::tr(lang, "tray.draining").to_string(),
@@ -728,13 +742,6 @@ fn build_specs(
         nodes.push(Node::item(
             "st.update_avail",
             i18n::tr(lang, "tray.updateAvailable").replace("{v}", &data.update_latest),
-            false,
-        ));
-    }
-    if data.pending {
-        nodes.push(Node::item(
-            "st.update_pending",
-            i18n::tr(lang, "tray.updatePending").to_string(),
             false,
         ));
     }
@@ -950,6 +957,26 @@ fn build_specs(
         ));
     }
     nodes
+}
+
+fn pending_update_text(up: bool, data: &TrayData, lang: Lang) -> String {
+    let version = if data.update_latest.trim().is_empty() {
+        i18n::tr(lang, "tray.updateTargetFallback").to_string()
+    } else {
+        format!("v{}", data.update_latest)
+    };
+    let key = if !up {
+        "tray.updatePendingNextStart"
+    } else if data.draining && data.active_requests > 0 {
+        "tray.updatePendingWaiting"
+    } else if data.draining {
+        "tray.updatePendingRestarting"
+    } else {
+        "tray.updatePendingSwitching"
+    };
+    i18n::tr(lang, key)
+        .replace("{v}", &version)
+        .replace("{n}", &data.active_requests.to_string())
 }
 
 fn update_action_text(action: &UpdateActionState, lang: Lang) -> Option<String> {
@@ -1188,6 +1215,9 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
                             *state.update_action.lock().unwrap() = UpdateActionState::Idle;
                         }
                         refresh_on_main(&app);
+                        // Persisted state tells every open surface that the update is pending; the
+                        // Hello fingerprint check immediately starts graceful daemon replacement.
+                        crate::client::notify_update_applied().await;
                         refresh_binary_on_main(&app);
                     }
                     Err(error) => {
@@ -1872,6 +1902,13 @@ mod tests {
             .unwrap_or_else(|| panic!("missing menu item {key}"))
     }
 
+    fn has_item(nodes: &[Node], key: &str) -> bool {
+        nodes.iter().any(|node| match node {
+            Node::Item { key: node_key, .. } => node_key == key,
+            _ => false,
+        })
+    }
+
     #[test]
     fn cached_update_is_available_without_daemon() {
         let state = crate::update::state::UpdateState {
@@ -1999,6 +2036,63 @@ mod tests {
         );
         assert!(!item(&nodes, "check_update").1);
         assert!(!item(&nodes, "apply_update").1);
+    }
+
+    #[test]
+    fn pending_update_explains_why_the_running_version_is_still_old() {
+        let nodes = build_specs(
+            true,
+            Lang::En,
+            &TrayData {
+                running: true,
+                version: "1.1.0".to_string(),
+                active_requests: 2,
+                draining: true,
+                update_latest: "1.2.0".to_string(),
+                pending: true,
+                ..Default::default()
+            },
+            &[],
+            false,
+            false,
+            &UpdateActionState::Idle,
+        );
+
+        assert_eq!(item(&nodes, "st.version"), ("Version 1.1.0", false));
+        assert_eq!(
+            item(&nodes, "st.update_pending"),
+            (
+                "↑ v1.2.0 installed — waiting for 2 in-flight request(s) before restarting daemon (won't interrupt them)",
+                false,
+            )
+        );
+        assert!(!has_item(&nodes, "st.draining"));
+    }
+
+    #[test]
+    fn pending_update_reason_tracks_restart_stage() {
+        let data = TrayData {
+            update_latest: "1.2.0".to_string(),
+            pending: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            pending_update_text(true, &data, Lang::En),
+            "↑ v1.2.0 installed — waiting for daemon to restart…"
+        );
+        assert_eq!(
+            pending_update_text(false, &data, Lang::En),
+            "↑ v1.2.0 installed — updated daemon starts on next use"
+        );
+
+        let restarting = TrayData {
+            draining: true,
+            ..data
+        };
+        assert_eq!(
+            pending_update_text(true, &restarting, Lang::Zh),
+            "↑ v1.2.0 已安装 — daemon 正在重启…"
+        );
     }
 
     #[test]

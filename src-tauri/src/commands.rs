@@ -3209,6 +3209,8 @@ pub async fn update_apply(app: AppHandle) -> Result<(), String> {
     });
     updater.apply(Some(cb)).await.map_err(|e| e.to_string())?;
     crate::update::state::set_pending(true);
+    #[cfg(unix)]
+    crate::client::notify_update_applied().await;
     let _ = app.emit("update_apply_finished", ());
     Ok(())
 }

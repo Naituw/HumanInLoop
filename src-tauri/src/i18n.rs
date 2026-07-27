@@ -1245,10 +1245,26 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "tray.minutesAgo" => pick(lang, "{n} min ago", "{n} 分钟前"),
         "tray.hoursAgo" => pick(lang, "{n} h ago", "{n} 小时前"),
         "tray.updateAvailable" => pick(lang, "● Update available ({v})", "● 有可用更新（{v}）"),
-        "tray.updatePending" => pick(
+        "tray.updateTargetFallback" => pick(lang, "New version", "新版本"),
+        "tray.updatePendingWaiting" => pick(
             lang,
-            "Update staged — applies after in-flight requests finish",
-            "更新已就绪 — 在途请求答完后生效",
+            "↑ {v} installed — waiting for {n} in-flight request(s) before restarting daemon (won't interrupt them)",
+            "↑ {v} 已安装 — 等待 {n} 个在途请求完成后重启 daemon（不会中断作答）",
+        ),
+        "tray.updatePendingRestarting" => pick(
+            lang,
+            "↑ {v} installed — restarting daemon…",
+            "↑ {v} 已安装 — daemon 正在重启…",
+        ),
+        "tray.updatePendingSwitching" => pick(
+            lang,
+            "↑ {v} installed — waiting for daemon to restart…",
+            "↑ {v} 已安装 — 正在等待 daemon 重启…",
+        ),
+        "tray.updatePendingNextStart" => pick(
+            lang,
+            "↑ {v} installed — updated daemon starts on next use",
+            "↑ {v} 已安装 — 下次使用时启动新版 daemon",
         ),
         // 操作区。
         "tray.openSettings" => pick(lang, "Settings", "设置"),

@@ -136,6 +136,17 @@ pub async fn notify_update_state_changed() {
     let _ = ipc::write_msg(&mut writer, &ClientMsg::RefreshUpdateState).await;
 }
 
+/// Notify an already-running daemon that an in-app update replaced the on-disk binary.
+///
+/// First reload the persisted update snapshot so open popups and tray subscribers see `pending`,
+/// then send a normal Hello. The Hello makes the daemon compare its startup fingerprint with the
+/// new on-disk image immediately: it drains when requests are active and exits at once otherwise.
+/// Unlike [`ensure_running`], this deliberately does not start a daemon that is currently stopped.
+pub async fn notify_update_applied() {
+    notify_update_state_changed().await;
+    let _ = hello_status().await;
+}
+
 /// GUI 启动新任务后把活跃槽切到 popup（spec gui-agent-task-launch G11）。best-effort、不拉起
 /// daemon：daemon 在跑经 IPC 切（含旧渠道反激活回执 / auto-end-watch）；未运行则直接写
 /// `auto-channel.json`（daemon 启动时 `load_active` 读回）。
