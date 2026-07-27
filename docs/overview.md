@@ -264,7 +264,7 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 四种 IM 共用 Daemon 内的入站命令层，平台模块只负责传输、渲染和回调；Daemon 存活时即持续监听消息，不要求已有提问。详细能力与代码入口见 `docs/overview-im-commands.md`。
 
 - `channels.autoActivation` 关闭时向所有启用 IM 投放，开启时以当前活跃槽为主；切槽会补推在途请求，watch 渠道仍会加入对应 Agent 新提问的投放并集。
-- 共享命令包括 `/new`、`/help`、`/here`、`/status`、`/watch`、`/unwatch`、`/msg`、`/msg-clear`、`/diff`、`/stage`、`/transcript`、`/todo`、`/todo-rm` 和 `/todo-auto`；Slack 使用 `!` 作为可输入的备用前缀。
+- 共享命令包括 `/new`、`/help`、`/here`、`/status`、`/watch`、`/unwatch`、`/msg`、`/msg-clear`、`/yolo`、`/diff`、`/stage`、`/transcript`、`/todo`、`/todo-rm` 和 `/todo-auto`；Slack 使用 `!` 作为可输入的备用前缀。
 - macOS 开启 `agentTasks` 后，`/new` 依次选择 workspace、已就绪 Agent 与权限，在新的 Terminal.app 窗口启动真实交互会话；Daemon 只负责启动前流程，之后复用 lifecycle/watch。
 - macOS 本地 GUI 亦可创建任务（不要求开启 `agentTasks`）：待办窗口行内按钮与托盘「新建 Agent 任务」打开统一的新建任务窗口，就绪判定与启动链路与 `/new` 相同；见 `docs/specs/gui-agent-task-launch.md`。
 - Agent 数字编号在 daemon 生命周期内稳定，供状态、关注、插话和 Git/会话导出共用；无参目标选择复用跨渠道单选卡模型。

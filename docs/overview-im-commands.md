@@ -22,7 +22,9 @@
 ## 命令地图
 
 - `/new`：macOS 上依次选择最近 workspace、三重就绪的 Agent 和权限，并通过渠道原生输入控件提交任务；Slack 显示为 `!new`。所选 workspace 对应项目有 TODO 时，飞书/钉钉/Slack 可在最终输入卡直接选择，Telegram 先选手动输入或 TODO；选择 TODO 后可附加补充文字。Terminal.app 成功打开后才把 TODO 记为已执行，来源渠道默认自动 watch 新会话。
-- `/help`、`/?`：按当前配置和是否有在途问题生成可用命令与作答提示。
+- `/help`、`/?`：按当前配置和是否有在途问题生成分组命令与作答提示；飞书用消息卡片、
+  Slack 用 Block Kit、钉钉用 `sampleMarkdown`、Telegram 用 HTML，富文本失败回退分组纯文本。
+  规格见 `docs/specs/im-help-rich-text.md`。
 - `/here`：把当前 IM 设为活跃槽。
 - `/status [编号]`：无编号查看 Agent 列表；带编号查看最近助手文字和当前/最近工具活动。
 - `/watch [编号]`：创建或替换实时状态卡；无编号时可用单选卡选择 Agent。
@@ -30,6 +32,7 @@
 - `/msg`：唯一关注目标可发送时直接打开一次性输入卡，否则先选工作中的非 Grok Agent（按钮为“选择”）；输入卡展示目标与待送达预览。飞书/Slack 同卡变身并定格，钉钉先终态化选择卡再进入输入，Telegram 使用 ForceReply，完成后删提示并回复短终态。
 - `/msg <编号>`：工作中目标打开一次性输入卡，空闲目标查看待送达内容；`/msg-clear <编号>` 撤回待送达内容。
 - `/msg <编号> <内容>`：直接给工作中的非 Grok Agent 追加插话；`/msg <内容>` 保留按关注关系直发或带正文选目标的快捷流。
+- `/yolo [off [编号]]`：列出开启 YOLO 的 Codex 会话并提供关闭入口；`off` 可关闭唯一会话或指定 Agent 编号。
 - `/diff [编号]`：导出目标 workspace 的 unstaged 与 untracked 变更摘要和附件。
 - `/stage [编号]`：显示变更确认卡，确认后执行 `git add -A`；不会绕过 Confirm 直接暂存。
 - `/transcript [编号]`：按渠道适配的附件格式导出完整会话。

@@ -9,6 +9,8 @@
 //! - 终态为**静态** blocks（无交互控件，回显已选项与补充文字 + 状态行），由 `chat.update` 置入。
 
 use super::markdown;
+use crate::autochannel::{self, HelpQuestionState, HelpView};
+use crate::i18n::Lang;
 use crate::models::OptionItem;
 use serde_json::{json, Value};
 
@@ -247,6 +249,66 @@ pub fn build_message_blocks(header: &str, body: &str, is_markdown: bool) -> Valu
         blocks.push(body_section(body, is_markdown));
     }
     Value::Array(blocks)
+}
+
+/// Build grouped Block Kit help. The top-level fallback text is supplied by the caller.
+pub fn build_help_blocks(view: &HelpView, lang: Lang) -> Value {
+    let mut blocks = vec![
+        header_block(&view.title),
+        mrkdwn_section(&markdown::escape(&view.intro)),
+    ];
+    for section in &view.sections {
+        let mut text = format!("*{}*", markdown::escape(&section.title));
+        for command in &section.commands {
+            text.push_str("\n• `");
+            text.push_str(&markdown::escape(&command.syntax));
+            text.push_str("` — ");
+            text.push_str(&markdown::escape(&command.description));
+            if let Some(phrase) = &command.phrase {
+                text.push_str("  _· ");
+                text.push_str(&markdown::escape(&autochannel::help_phrase_hint(
+                    phrase, lang,
+                )));
+                text.push('_');
+            }
+        }
+        blocks.push(mrkdwn_section(&text));
+    }
+    blocks.push(json!({ "type": "divider" }));
+
+    let state = match &view.question_state {
+        HelpQuestionState::Active { instruction } => instruction,
+        HelpQuestionState::None { message } => message,
+    };
+    let mut footer = format!("*{}*", markdown::escape(state));
+    if let Some(hint) = &view.switch_hint {
+        footer.push('\n');
+        footer.push_str(&markdown::escape(hint));
+    }
+    blocks.push(json!({
+        "type": "context",
+        "elements": [ { "type": "mrkdwn", "text": footer } ],
+    }));
+    Value::Array(blocks)
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::*;
+
+    #[test]
+    fn help_blocks_use_sections_bullets_code_and_emphasis() {
+        let view = autochannel::help_view(true, false, true, "!", Lang::Zh);
+        let blocks = build_help_blocks(&view, Lang::Zh);
+        let array = blocks.as_array().unwrap();
+        assert_eq!(array[0]["type"], "header");
+        assert!(array.iter().any(|block| block["type"] == "divider"));
+        let serialized = blocks.to_string();
+        assert!(serialized.contains("*Agent 管理*"));
+        assert!(serialized.contains("• `!status [编号]`"));
+        assert!(serialized.contains("_· 直接说「状态」_"));
+        assert!(serialized.contains("• `!msg-clear &lt;编号&gt;`"));
+    }
 }
 
 /// 终态卡片入参。

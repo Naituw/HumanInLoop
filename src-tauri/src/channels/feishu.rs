@@ -10,7 +10,7 @@
 //! 编排逻辑复用 `conversation::run_conversation`，本文件提供传输实现 `FeishuSession`
 //! （`MessagingChannel`）+ 薄外层 `FeishuChannel`。
 
-use super::conversation::{run_conversation, MessagingChannel, QuestionCtx};
+use super::conversation::{run_conversation, InboundReply, MessagingChannel, QuestionCtx};
 use super::{Channel, ConversationOrigin, Interruption, Preemption, ResultSink};
 use crate::config::FeishuChannelConfig;
 use crate::feishu::card;
@@ -27,6 +27,21 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Message（正文+附件）发完到发第一道题之间的等待时长，保证「先 message 后题目」的视觉顺序。
 const MESSAGE_SETTLE_DELAY: Duration = Duration::from_millis(500);
+
+async fn send_inbound_reply(client: &FeishuClient, reply: InboundReply, lang: Lang) {
+    match reply {
+        InboundReply::Text(text) => {
+            let _ = client.send_text(&text).await;
+        }
+        InboundReply::Help(view) => {
+            let rich = card::build_help_card(&view, lang);
+            if client.send_card(&rich).await.is_err() {
+                let plain = crate::autochannel::render_help_plain(&view, lang);
+                let _ = client.send_text(&plain).await;
+            }
+        }
+    }
+}
 
 /// Router 归属：单进程自建一个仅挂本会话的 Router；Daemon 复用共享且常热的 Router。
 #[derive(Clone)]
@@ -382,7 +397,7 @@ impl MessagingChannel for FeishuSession {
                         ) {
                             let ack_client = client.clone();
                             tauri::async_runtime::spawn(async move {
-                                let _ = ack_client.send_text(&reply).await;
+                                send_inbound_reply(&ack_client, reply, lang).await;
                             });
                         }
                         // 并发下载：spawn 后立刻回到循环收事件，避免大文件下载卡住提交处理。
@@ -486,7 +501,7 @@ async fn ask_question_text(
                         "feishu",
                         ctx.lang,
                     ) {
-                        let _ = client.send_text(&reply).await;
+                        send_inbound_reply(client, reply, ctx.lang).await;
                     }
                     events.clear_active(None, open_id);
                     return Some(answer);
@@ -499,7 +514,7 @@ async fn ask_question_text(
                         "feishu",
                         ctx.lang,
                     ) {
-                        let _ = client.send_text(&reply).await;
+                        send_inbound_reply(client, reply, ctx.lang).await;
                     }
                 }
             }

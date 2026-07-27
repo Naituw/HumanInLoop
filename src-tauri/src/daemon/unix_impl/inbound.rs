@@ -1450,7 +1450,7 @@ pub(super) fn task_source_target(config: &AppConfig, channel_id: &str) -> String
 ///   否则开关开按现状切槽（切换则回激活回执），未切换/未开则回引导（liveness）。
 /// - 非文本消息（`text=None`）：无活动在途提问时回引导（有则交会话确认附件）。
 pub(super) async fn handle_inbound(state: &Arc<ServerState>, channel_id: &str, text: Option<&str>) {
-    use crate::autochannel::{classify, help_text, Command, Parsed};
+    use crate::autochannel::{classify, help_view, Command, Parsed};
     let lang = Lang::current();
     let config = state.config_snapshot();
     let auto = config.channels.auto_activation;
@@ -1464,10 +1464,11 @@ pub(super) async fn handle_inbound(state: &Arc<ServerState>, channel_id: &str, t
     let Some(text) = text else {
         // 非文本消息（图片/文件）：有活动提问 → 交渠道会话确认；否则回引导（liveness）。
         if !has_active_question_on(state, channel_id) {
-            let _ = reply_channel_text(
+            let _ = reply_channel_help(
                 channel_id,
                 &config,
-                &help_text(auto, false, watch_cmd, prefix, lang),
+                &help_view(auto, false, watch_cmd, prefix, lang),
+                lang,
             )
             .await;
         }
@@ -1553,10 +1554,11 @@ pub(super) async fn handle_inbound(state: &Arc<ServerState>, channel_id: &str, t
             if !auto {
                 // 关态无「活跃槽」概念：回引导（替代旧的静默忽略）。
                 let has_q = has_active_question_on(state, channel_id);
-                let _ = reply_channel_text(
+                let _ = reply_channel_help(
                     channel_id,
                     &config,
-                    &help_text(auto, has_q, watch_cmd, prefix, lang),
+                    &help_view(auto, has_q, watch_cmd, prefix, lang),
+                    lang,
                 )
                 .await;
                 return;
@@ -1676,10 +1678,11 @@ pub(super) async fn handle_inbound(state: &Arc<ServerState>, channel_id: &str, t
         }
         Parsed::Command(Command::Help) | Parsed::UnknownCommand => {
             let has_q = has_active_question_on(state, channel_id);
-            let _ = reply_channel_text(
+            let _ = reply_channel_help(
                 channel_id,
                 &config,
-                &help_text(auto, has_q, watch_cmd, prefix, lang),
+                &help_view(auto, has_q, watch_cmd, prefix, lang),
+                lang,
             )
             .await;
         }
@@ -1700,10 +1703,11 @@ pub(super) async fn handle_inbound(state: &Arc<ServerState>, channel_id: &str, t
             if has_q {
                 return;
             }
-            let _ = reply_channel_text(
+            let _ = reply_channel_help(
                 channel_id,
                 &config,
-                &help_text(auto, false, watch_cmd, prefix, lang),
+                &help_view(auto, false, watch_cmd, prefix, lang),
+                lang,
             )
             .await;
         }
@@ -1910,6 +1914,80 @@ pub(super) async fn reply_channel_text(
                 .map_err(|e| e.to_string())
         }
         _ => Err(format!("reply unsupported for channel: {}", channel_id)),
+    }
+}
+
+/// Send structured help using each channel's richest native message type, then retry once as
+/// grouped plain text if the rich payload is rejected.
+pub(super) async fn reply_channel_help(
+    channel_id: &str,
+    config: &AppConfig,
+    view: &crate::autochannel::HelpView,
+    lang: Lang,
+) -> Result<(), String> {
+    let plain = crate::autochannel::render_help_plain(view, lang);
+    match channel_id {
+        "feishu" => {
+            let client = crate::feishu::client::FeishuClient::new(&config.channels.feishu)
+                .map_err(|e| e.to_string())?;
+            let card = crate::feishu::card::build_help_card(view, lang);
+            match client.send_card(&card).await {
+                Ok(_) => Ok(()),
+                Err(_) => client
+                    .send_text(&plain)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+            }
+        }
+        "dingding" => {
+            let client = crate::dingtalk::client::DingTalkClient::new(&config.channels.dingding)
+                .map_err(|e| e.to_string())?;
+            let markdown = crate::dingtalk::help::render(view, lang);
+            match client.send_oto_markdown(&view.title, &markdown).await {
+                Ok(()) => Ok(()),
+                Err(_) => client
+                    .send_oto_text(&plain)
+                    .await
+                    .map_err(|e| e.to_string()),
+            }
+        }
+        "slack" => {
+            let client = crate::slack::client::SlackClient::new(&config.channels.slack)
+                .map_err(|e| e.to_string())?;
+            let channel = client.open_dm().await.map_err(|e| e.to_string())?;
+            let blocks = crate::slack::blockkit::build_help_blocks(view, lang);
+            match client.post_message(&channel, Some(&blocks), &plain).await {
+                Ok(_) => Ok(()),
+                Err(_) => client
+                    .post_text(&channel, &plain)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+            }
+        }
+        "telegram" => {
+            let tg = &config.channels.telegram;
+            let client = crate::telegram::TelegramClient::new(
+                tg.bot_token.clone(),
+                tg.chat_id.clone(),
+                tg.api_base_url.clone(),
+            )
+            .map_err(|e| e.to_string())?;
+            let html = crate::telegram::help::render(view, lang);
+            match client.send_message(&html, Some("HTML"), None).await {
+                Ok(_) => Ok(()),
+                Err(_) => client
+                    .send_message(&plain, None, None)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+            }
+        }
+        _ => Err(format!(
+            "help reply unsupported for channel: {}",
+            channel_id
+        )),
     }
 }
 
@@ -2549,5 +2627,85 @@ mod task_input_tests {
         assert_eq!(task_todo_label(&entry, Lang::En), "Run todo: fix login");
         entry.auto = true;
         assert_eq!(task_todo_label(&entry, Lang::Zh), "执行待办：⚡ fix login");
+    }
+}
+
+#[cfg(test)]
+mod help_transport_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn read_request(stream: &mut TcpStream) -> String {
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let header_end = loop {
+            let count = stream.read(&mut buffer).await.unwrap();
+            assert!(count > 0);
+            bytes.extend_from_slice(&buffer[..count]);
+            if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+        let headers = String::from_utf8_lossy(&bytes[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("content-length: ")
+                    .or_else(|| line.strip_prefix("Content-Length: "))
+            })
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        while bytes.len() < header_end + content_length {
+            let count = stream.read(&mut buffer).await.unwrap();
+            assert!(count > 0);
+            bytes.extend_from_slice(&buffer[..count]);
+        }
+        String::from_utf8(bytes[header_end..header_end + content_length].to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn telegram_help_retries_plain_text_after_rich_rejection() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let server = tokio::spawn(async move {
+            for response in [
+                r#"{"ok":false,"description":"bad html"}"#,
+                r#"{"ok":true,"result":{"message_id":1}}"#,
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = read_request(&mut stream).await;
+                captured.lock().unwrap().push(request);
+                let wire = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.len(),
+                    response
+                );
+                stream.write_all(wire.as_bytes()).await.unwrap();
+            }
+        });
+
+        let mut config = AppConfig::default();
+        config.channels.telegram.bot_token = "test-token".into();
+        config.channels.telegram.chat_id = "123".into();
+        config.channels.telegram.api_base_url = format!("http://{address}");
+        let view = crate::autochannel::help_view(true, false, true, "/", Lang::Zh);
+        reply_channel_help("telegram", &config, &view, Lang::Zh)
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        let bodies = requests.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        let rich: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+        assert_eq!(rich["parse_mode"], "HTML");
+        assert!(rich["text"].as_str().unwrap().contains("<code>"));
+        let plain: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+        assert!(plain.get("parse_mode").is_none());
+        assert!(plain["text"].as_str().unwrap().contains("• /status [编号]"));
+        assert!(!plain["text"].as_str().unwrap().contains("<code>"));
     }
 }

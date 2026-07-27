@@ -3,7 +3,7 @@
 //! 编排逻辑（单/多题、收集答案、投递）已上移到 `channels::conversation::run_conversation`；
 //! 本文件提供传输相关实现 `TelegramSession`（`MessagingChannel`）+ 薄外层 `TelegramChannel`。
 
-use super::conversation::{run_conversation, MessagingChannel, QuestionCtx};
+use super::conversation::{run_conversation, InboundReply, MessagingChannel, QuestionCtx};
 use super::{Channel, ConversationOrigin, Interruption, Preemption, ResultSink};
 use crate::config::TelegramChannelConfig;
 use crate::i18n::{self, Lang};
@@ -19,6 +19,25 @@ const SUBMIT_CALLBACK: &str = "submit";
 
 /// 事件源轮询间隔：每隔此时长从 Router 句柄取一次事件，以便分片检查抢答信号。
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+async fn send_inbound_reply(client: &TelegramClient, reply: InboundReply, lang: Lang) {
+    match reply {
+        InboundReply::Text(text) => {
+            let _ = client.send_message(&text, None, None).await;
+        }
+        InboundReply::Help(view) => {
+            let html = crate::telegram::help::render(&view, lang);
+            if client
+                .send_message(&html, Some("HTML"), None)
+                .await
+                .is_err()
+            {
+                let plain = crate::autochannel::render_help_plain(&view, lang);
+                let _ = client.send_message(&plain, None, None).await;
+            }
+        }
+    }
+}
 
 /// Router 归属：单进程自建一个仅挂本会话的 Router；Daemon 复用共享且常热的 Router。
 #[derive(Clone)]
@@ -536,7 +555,7 @@ async fn handle_event(
                     "telegram",
                     lang,
                 ) {
-                    let _ = client.send_message(&reply, None, None).await;
+                    send_inbound_reply(client, reply, lang).await;
                 }
                 return false;
             }
@@ -555,7 +574,7 @@ async fn handle_event(
                 "telegram",
                 lang,
             ) {
-                let _ = client.send_message(&reply, None, None).await;
+                send_inbound_reply(client, reply, lang).await;
             }
             false
         }

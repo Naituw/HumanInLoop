@@ -10,7 +10,7 @@
 //! 编排逻辑复用 `conversation::run_conversation`，本文件提供传输实现 `DingTalkSession`
 //! （`MessagingChannel`）+ 薄外层 `DingTalkChannel`。
 
-use super::conversation::{run_conversation, MessagingChannel, QuestionCtx};
+use super::conversation::{run_conversation, InboundReply, MessagingChannel, QuestionCtx};
 use super::{Channel, ConversationOrigin, Interruption, Preemption, ResultSink};
 use crate::config::DingTalkChannelConfig;
 use crate::dingtalk::card;
@@ -31,6 +31,25 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// 而卡片 createAndDeliver 投递更快，会插队先到，导致问题把内联内容顶上去、默认看不见。
 /// 这里短暂等待让 batchSend 的正文/内联先落地，保证「先 message 后题目」的视觉顺序。
 const MESSAGE_SETTLE_DELAY: Duration = Duration::from_millis(1000);
+
+async fn send_inbound_reply(client: &DingTalkClient, reply: InboundReply, lang: Lang) {
+    match reply {
+        InboundReply::Text(text) => {
+            let _ = client.send_oto_text(&text).await;
+        }
+        InboundReply::Help(view) => {
+            let markdown = crate::dingtalk::help::render(&view, lang);
+            if client
+                .send_oto_markdown(&view.title, &markdown)
+                .await
+                .is_err()
+            {
+                let plain = crate::autochannel::render_help_plain(&view, lang);
+                let _ = client.send_oto_text(&plain).await;
+            }
+        }
+    }
+}
 
 /// 内置默认卡片模板 ID（设置项 `cardTemplateId` 留空时使用）。
 /// D15 定稿模板：`options=[{id,md}]` + `single` + `allow_input` 变量条件渲染（单/多选、严格）。
@@ -354,7 +373,7 @@ impl MessagingChannel for DingTalkSession {
                         ) {
                             let ack_client = client.clone();
                             tauri::async_runtime::spawn(async move {
-                                let _ = ack_client.send_oto_text(&reply).await;
+                                send_inbound_reply(&ack_client, reply, lang).await;
                             });
                         }
                         // 并发下载：spawn 后立刻回到循环收事件，避免大文件下载卡住提交处理。
@@ -455,7 +474,7 @@ async fn ask_question_text(
                         "dingding",
                         ctx.lang,
                     ) {
-                        let _ = client.send_oto_text(&reply).await;
+                        send_inbound_reply(client, reply, ctx.lang).await;
                     }
                     events.clear_active(None, user_id);
                     return Some(answer);
@@ -468,7 +487,7 @@ async fn ask_question_text(
                         "dingding",
                         ctx.lang,
                     ) {
-                        let _ = client.send_oto_text(&reply).await;
+                        send_inbound_reply(client, reply, ctx.lang).await;
                     }
                 }
             }

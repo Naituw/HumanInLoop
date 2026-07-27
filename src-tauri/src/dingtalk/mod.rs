@@ -12,6 +12,7 @@ pub mod card;
 pub mod client;
 pub mod confirm;
 pub mod docx;
+pub mod help;
 pub mod image_convert;
 pub mod router;
 pub mod select;

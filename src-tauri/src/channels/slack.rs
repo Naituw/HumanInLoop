@@ -13,7 +13,7 @@
 //! 与飞书差异：终态不能「禁用控件保留外观」，故收尾用 `chat.update` 把卡片替换为**静态终态**
 //! （回显已选项 + 补充文字 + 状态行，移除控件）；ack 在 `ws` 层收帧即完成，无需 oneshot 回包。
 
-use super::conversation::{run_conversation, MessagingChannel, QuestionCtx};
+use super::conversation::{run_conversation, InboundReply, MessagingChannel, QuestionCtx};
 use super::{Channel, ConversationOrigin, Interruption, Preemption, ResultSink};
 use crate::config::SlackChannelConfig;
 use crate::i18n::{self, Lang};
@@ -45,6 +45,25 @@ fn next_card_nonce() -> String {
 
 /// Message（正文+附件）发完到发第一道题之间的等待时长，保证「先 message 后题目」的视觉顺序。
 const MESSAGE_SETTLE_DELAY: Duration = Duration::from_millis(500);
+
+async fn send_inbound_reply(client: &SlackClient, dm: &str, reply: InboundReply, lang: Lang) {
+    match reply {
+        InboundReply::Text(text) => {
+            let _ = client.post_text(dm, &text).await;
+        }
+        InboundReply::Help(view) => {
+            let plain = crate::autochannel::render_help_plain(&view, lang);
+            let blocks = blockkit::build_help_blocks(&view, lang);
+            if client
+                .post_message(dm, Some(&blocks), &plain)
+                .await
+                .is_err()
+            {
+                let _ = client.post_text(dm, &plain).await;
+            }
+        }
+    }
+}
 
 /// Router 归属：单进程自建一个仅挂本会话的 Router；Daemon 复用共享且常热的 Router。
 #[derive(Clone)]
@@ -372,7 +391,7 @@ impl MessagingChannel for SlackSession {
                             let ack_client = client.clone();
                             let ack_dm = dm.to_string();
                             tauri::async_runtime::spawn(async move {
-                                let _ = ack_client.post_text(&ack_dm, &reply).await;
+                                send_inbound_reply(&ack_client, &ack_dm, reply, lang).await;
                             });
                         }
                         let client = client.clone();
@@ -475,7 +494,7 @@ async fn ask_question_text(
                         "slack",
                         ctx.lang,
                     ) {
-                        let _ = client.post_text(dm, &reply).await;
+                        send_inbound_reply(client, dm, reply, ctx.lang).await;
                     }
                     events.clear_active(None, user_id);
                     return Some(answer);
@@ -488,7 +507,7 @@ async fn ask_question_text(
                         "slack",
                         ctx.lang,
                     ) {
-                        let _ = client.post_text(dm, &reply).await;
+                        send_inbound_reply(client, dm, reply, ctx.lang).await;
                     }
                 }
             }

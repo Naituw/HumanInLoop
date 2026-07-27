@@ -1,6 +1,7 @@
 //! Telegram Bot API 客户端（手写 reqwest）。
 
 pub mod confirm;
+pub mod help;
 pub mod markdown;
 pub mod router;
 pub mod select;

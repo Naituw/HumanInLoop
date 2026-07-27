@@ -549,79 +549,111 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
             "该 agent 会话已结束，无法插话。",
         ),
 
-        // —— 动态引导 / /help 文案（spec R3）：按开关拼装；不含「已收到」。 ——
-        // `{p}` 为渠道命令前缀：Slack 客户端拦截一切 `/` 输入，故 Slack 提示 `!` 前缀，其余渠道 `/`。
-        // Title: 「」 marks bare-text phrases (avoids clashing with (), [], <> in command syntax).
-        // Chinese help → Chinese phrases only; English → English phrases only.
+        // —— Dynamic guidance / /help (spec im-help-rich-text). ——
+        // Content strings are markup-free. Channel renderers own lists, code, emphasis, and color.
         "autoChannel.helpTitle" => pick(
             lang,
-            "AskHuman is running. You can use slash commands, or send the phrase in 「」:",
-            "AskHuman 正在运行。你可以使用斜线命令，或直接发送「」中的短语：",
+            "AskHuman is running",
+            "AskHuman 正在运行",
         ),
-        "autoChannel.helpCmdStatus" => pick(
+        "autoChannel.helpIntro" => pick(
             lang,
-            "• {p}status — list agents (working/idle) 「status」\n• {p}status <n> — what agent n is doing now",
-            "• {p}status — 列出 agent（工作中/空闲）「状态」\n• {p}status <编号> — 查看该 agent 当前在做什么",
+            "Use a command below, or send the phrase at the end of an item.",
+            "可使用下列命令，或直接发送每项末尾的短语。",
         ),
-        "autoChannel.helpCmdNew" => pick(
+        "autoChannel.helpGroupAgent" => pick(lang, "Agent management", "Agent 管理"),
+        "autoChannel.helpGroupCode" => pick(lang, "Code and records", "代码与记录"),
+        "autoChannel.helpGroupTodo" => pick(lang, "Project todos", "项目待办"),
+        "autoChannel.helpGroupChannel" => pick(lang, "Channel and help", "渠道与帮助"),
+        "autoChannel.helpDescStatus" => pick(
             lang,
-            "• {p}new — create a new Agent task on your computer 「new」",
-            "• {p}new — 在电脑上创建新的 Agent 任务「新任务」",
+            "List agents; add a number to view current activity",
+            "列出 Agent；指定编号查看当前活动",
         ),
-        "autoChannel.helpCmdWatch" => pick(
+        "autoChannel.helpDescNew" => pick(
             lang,
-            "• {p}watch <n> — follow agent n with a live status card ({p}unwatch to stop) 「watch」",
-            "• {p}watch <编号> — 用一张实时状态卡关注该 agent（{p}unwatch 取消）「关注」",
+            "Create a new Agent task on your computer",
+            "在电脑上创建新的 Agent 任务",
         ),
-        "autoChannel.helpCmdMsg" => pick(
+        "autoChannel.helpDescWatch" => pick(
             lang,
-            "• {p}msg <n> <text> — send a message to agent n (delivered at its next tool call) 「message」",
-            "• {p}msg <编号> <内容> — 给该 agent 插话（其下一次工具调用时送达）「插话」",
+            "Follow an agent with a live status card",
+            "关注 Agent 的实时状态",
         ),
-        "autoChannel.helpCmdDiff" => pick(
+        "autoChannel.helpDescUnwatch" => pick(
             lang,
-            "• {p}diff [n] — unstaged git diff for agent n (attachment) 「diff」",
-            "• {p}diff [编号] — 导出该 agent 工作区未暂存 diff（附件）「查看变更」",
+            "Stop following one or all agents",
+            "取消一个或全部关注",
         ),
-        "autoChannel.helpCmdStage" => pick(
+        "autoChannel.helpDescMsg" => pick(
             lang,
-            "• {p}stage [n] — stage unstaged changes for agent n (confirm first) 「stage」",
-            "• {p}stage [编号] — 确认后暂存该 agent 未 stage 的改动「暂存」",
+            "Queue a message for the agent's next tool call",
+            "排队插话，下次工具调用时送达",
         ),
-        "autoChannel.helpCmdTranscript" => pick(
+        "autoChannel.helpDescMsgClear" => pick(
             lang,
-            "• {p}transcript [n] — full session transcript for agent n (attachment) 「transcript」",
-            "• {p}transcript [编号] — 导出该 agent 完整会话记录（附件）「导出会话」",
+            "Discard the agent's queued message",
+            "撤回该 Agent 待送达的插话",
         ),
-        "autoChannel.helpCmdTodo" => pick(
+        "autoChannel.helpDescYolo" => pick(
             lang,
-            "• {p}todo [text] — choose a project to view todos or add one 「todo」",
-            "• {p}todo [内容] — 选择项目查看待办或新增一条「待办」",
+            "View or turn off Codex YOLO sessions",
+            "查看或关闭 Codex YOLO 会话",
         ),
-        "autoChannel.helpCmdTodoRm" => pick(
+        "autoChannel.helpDescDiff" => pick(
             lang,
-            "• {p}todo-rm — choose a project and delete todos 「delete todo」",
-            "• {p}todo-rm — 选择项目并删除待办「删待办」",
+            "Export unstaged changes as an attachment",
+            "导出未暂存变更（附件）",
         ),
-        "autoChannel.helpCmdTodoAuto" => pick(
+        "autoChannel.helpDescStage" => pick(
             lang,
-            "• {p}todo-auto [text] — choose a project to toggle or add auto-run todos 「auto todo」",
-            "• {p}todo-auto [内容] — 选择项目切换或新增自动待办「自动待办」",
+            "Confirm, then stage unstaged changes",
+            "确认后暂存未暂存改动",
         ),
-        "autoChannel.helpCmdYolo" => pick(
+        "autoChannel.helpDescTranscript" => pick(
             lang,
-            "• {p}yolo [off] — manage Codex YOLO sessions (turn off from the card)",
-            "• {p}yolo [off] — 管理 Codex YOLO 会话（点卡片关闭）",
+            "Export the full session transcript",
+            "导出完整会话记录（附件）",
         ),
-        "autoChannel.helpCmdHelp" => pick(
+        "autoChannel.helpDescTodo" => pick(
             lang,
-            "• {p}help — show this help 「help」",
-            "• {p}help — 显示此帮助「帮助」",
+            "Choose a project to view or add todos",
+            "选择项目查看待办或新增一条",
         ),
-        "autoChannel.helpCmdHere" => pick(
+        "autoChannel.helpDescTodoRm" => pick(
             lang,
-            "• {p}here — route questions to this channel 「here」",
-            "• {p}here — 把提问切到此渠道接收「这里」",
+            "Choose a project and delete todos",
+            "选择项目并删除待办",
+        ),
+        "autoChannel.helpDescTodoAuto" => pick(
+            lang,
+            "Toggle or add auto-run todos",
+            "切换或新增自动执行待办",
+        ),
+        "autoChannel.helpDescHere" => pick(
+            lang,
+            "Route future questions to this channel",
+            "把后续提问切到此渠道",
+        ),
+        "autoChannel.helpDescHelp" => pick(lang, "Show this help", "显示这份帮助"),
+        "autoChannel.helpPhraseStatus" => pick(lang, "status", "状态"),
+        "autoChannel.helpPhraseNew" => pick(lang, "new", "新任务"),
+        "autoChannel.helpPhraseWatch" => pick(lang, "watch", "关注"),
+        "autoChannel.helpPhraseUnwatch" => pick(lang, "unwatch", "取消关注"),
+        "autoChannel.helpPhraseMsg" => pick(lang, "message", "插话"),
+        "autoChannel.helpPhraseYolo" => pick(lang, "yolo", "YOLO"),
+        "autoChannel.helpPhraseDiff" => pick(lang, "diff", "查看变更"),
+        "autoChannel.helpPhraseStage" => pick(lang, "stage", "暂存"),
+        "autoChannel.helpPhraseTranscript" => pick(lang, "transcript", "导出会话"),
+        "autoChannel.helpPhraseTodo" => pick(lang, "todo", "待办"),
+        "autoChannel.helpPhraseTodoRm" => pick(lang, "delete todo", "删待办"),
+        "autoChannel.helpPhraseTodoAuto" => pick(lang, "auto todo", "自动待办"),
+        "autoChannel.helpPhraseHere" => pick(lang, "here", "这里"),
+        "autoChannel.helpPhraseHelp" => pick(lang, "help", "帮助"),
+        "autoChannel.helpPhraseHint" => pick(
+            lang,
+            "Say 「{phrase}」",
+            "直接说「{phrase}」",
         ),
         // 有在途提问时的作答指引。
         "autoChannel.helpAnswering" => pick(

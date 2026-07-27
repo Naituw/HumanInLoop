@@ -7,6 +7,8 @@
 //! - 用户点「提交」→ 一次 `card.action.trigger` 回调，`action.form_value` 汇总所有组件取值。
 //! - 选项 ↔ 组件名映射 `opt_{i}`，便于回调里还原勾选了哪些选项（规避超长/重复选项文案）。
 
+use crate::autochannel::{self, HelpQuestionState, HelpView};
+use crate::i18n::Lang;
 use crate::models::OptionItem;
 use serde_json::{json, Value};
 
@@ -172,6 +174,59 @@ pub fn build_message_card(title: &str, markdown_body: &str) -> Value {
         elements.push(body_text(markdown_body, true));
     }
     assemble_card(title, elements, false)
+}
+
+/// Build a non-interactive JSON 2.0 help card with grouped Markdown command lists.
+pub fn build_help_card(view: &HelpView, lang: Lang) -> Value {
+    let mut elements = vec![body_text(&view.intro, false)];
+    for section in &view.sections {
+        let mut markdown = format!("**{}**", section.title);
+        for command in &section.commands {
+            markdown.push_str("\n- `");
+            markdown.push_str(&command.syntax);
+            markdown.push_str("` — ");
+            markdown.push_str(&command.description);
+            if let Some(phrase) = &command.phrase {
+                markdown.push_str("　<font color='grey'>· ");
+                markdown.push_str(&autochannel::help_phrase_hint(phrase, lang));
+                markdown.push_str("</font>");
+            }
+        }
+        elements.push(body_text(&markdown, true));
+    }
+    elements.push(json!({ "tag": "hr", "margin": "0px 0px 0px 0px" }));
+
+    let state = match &view.question_state {
+        HelpQuestionState::Active { instruction } => instruction,
+        HelpQuestionState::None { message } => message,
+    };
+    let mut footer = format!("**{state}**");
+    if let Some(hint) = &view.switch_hint {
+        footer.push_str("\n<font color='grey'>");
+        footer.push_str(hint);
+        footer.push_str("</font>");
+    }
+    elements.push(body_text(&footer, true));
+    assemble_card(&view.title, elements, true)
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::*;
+
+    #[test]
+    fn help_card_uses_bullets_code_and_grey_phrases() {
+        let view = autochannel::help_view(true, false, true, "/", Lang::Zh);
+        let card = build_help_card(&view, Lang::Zh);
+        assert_eq!(card["schema"], "2.0");
+        assert_eq!(card["config"]["update_multi"], true);
+        let serialized = card.to_string();
+        assert!(serialized.contains("**Agent 管理**"));
+        assert!(serialized.contains("- `/status [编号]`"));
+        assert!(serialized.contains("<font color='grey'>· 直接说「状态」</font>"));
+        assert!(serialized.contains("- `/msg-clear <编号>`"));
+        assert!(!serialized.contains("msg-clear <编号>` — 撤回该 Agent 待送达的插话　<font"));
+    }
 }
 
 /// 卡片回调的同步「更新卡片」回包体：`{card:{type:"raw",data:<新卡片>}}`。
