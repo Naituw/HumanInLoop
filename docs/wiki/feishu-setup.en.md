@@ -108,7 +108,7 @@ Click "Test connection": it exchanges a token and sends a test message to that O
 - Questions are sent as **interactive cards** (Card JSON 2.0, delivered directly with no template to build), one per question: check predefined options (multi-select) in the card form, optionally add text, then tap "Submit" to finish (the callback goes over the long connection and must reply within 3s, handled automatically).
 - After submitting, the card keeps the question and options in a **"submitted" state**: the checkers are disabled but keep your selection, your extra text is echoed in the input, and the button changes from "Submit" to a disabled "Submitted" (instead of being replaced by a one-line status text).
 - **Images / files** sent in the chat while answering are accumulated into that question's answer; **plain text is ignored** (use the card's input field for text).
-- If card delivery fails, it automatically **falls back** to "plain text + numbered options": reply with numbers (comma-separated for multi-select, e.g. `1,3`), type text, or send images / files to answer.
+- For recoverable card-delivery failures such as a network interruption or Feishu internal error, AskHuman first retries once with the same idempotency key to prevent duplicate cards. If delivery still fails, it **falls back** to "plain text + numbered options": reply with numbers (comma-separated for multi-select, e.g. `1,3`), type text, or send images / files to answer.
 - With multiple channels enabled, racing happens at the **whole-session** granularity: whichever side finishes all questions first wins, and the others wrap up (the Feishu card is PATCHed to an "answered on X" final state).
 
 ## 4. FAQ

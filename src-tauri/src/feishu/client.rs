@@ -10,6 +10,11 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 const AUTH_ATTEMPTS: usize = 2;
+const CARD_SEND_ATTEMPTS: usize = 2;
+#[cfg(not(test))]
+const CARD_RETRY_DELAY: Duration = Duration::from_millis(400);
+#[cfg(test)]
+const CARD_RETRY_DELAY: Duration = Duration::from_millis(1);
 
 /// 渠道健康登记（R7）：API 调用失败登记、成功清除。放在统一出口，覆盖发送/编辑/上传全部路径。
 fn track<T>(r: Result<T, FeishuError>) -> Result<T, FeishuError> {
@@ -130,8 +135,12 @@ impl FeishuClient {
                 .send()
                 .await
                 .map_err(|e| FeishuError::Network(e.to_string()))?;
-            let value: Value = resp.json().await.map_err(|_| FeishuError::BadResponse)?;
-            match api_result(value, "request failed") {
+            let http_status = resp.status().as_u16();
+            let log_id = super::response_log_id(resp.headers());
+            let value: Value = resp.json().await.map_err(|_| {
+                FeishuError::bad_response_with_metadata(Some(http_status), log_id.clone())
+            })?;
+            match api_result(value, "request failed", Some(http_status), log_id) {
                 Ok(value) => return Ok(value),
                 Err(error) if attempt == 0 && error.is_invalid_tenant_token() => {
                     access_token = self.refresh_rejected_token(&access_token).await?;
@@ -150,19 +159,53 @@ impl FeishuClient {
     // ===== 单聊主动发送（im/v1/messages, receive_id_type=open_id）=====
 
     /// 发送一条消息，返回 message_id（卡片后续 PATCH 收尾用）。`content` 会被序列化为 JSON 字符串。
-    async fn send_message(&self, msg_type: &str, content: &Value) -> Result<String, FeishuError> {
-        let body = json!({
+    async fn send_message(
+        &self,
+        msg_type: &str,
+        content: &Value,
+        retry_transient: bool,
+    ) -> Result<String, FeishuError> {
+        let mut body = json!({
             "receive_id": self.open_id,
             "msg_type": msg_type,
             "content": content.to_string(),
         });
-        let v = self
-            .call(
-                reqwest::Method::POST,
-                "/open-apis/im/v1/messages?receive_id_type=open_id",
-                body,
-            )
-            .await?;
+        if retry_transient {
+            // Feishu deduplicates message creations with the same UUID for one hour. Reuse this
+            // value across attempts so an ambiguous transport failure cannot create two cards.
+            body["uuid"] = Value::String(uuid::Uuid::new_v4().to_string());
+        }
+
+        let result = async {
+            for attempt in 0..CARD_SEND_ATTEMPTS {
+                match self
+                    .call_inner(
+                        reqwest::Method::POST,
+                        "/open-apis/im/v1/messages?receive_id_type=open_id",
+                        body.clone(),
+                    )
+                    .await
+                {
+                    Ok(value) => return Ok(value),
+                    Err(error)
+                        if retry_transient
+                            && attempt == 0
+                            && error.is_transient_message_create_failure() =>
+                    {
+                        eprintln!(
+                            "[feishu] transient card creation failure; retrying once after {}ms: {}",
+                            CARD_RETRY_DELAY.as_millis(),
+                            error
+                        );
+                        tokio::time::sleep(CARD_RETRY_DELAY).await;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            unreachable!("Feishu card creation attempts are bounded")
+        }
+        .await;
+        let v = track(result)?;
         Ok(v.get("data")
             .and_then(|d| d.get("message_id"))
             .and_then(|m| m.as_str())
@@ -171,21 +214,22 @@ impl FeishuClient {
     }
 
     pub async fn send_text(&self, text: &str) -> Result<String, FeishuError> {
-        self.send_message("text", &json!({ "text": text })).await
+        self.send_message("text", &json!({ "text": text }), false)
+            .await
     }
 
     /// 发送互动卡片（卡片 JSON 直接作为 content）。返回 message_id。
     pub async fn send_card(&self, card: &Value) -> Result<String, FeishuError> {
-        self.send_message("interactive", card).await
+        self.send_message("interactive", card, true).await
     }
 
     pub async fn send_image(&self, image_key: &str) -> Result<String, FeishuError> {
-        self.send_message("image", &json!({ "image_key": image_key }))
+        self.send_message("image", &json!({ "image_key": image_key }), false)
             .await
     }
 
     pub async fn send_file(&self, file_key: &str) -> Result<String, FeishuError> {
-        self.send_message("file", &json!({ "file_key": file_key }))
+        self.send_message("file", &json!({ "file_key": file_key }), false)
             .await
     }
 
@@ -220,7 +264,7 @@ impl FeishuClient {
             .and_then(|d| d.get("image_key"))
             .and_then(|m| m.as_str())
             .map(|s| s.to_string())
-            .ok_or(FeishuError::BadResponse)
+            .ok_or_else(FeishuError::bad_response)
     }
 
     /// 上传文件，返回 file_key。
@@ -257,7 +301,7 @@ impl FeishuClient {
             .and_then(|d| d.get("file_key"))
             .and_then(|m| m.as_str())
             .map(|s| s.to_string())
-            .ok_or(FeishuError::BadResponse)
+            .ok_or_else(FeishuError::bad_response)
     }
 
     async fn upload<F>(&self, path: &str, build_form: F) -> Result<Value, FeishuError>
@@ -281,8 +325,12 @@ impl FeishuClient {
                 .send()
                 .await
                 .map_err(|e| FeishuError::Network(e.to_string()))?;
-            let value: Value = resp.json().await.map_err(|_| FeishuError::BadResponse)?;
-            match api_result(value, "upload failed") {
+            let http_status = resp.status().as_u16();
+            let log_id = super::response_log_id(resp.headers());
+            let value: Value = resp.json().await.map_err(|_| {
+                FeishuError::bad_response_with_metadata(Some(http_status), log_id.clone())
+            })?;
+            match api_result(value, "upload failed", Some(http_status), log_id) {
                 Ok(value) => return Ok(value),
                 Err(error) if attempt == 0 && error.is_invalid_tenant_token() => {
                     access_token = self.refresh_rejected_token(&access_token).await?;
@@ -341,6 +389,7 @@ impl FeishuClient {
                 .await
                 .map_err(|e| FeishuError::Network(e.to_string()))?;
             let status = resp.status();
+            let log_id = super::response_log_id(resp.headers());
             let is_json = resp
                 .headers()
                 .get(reqwest::header::CONTENT_TYPE)
@@ -354,7 +403,14 @@ impl FeishuClient {
             let api_error = if is_json || !status.is_success() {
                 serde_json::from_slice::<Value>(&bytes)
                     .ok()
-                    .and_then(|value| api_error(&value, "resource download failed"))
+                    .and_then(|value| {
+                        api_error(
+                            &value,
+                            "resource download failed",
+                            Some(status.as_u16()),
+                            log_id.clone(),
+                        )
+                    })
             } else {
                 None
             };
@@ -370,9 +426,11 @@ impl FeishuClient {
                     return Err(error);
                 }
                 None if !status.is_success() => {
-                    return Err(FeishuError::api(
+                    return Err(FeishuError::api_response(
                         None,
                         format!("resource download failed: HTTP {}", status),
+                        Some(status.as_u16()),
+                        log_id,
                     ));
                 }
                 None => return Ok(bytes.to_vec()),
@@ -382,15 +440,25 @@ impl FeishuClient {
     }
 }
 
-fn api_result(value: Value, fallback: &str) -> Result<Value, FeishuError> {
-    match api_error(&value, fallback) {
+fn api_result(
+    value: Value,
+    fallback: &str,
+    http_status: Option<u16>,
+    log_id: Option<String>,
+) -> Result<Value, FeishuError> {
+    match api_error(&value, fallback, http_status, log_id.clone()) {
         Some(error) => Err(error),
         None if value.get("code").and_then(|code| code.as_i64()) == Some(0) => Ok(value),
-        None => Err(FeishuError::BadResponse),
+        None => Err(FeishuError::bad_response_with_metadata(http_status, log_id)),
     }
 }
 
-fn api_error(value: &Value, fallback: &str) -> Option<FeishuError> {
+fn api_error(
+    value: &Value,
+    fallback: &str,
+    http_status: Option<u16>,
+    log_id: Option<String>,
+) -> Option<FeishuError> {
     let code = value.get("code").and_then(|code| code.as_i64())?;
     if code == 0 {
         return None;
@@ -399,7 +467,12 @@ fn api_error(value: &Value, fallback: &str) -> Option<FeishuError> {
         .get("msg")
         .and_then(|message| message.as_str())
         .unwrap_or(fallback);
-    Some(FeishuError::api(Some(code), message))
+    Some(FeishuError::api_response(
+        Some(code),
+        message,
+        http_status,
+        log_id,
+    ))
 }
 
 fn file_name_of(path: &str) -> String {
@@ -418,21 +491,40 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
 
     struct MockResponse {
+        status: &'static str,
         content_type: &'static str,
+        headers: Vec<(&'static str, &'static str)>,
         body: Vec<u8>,
     }
 
     impl MockResponse {
         fn json(body: &'static str) -> Self {
             Self {
+                status: "200 OK",
                 content_type: "application/json",
+                headers: Vec::new(),
+                body: body.as_bytes().to_vec(),
+            }
+        }
+
+        fn json_error(
+            status: &'static str,
+            body: &'static str,
+            headers: Vec<(&'static str, &'static str)>,
+        ) -> Self {
+            Self {
+                status,
+                content_type: "application/json",
+                headers,
                 body: body.as_bytes().to_vec(),
             }
         }
 
         fn bytes(body: &'static [u8]) -> Self {
             Self {
+                status: "200 OK",
                 content_type: "application/octet-stream",
+                headers: Vec::new(),
                 body: body.to_vec(),
             }
         }
@@ -450,9 +542,16 @@ mod tests {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let request = read_request(&mut socket).await;
                 recorded.lock().unwrap().push(request);
+                let extra_headers = response
+                    .headers
+                    .iter()
+                    .map(|(name, value)| format!("{name}: {value}\r\n"))
+                    .collect::<String>();
                 let header = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {}\r\nContent-Type: {}\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    response.status,
                     response.content_type,
+                    extra_headers,
                     response.body.len()
                 );
                 socket.write_all(header.as_bytes()).await.unwrap();
@@ -490,6 +589,10 @@ mod tests {
             }
         }
         String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn json_body(request: &str) -> Value {
+        serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap()
     }
 
     fn config(base_url: &str) -> FeishuChannelConfig {
@@ -551,6 +654,65 @@ mod tests {
         ));
         server.await.unwrap();
         assert_eq!(requests.lock().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn transient_card_failure_retries_once_with_the_same_uuid() {
+        let (base_url, requests, server) = mock_server(vec![
+            MockResponse::json(r#"{"code":0,"tenant_access_token":"token","expire":7200}"#),
+            MockResponse::json_error(
+                "400 Bad Request",
+                r#"{"code":230001,"msg":"Internal Error"}"#,
+                vec![("X-Tt-Logid", "log-internal-error")],
+            ),
+            MockResponse::json(r#"{"code":0,"data":{"message_id":"card-1"}}"#),
+        ])
+        .await;
+        let client = FeishuClient::new(&config(&base_url)).unwrap();
+
+        assert_eq!(
+            client
+                .send_card(&serde_json::json!({"schema":"2.0"}))
+                .await
+                .unwrap(),
+            "card-1"
+        );
+        server.await.unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        let first = json_body(&requests[1]);
+        let second = json_body(&requests[2]);
+        let request_uuid = first["uuid"].as_str().unwrap();
+        assert_eq!(request_uuid.len(), 36);
+        assert_eq!(second["uuid"], request_uuid);
+        assert_eq!(first["msg_type"], "interactive");
+        assert_eq!(first, second);
+    }
+
+    #[tokio::test]
+    async fn permanent_card_failure_is_not_retried_and_keeps_response_metadata() {
+        let (base_url, requests, server) = mock_server(vec![
+            MockResponse::json(r#"{"code":0,"tenant_access_token":"token","expire":7200}"#),
+            MockResponse::json_error(
+                "400 Bad Request",
+                r#"{"code":200621,"msg":"Failed to create card content"}"#,
+                vec![("X-Tt-Logid", "log-invalid-card")],
+            ),
+        ])
+        .await;
+        let client = FeishuClient::new(&config(&base_url)).unwrap();
+
+        let error = client
+            .send_card(&serde_json::json!({"schema":"2.0"}))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Feishu API error (code=200621, http=400, log_id=log-invalid-card): Failed to create card content"
+        );
+        server.await.unwrap();
+        assert_eq!(requests.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

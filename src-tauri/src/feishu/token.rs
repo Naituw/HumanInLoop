@@ -105,7 +105,12 @@ pub async fn get_token(
         .send()
         .await
         .map_err(|e| FeishuError::Network(e.to_string()))?;
-    let body: Value = resp.json().await.map_err(|_| FeishuError::BadResponse)?;
+    let http_status = resp.status().as_u16();
+    let log_id = super::response_log_id(resp.headers());
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|_| FeishuError::bad_response_with_metadata(Some(http_status), log_id.clone()))?;
     // 飞书业务码：code==0 成功；否则取 msg。
     if body.get("code").and_then(|c| c.as_i64()) != Some(0) {
         let msg = body
@@ -113,15 +118,17 @@ pub async fn get_token(
             .and_then(|m| m.as_str())
             .unwrap_or("failed to obtain tenant_access_token (check AppId/AppSecret)")
             .to_string();
-        return Err(FeishuError::api(
+        return Err(FeishuError::api_response(
             body.get("code").and_then(|code| code.as_i64()),
             msg,
+            Some(http_status),
+            log_id,
         ));
     }
     let token = body
         .get("tenant_access_token")
         .and_then(|v| v.as_str())
-        .ok_or(FeishuError::BadResponse)?
+        .ok_or_else(|| FeishuError::bad_response_with_metadata(Some(http_status), log_id.clone()))?
         .to_string();
     let expire = body.get("expire").and_then(|v| v.as_u64()).unwrap_or(7200);
     let expire_at = Instant::now() + Duration::from_secs(expire.saturating_sub(60));

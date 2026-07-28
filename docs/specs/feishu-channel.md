@@ -52,10 +52,11 @@ AskHuman "请看看这个改动？" -f ./diff.patch -q "要继续吗？" -o "继
 | F15 | 接收人标识 + 自动识别 | 配置项 `openId`（用户 Open ID，稳定标识，发消息用 `receive_id_type=open_id`）。旁置「自动识别」：点击后程序随机生成 4 位数字提示「请私聊机器人发送：XXXX」，经长连接捕获 `content==XXXX` 的单聊消息，取 `event.sender.sender_id.open_id` 回填（带 ~120s 超时）。**前置校验**：AppId/AppSecret 为空或换 token 失败 → 立即中文报错、不进入识别 |
 | F16 | 测试连接 | 校验 AppId/AppSecret 能换 token，并给配置的 openId **单聊发一条测试消息**，成功返回提示 |
 | F17 | 抢答与退出 | 接入现有 Coordinator「首个终态生效，其余 `cancel_by_other` 收尾」；飞书被抢答 → 关闭长连接、不投递，并 **best-effort** 把当前卡片更新为「已在 X 回答」终态（`PATCH {baseUrl}/open-apis/im/v1/messages/{message_id}`，失败仅日志）。退出码语义不变（0/1/3） |
-| F18 | 失败兜底 | 卡片投放失败（发送接口报错等）→ **自动回退**「纯文本 + 编号选项」B 方案问该题（用户回一条消息：回编号 / 文字 / 图片 / 文件），与钉钉一致 |
+| F18 | 失败兜底 | 所有卡片创建携带飞书消息 `uuid` 幂等键；网络错误、响应无法解析、HTTP 408/425/5xx 或明确 `Internal Error` 时，复用同一 `uuid` 短退避后重试一次。仍失败或错误不可重试 → **自动回退**「纯文本 + 编号选项」B 方案问该题（用户回一条消息：回编号 / 文字 / 图片 / 文件），与钉钉一致；权限、参数、鉴权、频控错误不盲目重试 |
 | F19 | 服务域名 | **新增 `baseUrl` 配置**（默认 `https://open.feishu.cn`），以同时支持 Lark 国际版（`https://open.larksuite.com`）。token/消息/上传/下载/卡片更新走 `{baseUrl}/open-apis/...`，长连接 endpoint 走 `{baseUrl}/callback/ws/endpoint` |
 | F20 | 公共抽象复用 | 复用现有 `channels::conversation::{MessagingChannel, run_conversation}`（钉钉渠道引入时已抽象）；飞书仅新增「传输实现 `FeishuSession`」+「薄外层 `FeishuChannel`」，不改动公共驱动逻辑 |
 | F21 | 文档同步 | 设置页 UI、`prompts.rs`、`README` 同步飞书配置与使用，并写明**前置条件**（自建应用、机器人、把事件/回调订阅设为长连接、所需权限） |
+| F22 | 发送故障可观测性 | OpenAPI 错误日志保留业务 `code`、HTTP 状态与响应头 `X-Tt-Logid`（兼容 `X-Request-Id`）；一次重试即恢复时仅记 daemon 日志，不弹用户警告、不改变「下一次任意成功操作即清除渠道健康故障」的既有语义 |
 
 ## 4. 约束与既有规则（不可破坏）
 
@@ -87,6 +88,7 @@ AskHuman "请看看这个改动？" -f ./diff.patch -q "要继续吗？" -o "继
 9. 弹窗 / Telegram / 钉钉行为与现状一致（不回归）。
 10. 设置页、`prompts.rs`、`README` 反映飞书用法与前置条件。
 11. 飞书在 token 名义有效期内提前拒绝旧 token 时，JSON 请求、媒体上传和资源下载均自动刷新并最多重试一次；并发旧请求不得清除其它请求已刷新的 token。
+12. 所有卡片创建带唯一 `uuid`；瞬时失败时复用同一值重试一次且不重复投递，非瞬时失败不重试；最终错误日志包含飞书业务码、HTTP 状态与可用的请求日志 ID。
 
 ## 6. 已知问题与风险（预登记）
 
@@ -104,3 +106,4 @@ AskHuman "请看看这个改动？" -f ./diff.patch -q "要继续吗？" -o "继
 - **2026-07-15｜修复：Windows 最终提交显示「未响应」**：Windows 单进程回退路径可能在会话把最终答案交给 Coordinator 后立即退出；原 oneshot 只保证响应体送到 Router，不保证 Router 已把响应帧写入 WebSocket，形成退出竞态。卡片 ACK 改为「响应体 + 写回完成」两阶段握手，最终提交等待 Router 完成写入尝试后再返回答案；中间卡片操作仍只提交响应体，不增加等待。
 - **2026-07-17｜修复：tenant token 提前失效后需重启 daemon**：缓存键从单一 `app_id` 改为服务域名、App ID 与 Secret 不可逆指纹，并在配置变化时清除旧条目。OpenAPI 错误保留数值 `code`；JSON 请求、multipart 上传和资源下载遇到 tenant token 无效码时，只有缓存仍等于本次被拒 token 才删除并刷新，随后最多重试一次，避免并发旧请求误删新 token 或形成无限重试。
 - **2026-07-25｜终态卡的补充文字改为可选中**：`input` 组件一旦 `disabled`，在飞书客户端里既不能编辑也**不能选中复制**，而人常需要回头引用自己写过的话。终态遂把补充文字改为「灰色小标题（`channel.fsNoteLabel`）+ markdown 引用块」；无补充时整段不渲染（不再留空输入框）。勾选器与置灰按钮维持「钉钉模式」不变；交互态仍是 `input`。
+- **2026-07-28｜修复：飞书 `Internal Error` 直接降级纯文本**：所有 `send_card` 创建请求加入飞书原生 `uuid` 幂等键；网络错误、畸形响应、HTTP 408/425/5xx 或明确的 `Internal Error` 短退避后复用同一 UUID 重试一次，仍失败才执行 F18 文本回退。权限、参数、鉴权和频控错误不重试。错误显示同时保留业务码、HTTP 状态及 `X-Tt-Logid` / `X-Request-Id`，恢复成功只写 daemon 日志。

@@ -328,23 +328,32 @@ async fn open_endpoint(
         .send()
         .await
         .map_err(|e| FeishuError::Network(e.to_string()))?;
-    let v: Value = resp.json().await.map_err(|_| FeishuError::BadResponse)?;
+    let http_status = resp.status().as_u16();
+    let log_id = super::response_log_id(resp.headers());
+    let v: Value = resp
+        .json()
+        .await
+        .map_err(|_| FeishuError::bad_response_with_metadata(Some(http_status), log_id.clone()))?;
     if v.get("code").and_then(|c| c.as_i64()) != Some(0) {
         let msg = v
             .get("msg")
             .and_then(|m| m.as_str())
             .unwrap_or("failed to obtain Feishu long-connection endpoint")
             .to_string();
-        return Err(FeishuError::api(
+        return Err(FeishuError::api_response(
             v.get("code").and_then(|code| code.as_i64()),
             msg,
+            Some(http_status),
+            log_id,
         ));
     }
-    let data = v.get("data").ok_or(FeishuError::BadResponse)?;
+    let data = v.get("data").ok_or_else(|| {
+        FeishuError::bad_response_with_metadata(Some(http_status), log_id.clone())
+    })?;
     let conn_url = data
         .get("URL")
         .and_then(|u| u.as_str())
-        .ok_or(FeishuError::BadResponse)?
+        .ok_or_else(|| FeishuError::bad_response_with_metadata(Some(http_status), log_id.clone()))?
         .to_string();
     let ping_secs = data
         .get("ClientConfig")

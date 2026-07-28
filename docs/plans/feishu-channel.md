@@ -56,6 +56,7 @@ AskHuman "..." -q ... -o ...       ▼
 - 统一调用助手 `call(method, path, body) -> Value`：`{base}/open-apis{path}`，header `Authorization: Bearer <token>`，按 `code==0`（飞书业务码）判定成功，失败取 `msg`/`code`。
 - **发送单聊消息**：`send_message(msg_type, content_json_string) -> message_id`：
   - `POST /im/v1/messages?receive_id_type=open_id`，body `{receive_id: openId, msg_type, content}`（`content` 为 JSON 字符串）；返回 `data.message_id`。
+  - 所有卡片创建额外携带 36 字符 `uuid`。瞬时故障（网络、畸形响应、HTTP 408/425/5xx、明确 `Internal Error`）复用同一 UUID 短退避后重试一次；频控、权限、参数和鉴权错误不重试，避免无效流量。业务错误保留 `code`、HTTP 状态与 `X-Tt-Logid` / `X-Request-Id` 供 daemon 日志排障。
   - 便捷封装：`send_text(text)`（`content={"text":..}`）、`send_interactive(card_json) `（`content=<card JSON 字符串>`，`msg_type=interactive`）、`send_image(image_key)`、`send_file(file_key)`。
 - **上传媒体**：
   - `upload_image(path) -> image_key`：`POST /im/v1/images`，multipart：`image_type=message` + `image=<bytes,filename>`；取 `data.image_key`。
@@ -128,7 +129,8 @@ AskHuman "..." -q ... -o ...       ▼
   - 适当 settle 延迟（沿用钉钉 `MESSAGE_SETTLE_DELAY` 思路，保证「先 Message 后题目」的视觉顺序）。
 - `ask_question(ctx, preempt)`：**卡片流程**
   1. `card = card::build_question_card(ctx.header|兜底, ctx.text, ctx.options, ctx.is_markdown)`；`message_id = client.send_interactive(card)`。
-     - 发送失败 → i18n 警告 → **回退 B 方案** `ask_question_text(...)`（纯文本编号选项，见 3.3）。
+     - 可重试的瞬时错误先在 client 内以同一 `uuid` 重试一次；恢复成功仅记日志。
+     - 不可重试或重试仍失败 → i18n 警告 → **回退 B 方案** `ask_question_text(...)`（纯文本编号选项，见 3.3）。
   2. 事件循环（每 `POLL_INTERVAL`≈1s 检查 `preempt.is_cancelled()`，`recv()` 加 timeout 以便分片检查抢答）：
      - `WsEvent::CardAction`：`parse_card_submit` 命中且 `open_message_id==message_id`、`open_id==配置 openId` →
        - 组装 `QuestionAnswer { selected_options, user_input, images(累积), files(累积) }`；
@@ -262,6 +264,8 @@ AskHuman "..." -q ... -o ...       ▼
   - 卡片多选勾选 + 补充文字 + 提交完成；提交后卡片终态、无报错 toast。
   - 作答期间发图片/文件被收进答案；聊天纯文字被忽略。
   - 卡片投放失败回退纯文本编号选项。
+  - 卡片创建首次返回瞬时错误、第二次成功：两次请求 UUID 相同，渠道层不得进入纯文本回退；非瞬时错误只请求一次。
+  - OpenAPI 错误日志包含业务码、HTTP 状态与响应日志 ID。
   - 与弹窗 / Telegram / 钉钉 抢答（飞书先答 / 被抢答中止并尽力置卡片终态）。
   - headless（无 GUI）单跑飞书；与钉钉/Telegram 并行。
   - 弹窗 / Telegram / 钉钉 回归。
