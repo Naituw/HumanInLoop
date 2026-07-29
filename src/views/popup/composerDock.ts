@@ -1,6 +1,7 @@
 export interface ComposerDockGeometry {
   homeTop: number;
   homeBottom: number;
+  dockedHomeHeight: number;
   viewportTop: number;
   viewportBottom: number;
   viewportBottomAfterUndock: number;
@@ -15,6 +16,28 @@ export const DEFAULT_COMPOSER_DOCK_THRESHOLDS: ComposerDockThresholds = {
   dockGap: 0,
   returnGap: 10,
 };
+
+export const DEFAULT_DOCKED_TEXTAREA_MAX_HEIGHT = 120;
+
+/**
+ * Project the input-wrap height after only the textarea is capped in the dock.
+ * This preserves fixed rows such as the multi-question composer action bar.
+ */
+export function projectedDockedComposerHomeHeight(
+  inlineHomeHeight: number,
+  inlineTextareaHeight: number,
+  dockedTextareaMaxHeight = DEFAULT_DOCKED_TEXTAREA_MAX_HEIGHT
+): number {
+  if (inlineHomeHeight <= 0) return 0;
+  if (inlineTextareaHeight <= 0 || dockedTextareaMaxHeight <= 0) {
+    return inlineHomeHeight;
+  }
+  const textareaReduction = Math.max(
+    0,
+    inlineTextareaHeight - dockedTextareaMaxHeight
+  );
+  return Math.max(0, inlineHomeHeight - textareaReduction);
+}
 
 /** A focused editor owns user actions even when passive scrolling changes the viewport card. */
 export function resolveActionQuestionIndex(
@@ -109,12 +132,21 @@ export function resolveComposerDocked(
   // moved above the viewport, keep the editor in its normal document position.
   if (geometry.homeTop < geometry.viewportTop) return false;
 
+  // A tall inline editor is shorter in the dock. Let the viewport clip it progressively, then
+  // move it only when the portion that will remain visible reaches the bottom edge. The same
+  // projected edge is used for returning home, so 240px <-> 120px never moves the top abruptly.
+  const projectedDockedHomeBottom =
+    geometry.homeTop + geometry.dockedHomeHeight;
+
   if (!currentlyDocked) {
-    return geometry.homeBottom > geometry.viewportBottom - thresholds.dockGap;
+    return (
+      projectedDockedHomeBottom >
+      geometry.viewportBottom - thresholds.dockGap
+    );
   }
 
   const returnedInsideViewport =
-    geometry.homeBottom <=
+    projectedDockedHomeBottom <=
     geometry.viewportBottomAfterUndock - thresholds.returnGap;
   return !returnedInsideViewport;
 }

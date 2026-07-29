@@ -90,7 +90,7 @@ function handlePickFiles() {
             :class="{ collapsed: !isExpanded }"
             :rows="collapsible ? 1 : undefined"
             :placeholder="t('popup.inputPlaceholder')"
-            @input="onComposerInput(qIndex)"
+            @input="onComposerInput(qIndex, $event)"
             @focus="onTextareaFocus(qIndex)"
             @blur="onTextareaBlur(qIndex)"
             @compositionstart="onComposerCompositionStart(qIndex)"

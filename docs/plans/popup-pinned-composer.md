@@ -97,6 +97,7 @@ input 和显式用户导航才算手动激活；`onTextareaBlur` 只清
 type DockGeometry = {
   homeTop: number;
   homeBottom: number;
+  dockedHomeHeight: number;
   viewportTop: number;
   viewportBottom: number;
   viewportBottomAfterUndock: number;
@@ -110,9 +111,11 @@ resolveComposerDocked(currentlyDocked, ownerCanDock, geometry, hysteresis): bool
 - 首次固定时 textarea 已失焦 → 不固定；已经固定后的 blur 不撤销固定；
 - 激活后尚未发生向上滚动 → 不固定；点击一个已被底边裁切的输入框不会立即固定；
 - 既未手动激活、也未曾完整内联可见 → 不固定；
-- 未固定：`homeTop >= viewportTop` 且 `homeBottom > viewportBottom` → 固定；
-- 已固定：把撤掉 dock 后 `.content` 会释放的高度计入 `viewportBottomAfterUndock`；textarea home marker
-  能完整进入该释放后视口，且底边位于 `viewportBottomAfterUndock - returnGap` 之上 → 回位；否则保持；
+- 未固定：`homeTop >= viewportTop` 且
+  `homeTop + dockedHomeHeight > viewportBottom` → 固定；高输入框先被底边逐步裁切到固定态可见高度；
+- 已固定：把撤掉 dock 后 `.content` 会释放的高度计入 `viewportBottomAfterUndock`；同一条
+  `homeTop + dockedHomeHeight` 投影底边位于 `viewportBottomAfterUndock - returnGap` 之上 → 回位，
+  其余内联高度随继续滚动逐步露出；否则保持；
 - home marker 在 viewport 顶部之上时不得从未固定态进入固定态。
 
 实际常量先取 `RETURN_GAP_PX = 10`，实现后按真机边界观感微调；固定 / 回位必须使用不同阈值。
@@ -123,6 +126,12 @@ resolveComposerDocked(currentlyDocked, ownerCanDock, geometry, hysteresis): bool
   scroll-spy，仍跑 composer 测量。
 - `onScroll` 只写轻量滚动状态并调度 rAF，不直接多次 `getBoundingClientRect()`。
 - 固定 / 回位改变 flex 高度后，再调度下一帧测量，保证布局收敛。
+- `autoGrow` 的增长路径只读 live `scrollHeight` 并在目标高度确实增加时单次写入；不会改变高度的
+  普通字符不产生 style mutation。删除 / undo / 替换等缩短路径用 fixed、不可见的镜像 textarea
+  测量后单次写回，禁止让聚焦中的 live textarea 临时经过 `height:auto`，避免 WebKit 滚动锚定抖动。
+- 三种问题模式的 focus ring 统一由 `.input-wrap::after` + `:focus-within` 绘制；textarea 自身聚焦时
+  只保留普通控件阴影。避免 macOS WebKit 在可滚动 textarea 单次增高后只刷新旧顶边与新底边的阴影
+  脏区，造成 ring 侧边中段缺失；不得用二次 reflow 强制重绘来换回完整 ring。
 - owner 刚激活时 `nextTick` 测量；只有 textarea home 至少一次完整落入 `.content`，才置
   `ownerSeenInline=true`。owner 激活后发生 `scrollTop` 减小才置 `ownerScrolledUpAfterActivation=true`；
   这个减小还必须紧跟向上的 wheel / trackpad 意图，防止预热窗口复用旧滚动位置时的钳制或 scroll
@@ -138,8 +147,8 @@ resolveComposerDocked(currentlyDocked, ownerCanDock, geometry, hysteresis): bool
 - `.composer-anchor` 在内联态由真实编辑器撑高；共享 `ResizeObserver` 记录每题最新完整编辑器高度，
   同时单独记录 textarea / input-wrap 的原位高度。
 - 固定时 anchor 设 `min-height/height` 为最后一次内联高度，保持题卡与整个 `.content.scrollHeight` 稳定。
-- 固定 / 回位几何使用 `anchor.top + composerHomeHeight` 得到 textarea home marker 底边，不等待下方
-  图片 / 文件全部进入视口；否则附件很多时完整 anchor 可能高于视口、永远无法自动回位。
+- 固定 / 回位几何把内联 textarea 高度按固定态 120px 上限投影，在保留多题 action row 等固定部分后，
+  使用 `anchor.top + dockedHomeHeight` 作为连续切换边界；不等待下方图片 / 文件进入视口。
 - observer 在 fixed compact 样式下不更新内联高度，避免 120px 上限 / 单行附件摘要污染 placeholder。
 - 回位后解除固定高度，下一帧调用 `autoGrow(qIndex)` 并重新让 observer 接管。
 
@@ -199,12 +208,14 @@ resolveComposerDocked(currentlyDocked, ownerCanDock, geometry, hysteresis): bool
 ### 11.1 Vitest 纯函数
 
 - owner 未内联可见不固定；
-- anchor 从底部越界固定；
+- 短输入框从底部越界固定；高输入框逐步裁切到固定态投影高度后固定；
 - anchor 从顶部离开不固定；
-- 已固定时部分回归仍保持；完整回归 + gap 后回位；
+- 已固定时投影边界尚未回归则保持；固定态投影高度回归 + gap 后连续回位；
 - 附件区高于视口时仍按 textarea home marker 正常回位；
 - 阈值附近滞回不振荡；
-- 小视口 / 高 composer 的边界。
+- 小视口 / 高 composer 的边界，以及 `240px ↔ 120px` 双向切换连续性。
+- 连续普通输入不写高度；换行增长只有一次 live height mutation；缩短测量不把 live height 写成
+  `auto`，镜像节点测量后立即移除。
 
 ### 11.2 Vue 组件测试
 

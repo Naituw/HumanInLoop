@@ -940,10 +940,26 @@
   flex: 0 0 auto;
 }
 .answer-composer {
+  --composer-docked-textarea-max-height: 120px;
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
   min-width: 0;
+}
+.answer-composer .input-wrap::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border-radius: var(--radius-md);
+  pointer-events: none;
+}
+.answer-composer .input-wrap:focus-within::after {
+  box-shadow: var(--focus-ring);
+}
+.answer-composer .textarea:focus,
+.answer-composer .textarea:focus-visible {
+  box-shadow: var(--clickable-shadow);
 }
 /* A collapsible composer is one real control surface. Its textarea and action row are borderless
    children, so focus and hover belong to the surface instead of sitting behind an overlaid row. */
@@ -972,7 +988,7 @@
   background: var(--control-hover-bg);
 }
 .answer-composer.is-collapsible .input-wrap:focus-within {
-  box-shadow: var(--focus-ring), var(--clickable-shadow);
+  box-shadow: var(--clickable-shadow);
 }
 .answer-composer.is-collapsible .textarea,
 .answer-composer.is-collapsible .textarea.collapsed {
@@ -1055,7 +1071,7 @@
   gap: 7px;
 }
 .answer-composer.is-docked .textarea {
-  max-height: 120px;
+  max-height: var(--composer-docked-textarea-max-height);
 }
 .answer-composer.is-docked .composer-attachments {
   display: flex;

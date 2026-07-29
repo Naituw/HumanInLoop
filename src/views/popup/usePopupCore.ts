@@ -55,7 +55,9 @@ import { useUpdateState } from "./useUpdateState";
 import {
   canComposerDock,
   composerHomeVisibleRatio,
+  DEFAULT_DOCKED_TEXTAREA_MAX_HEIGHT,
   isComposerHomeFullyVisible,
+  projectedDockedComposerHomeHeight,
   resolveActionQuestionIndex,
   resolveComposerDocked,
   shouldApplyScrollSpy,
@@ -67,7 +69,11 @@ import {
   refreshWhatsNextTodos,
   selectedWhatsNextTodo,
 } from "./whatsNextTodos";
-import { settleTextareaHeightAfterBlur } from "./textareaAutosize";
+import {
+  inputMayShrinkTextarea,
+  resizeTextareaToContent,
+  settleTextareaHeightAfterBlur,
+} from "./textareaAutosize";
 
 export function usePopupCore() {
   const { t } = useI18n();
@@ -281,6 +287,36 @@ export function usePopupCore() {
     if (liveHomeHeight > 0) composerHomeHeights[i] = liveHomeHeight;
     const homeHeight = composerHomeHeights[i] ?? 0;
     if (homeHeight <= 0) return null;
+    const textarea = inputRefs.value[i];
+    const liveTextareaHeight =
+      dockedComposerQ.value === i
+        ? 0
+        : textarea?.getBoundingClientRect().height ?? 0;
+    const configuredDockedTextareaMaxHeight = textarea
+      ? Number.parseFloat(
+          getComputedStyle(textarea).getPropertyValue(
+            "--composer-docked-textarea-max-height"
+          )
+        )
+      : Number.NaN;
+    const dockedTextareaMaxHeight = Number.isFinite(
+      configuredDockedTextareaMaxHeight
+    )
+      ? configuredDockedTextareaMaxHeight
+      : DEFAULT_DOCKED_TEXTAREA_MAX_HEIGHT;
+    const liveDockedHomeHeight =
+      dockedComposerQ.value === i
+        ? composerHomeRefs.value[i]?.getBoundingClientRect().height ?? 0
+        : 0;
+    const dockedHomeHeight =
+      liveDockedHomeHeight > 0
+        ? liveDockedHomeHeight
+        : projectedDockedComposerHomeHeight(
+            homeHeight,
+            liveTextareaHeight,
+            dockedTextareaMaxHeight
+          );
+    if (dockedHomeHeight <= 0) return null;
     const releasedHeight =
       dockedComposerQ.value === i
         ? composerDockRef.value?.getBoundingClientRect().height ?? 0
@@ -288,6 +324,7 @@ export function usePopupCore() {
     return {
       homeTop: anchorRect.top,
       homeBottom: anchorRect.top + homeHeight,
+      dockedHomeHeight,
       viewportTop: viewport.top,
       viewportBottom: viewport.bottom,
       viewportBottomAfterUndock: viewport.bottom + releasedHeight,
@@ -1147,17 +1184,9 @@ export function usePopupCore() {
   }
 
   // 输入框随内容自增高（封顶 240px，超出则框内滚动）。仅展开态生效（折叠态固定 1 行）。
-  const MAX_TEXTAREA_H = 240;
-  function autoGrow(i: number = current.value) {
+  function autoGrow(i: number = current.value, allowShrink = true) {
     const el = inputRefs.value[i];
-    if (!el) return;
-    if (!expandedQ(i)) {
-      // 折叠态：清除内联高度，交回 CSS 的 1 行高度。
-      el.style.height = "";
-      return;
-    }
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, MAX_TEXTAREA_H)}px`;
+    resizeTextareaToContent(el, expandedQ(i), allowShrink);
   }
 
   // ===== Speech follows the unified action target, not passive scroll position. =====
@@ -1189,9 +1218,9 @@ export function usePopupCore() {
     setActive(i, false);
     nextTick(() => autoGrow(i));
   }
-  function onComposerInput(i: number) {
+  function onComposerInput(i: number, event: Event) {
     activateComposer(i);
-    autoGrow(i);
+    autoGrow(i, inputMayShrinkTextarea(event));
   }
   function onComposerMouseDown(i: number) {
     activateComposer(i);
