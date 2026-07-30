@@ -1,6 +1,6 @@
 # 需求：弹窗页内查找（⌘F / Ctrl+F）
 
-> 状态：已实现（待真机验收）
+> 状态：已实现并通过真机验收
 > 关联现状：`docs/overview-popup-ui.md`、`src/views/popup/*`、`src/views/settings/useSearch.ts`（范式对照，非复用）
 > 关联计划：`docs/plans/popup-find.md`
 
