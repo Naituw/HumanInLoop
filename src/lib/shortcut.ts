@@ -138,5 +138,9 @@ export function shortcutConflict(s: ShortcutSpec): ConflictReason | null {
   if (mod && !s.alt && !s.shift && ["a", "c", "v", "x", "z"].includes(s.key)) {
     return { key: "editing", params: { key: s.key.toUpperCase() } };
   }
+  // Popup in-page find is fixed to ⌘/⌃F (docs/specs/popup-find.md).
+  if (mod && !s.alt && !s.shift && s.key === "f") {
+    return { key: "find" };
+  }
   return null;
 }

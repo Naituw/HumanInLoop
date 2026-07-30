@@ -48,6 +48,14 @@ daemon 的 `PopupFocusArbiter` 是跨 helper 的唯一焦点所有者：最早�
 
 固定判定与小幅滞回在 `composerDock.ts`，owner、占位高度、ResizeObserver、焦点 / 选区和输入法组合态保护在 `usePopupCore.ts`，固定区外壳由 `ComposerDock.vue` 提供。纵向多题的 composer owner 与 scroll-spy `current` 解耦；固定区显示 `Question i/n` 并可回到原题。固定编辑器仍有焦点时，统一动作目标留在该题：`⌘↵` 跳过题卡 reveal-first，`⌘1–9` 选择后将题卡滚回可见，显式跨题动作才结束旧焦点。完整行为见 `docs/specs/popup-pinned-composer.md`，实施记录见 `docs/plans/popup-pinned-composer.md`。
 
+## 页内查找（⌘F / Ctrl+F）
+
+规格见 `docs/specs/popup-find.md`。弹窗支持浏览器式页内查找：⌘F（Windows/Linux 为 Ctrl+F）在
+导航栏右侧操作区叠放查找条（动作按钮渐隐，条自上方滑入），对共享 Message、题干、预设选项、
+附件名以及 Confirm 详情/选项做连续子串匹配（默认不区分大小写，条上 Aa 可切换），高亮全部命中
+并支持上/下一条与循环；顺序多题会跨题匹配并自动切题。Esc 关闭并清除高亮。实现为
+`usePopupFind` + `FindBar` + `lib/findInDom`，不搜用户答案草稿。
+
 ## 推荐选项
 
 规格见 `docs/specs/recommended-option.md`。`-o!` / `--option!` 与普通选项语义相同，只增加“AI 推荐”标记；一题可有多个推荐项，但不会自动预选。Popup 与历史详情显示绿色推荐 badge，IM 渠道显示本地化推荐前缀；无论展示怎样变化，提交值始终恢复为原始选项文本。

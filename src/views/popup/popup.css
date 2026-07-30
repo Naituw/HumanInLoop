@@ -524,10 +524,25 @@
   font-variant-numeric: tabular-nums;
 }
 .nav-actions {
+  position: relative;
   margin-left: auto;
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 2px;
+  /* Min width keeps layout stable while find bar overlays the buttons. */
+  min-height: 28px;
+  pointer-events: none;
+}
+.nav-actions-btns {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.nav-actions.find-open .nav-actions-btns {
+  opacity: 0;
+  transform: translateY(-4px);
   pointer-events: none;
 }
 .nav-btn {
@@ -660,6 +675,170 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+}
+
+/* —— In-page find in navbar action corner (docs/specs/popup-find.md) —— */
+.popup-find-bar {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  /* Fixed outer width so only the input flexes; count/buttons never reflow the bar. */
+  width: min(320px, calc(100vw - 48px));
+  height: 28px;
+  padding: 0 2px 0 8px;
+  border-radius: 8px;
+  border: var(--hairline) solid var(--border);
+  /* Fully opaque so brand/title never show through on a narrow window. */
+  background: var(--bg);
+  box-shadow: var(--clickable-shadow);
+  pointer-events: auto;
+  transform: translateY(-50%);
+}
+.popup-find-icon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+}
+.popup-find-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  border: none;
+  outline: none;
+  box-shadow: none;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.2;
+  padding: 2px 4px;
+  /* No focus ring — slide-in + button fade carries attention. */
+  appearance: none;
+  -webkit-appearance: none;
+}
+.popup-find-input:focus,
+.popup-find-input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+.popup-find-input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+  display: none;
+}
+.popup-find-input.empty {
+  color: #c41e3a;
+}
+.theme-dark .popup-find-input.empty {
+  color: #ff7b72;
+}
+/* Reserve width for up to "999/999" so 9→10 does not grow the bar. */
+.popup-find-count {
+  flex: 0 0 4.75em;
+  width: 4.75em;
+  text-align: center;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  padding: 0;
+  user-select: none;
+  overflow: hidden;
+}
+.popup-find-count.empty {
+  color: #c41e3a;
+}
+.theme-dark .popup-find-count.empty {
+  color: #ff7b72;
+}
+.popup-find-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: default;
+}
+.popup-find-btn svg {
+  width: 13px;
+  height: 13px;
+}
+.popup-find-btn:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+.popup-find-case {
+  width: auto;
+  min-width: 24px;
+  padding: 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.popup-find-case.active {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+/* Slide down from above into the nav-actions slot; reverse on leave. */
+.popup-find-slide-enter-active,
+.popup-find-slide-leave-active {
+  transition:
+    opacity 0.2s ease,
+    transform 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.popup-find-slide-enter-from {
+  opacity: 0;
+  transform: translateY(calc(-50% - 10px));
+}
+.popup-find-slide-enter-to,
+.popup-find-slide-leave-from {
+  opacity: 1;
+  transform: translateY(-50%);
+}
+.popup-find-slide-leave-to {
+  opacity: 0;
+  transform: translateY(calc(-50% - 10px));
+}
+@media (prefers-reduced-motion: reduce) {
+  .nav-actions-btns,
+  .popup-find-slide-enter-active,
+  .popup-find-slide-leave-active {
+    transition: none;
+  }
+}
+mark.popup-find-hit,
+.popup-find-hit {
+  background: color-mix(in srgb, #ffd60a 72%, transparent);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+mark.popup-find-hit-current,
+.popup-find-hit-current {
+  background: color-mix(in srgb, #ff9f0a 88%, transparent);
+  outline: 1px solid color-mix(in srgb, #ff9f0a 70%, #000);
+  scroll-margin: 64px 12px;
+}
+.theme-dark mark.popup-find-hit,
+.theme-dark .popup-find-hit {
+  background: color-mix(in srgb, #ffd60a 42%, transparent);
+}
+.theme-dark mark.popup-find-hit-current,
+.theme-dark .popup-find-hit-current {
+  background: color-mix(in srgb, #ff9f0a 55%, transparent);
+  outline-color: color-mix(in srgb, #ff9f0a 80%, #fff);
 }
 .options {
   display: flex;

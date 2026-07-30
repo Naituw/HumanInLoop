@@ -52,6 +52,7 @@ import type {
 import { useSpeech } from "./useSpeech";
 import { useAttachments } from "./useAttachments";
 import { useUpdateState } from "./useUpdateState";
+import { usePopupFind } from "./usePopupFind";
 import {
   canComposerDock,
   composerHomeVisibleRatio,
@@ -170,6 +171,9 @@ export function usePopupCore() {
     manuallyActivated: boolean;
   } | null = null;
   let nextSequentialFocusIsManual = false;
+  /** Find-driven sequential navigation: skip auto-focusing the answer composer. */
+  let suppressNextSeqFocus = false;
+  let pendingFindRevealResolve: (() => void) | null = null;
   let lastContentScrollTop = 0;
   let upwardScrollIntentUntil = 0;
   let contentScrollIntentUntil = 0;
@@ -1403,11 +1407,22 @@ export function usePopupCore() {
   // 旧版切题动画完成后：聚焦输入 + 校正高度 + 滚动头部到顶（新面板已挂载、高度确定）。
   function onQuestionEntered() {
     if (verticalMode.value) return;
+    if (suppressNextSeqFocus) {
+      suppressNextSeqFocus = false;
+      autoGrow(current.value);
+      scrollHeaderIntoView();
+      find.refreshFind();
+      pendingFindRevealResolve?.();
+      pendingFindRevealResolve = null;
+      return;
+    }
     if (nextSequentialFocusIsManual) focusComposer(current.value, true);
     else focusComposerIfInitiallyVisible(current.value);
     nextSequentialFocusIsManual = false;
     autoGrow(current.value);
     scrollHeaderIntoView();
+    pendingFindRevealResolve?.();
+    pendingFindRevealResolve = null;
   }
 
   // 纵向导航统一在此闪一下：无论来自「上一个/下一个」按钮还是 ⌘[/⌘]，落点题都整题闪一次（用户要求按钮也闪）。
@@ -1649,6 +1664,71 @@ export function usePopupCore() {
     }
   }
 
+  // ===== In-page find (⌘/Ctrl+F) — see docs/specs/popup-find.md =====
+  const confirmChoiceTexts = computed(() =>
+    confirmRows.value.map((row) => {
+      const d = row.choice.description?.trim();
+      return d ? `${row.choice.label}\n${d}` : row.choice.label;
+    }),
+  );
+  const confirmTitle = computed(() => confirmRequest.value?.title ?? "");
+  const confirmSummary = computed(
+    () => confirmRequest.value?.detail.summary ?? "",
+  );
+  const confirmBodyText = computed(
+    () => confirmRequest.value?.detail.bodyMd ?? "",
+  );
+
+  async function revealQuestionForFind(index: number): Promise<void> {
+    const i = Math.max(0, Math.min(index, total.value - 1));
+    if (verticalMode.value) {
+      setActive(i, true);
+      await nextTick();
+      return;
+    }
+    if (i === current.value) {
+      scrollHeaderIntoView();
+      await nextTick();
+      return;
+    }
+    speech.stopListening();
+    clearComposerOwner();
+    suppressNextSeqFocus = true;
+    nextSequentialFocusIsManual = false;
+    slideDir.value = i > current.value ? "next" : "prev";
+    current.value = i;
+    markVisited(i);
+    await new Promise<void>((resolve) => {
+      pendingFindRevealResolve = resolve;
+      window.setTimeout(() => {
+        if (pendingFindRevealResolve === resolve) {
+          pendingFindRevealResolve = null;
+          resolve();
+        }
+      }, 400);
+    });
+  }
+
+  const find = usePopupFind({
+    contentRef,
+    isConfirm,
+    confirmRequest,
+    messageText,
+    viewSource,
+    attachments,
+    questions,
+    whatsNext,
+    todoPrefix: computed(() => t("popup.todos.optionPrefix")),
+    confirmChoiceTexts,
+    confirmTitle,
+    confirmSummary,
+    confirmToolName,
+    confirmBodyText,
+    currentQ: current,
+    verticalMode,
+    revealQuestion: revealQuestionForFind,
+  });
+
   function startPermissionDiffEnrichment() {
     const edit = permissionEdit.value;
     const id = confirmRequest.value?.id;
@@ -1764,6 +1844,8 @@ export function usePopupCore() {
   function onKeydown(e: KeyboardEvent) {
     const mod = e.metaKey || e.ctrlKey;
     cmdHeld.value = onlyCmdHeld(e);
+    // In-page find (⌘/Ctrl+F, Esc while open, ⌘G, …) — before business shortcuts.
+    if (find.handleFindKeydown(e)) return;
     if (isConfirm.value) {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -2211,6 +2293,20 @@ export function usePopupCore() {
   });
 
   return {
+    // In-page find
+    findActive: find.findActive,
+    findQuery: find.findQuery,
+    findCaseSensitive: find.findCaseSensitive,
+    findCurrent: find.findCurrent,
+    findTotal: find.findTotal,
+    findCountLabel: find.findCountLabel,
+    findNoMatch: find.findNoMatch,
+    findInputEl: find.findInputEl,
+    openFind: find.openFind,
+    closeFind: find.closeFind,
+    goFind: find.goFind,
+    onFindQueryInput: find.onFindQueryInput,
+    toggleFindCase: find.toggleFindCase,
     // 请求 / 加载态
     request,
     confirmRequest,

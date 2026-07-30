@@ -4,6 +4,7 @@
 // flex 子级顺序）。
 import { useI18n } from "vue-i18n";
 import { usePopupContext } from "./context";
+import FindBar from "./FindBar.vue";
 
 const { t } = useI18n();
 const {
@@ -37,6 +38,7 @@ const {
   openTodosWindow,
   openHistoryWindow,
   openSettingsWindow,
+  findActive,
 } = usePopupContext();
 </script>
 
@@ -100,116 +102,126 @@ const {
         >· {{ popupTimeRel }}</span
       >
     </span>
-    <span class="nav-actions">
-      <div v-if="updateAvailable" class="update-wrap">
-        <button
-          class="nav-btn update-btn"
-          type="button"
-          :title="t('popup.nav.update')"
-          @click.stop="toggleUpdatePopover"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 3v12" />
-            <path d="M7 10l5 5 5-5" />
-            <path d="M5 21h14" />
-          </svg>
-          <span class="update-dot"></span>
-        </button>
-        <div v-if="updatePopoverOpen" class="update-popover" @click.stop>
-          <p class="up-title">
-            {{ t("popup.update.title", { version: updateLatest }) }}
-          </p>
-          <div
-            v-if="updateNotesHtml"
-            class="up-notes markdown-body"
-            v-html="updateNotesHtml"
-            @click="onContentClick"
-          ></div>
-          <p v-else class="up-notes muted">{{ t("popup.update.noNotes") }}</p>
-          <p class="up-hint">
-            {{
-              updateStarted
-                ? t("popup.update.startedHint")
-                : t("popup.update.applyHint")
-            }}
-          </p>
-          <p v-if="updateError" class="up-error">{{ updateError }}</p>
-          <div class="up-actions">
-            <button
-              class="btn btn-primary"
-              type="button"
-              :disabled="updating || updateStarted"
-              @click="applyUpdateFromPopup"
-            >
+    <span class="nav-actions" :class="{ 'find-open': findActive }">
+      <!-- Action buttons fade out while find bar occupies this corner. -->
+      <span class="nav-actions-btns" :aria-hidden="findActive ? 'true' : undefined">
+        <div v-if="updateAvailable" class="update-wrap">
+          <button
+            class="nav-btn update-btn"
+            type="button"
+            :title="t('popup.nav.update')"
+            :tabindex="findActive ? -1 : undefined"
+            @click.stop="toggleUpdatePopover"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3v12" />
+              <path d="M7 10l5 5 5-5" />
+              <path d="M5 21h14" />
+            </svg>
+            <span class="update-dot"></span>
+          </button>
+          <div v-if="updatePopoverOpen" class="update-popover" @click.stop>
+            <p class="up-title">
+              {{ t("popup.update.title", { version: updateLatest }) }}
+            </p>
+            <div
+              v-if="updateNotesHtml"
+              class="up-notes markdown-body"
+              v-html="updateNotesHtml"
+              @click="onContentClick"
+            ></div>
+            <p v-else class="up-notes muted">{{ t("popup.update.noNotes") }}</p>
+            <p class="up-hint">
               {{
-                updating
-                  ? t("popup.update.updating")
-                  : t("popup.update.button")
+                updateStarted
+                  ? t("popup.update.startedHint")
+                  : t("popup.update.applyHint")
               }}
-            </button>
+            </p>
+            <p v-if="updateError" class="up-error">{{ updateError }}</p>
+            <div class="up-actions">
+              <button
+                class="btn btn-primary"
+                type="button"
+                :disabled="updating || updateStarted"
+                @click="applyUpdateFromPopup"
+              >
+                {{
+                  updating
+                    ? t("popup.update.updating")
+                    : t("popup.update.button")
+                }}
+              </button>
+            </div>
           </div>
         </div>
-      </div>
-      <button
-        class="nav-btn"
-        :class="{ active: pinned }"
-        type="button"
-        :title="t('popup.nav.pin')"
-        @click="togglePin"
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 17v5" />
-          <path d="M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.8a2 2 0 0 0-1.1-1.8l-1.8-.9A2 2 0 0 1 15 10.8V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
-        </svg>
-      </button>
-      <button
-        v-if="agentConsoleAvailable"
-        class="nav-btn"
-        type="button"
-        :title="t('popup.nav.agentConsole')"
-        :aria-label="t('popup.nav.agentConsole')"
-        @click="openAgentConsoleWindow"
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="3" y="4" width="18" height="16" rx="3" />
-          <path d="M7 13h2l2-4 3 7 2-4h2" />
-        </svg>
-      </button>
-      <button
-        class="nav-btn"
-        type="button"
-        :title="t('popup.nav.todos')"
-        @click="openTodosWindow"
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="3" y="4" width="18" height="16" rx="3" />
-          <path d="M7 10l2 2 3-3" />
-          <path d="M14.5 10.5H18M7 16h11" />
-        </svg>
-      </button>
-      <button
-        class="nav-btn"
-        type="button"
-        :title="t('popup.nav.history')"
-        @click="openHistoryWindow"
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 3v5h5" />
-          <path d="M3.05 13a9 9 0 1 0 2.5-6.36L3 8" />
-          <path d="M12 7v5l3 2" />
-        </svg>
-      </button>
-      <button
-        class="nav-btn"
-        type="button"
-        :title="t('popup.nav.settings')"
-        @click="openSettingsWindow"
-      >
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="12" cy="12" r="3" />
-          <path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z" />
-        </svg>
-      </button>
+        <button
+          class="nav-btn"
+          :class="{ active: pinned }"
+          type="button"
+          :title="t('popup.nav.pin')"
+          :tabindex="findActive ? -1 : undefined"
+          @click="togglePin"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 17v5" />
+            <path d="M9 10.8a2 2 0 0 1-1.1 1.8l-1.8.9A2 2 0 0 0 5 15.2V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.8a2 2 0 0 0-1.1-1.8l-1.8-.9A2 2 0 0 1 15 10.8V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+          </svg>
+        </button>
+        <button
+          v-if="agentConsoleAvailable"
+          class="nav-btn"
+          type="button"
+          :title="t('popup.nav.agentConsole')"
+          :aria-label="t('popup.nav.agentConsole')"
+          :tabindex="findActive ? -1 : undefined"
+          @click="openAgentConsoleWindow"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="4" width="18" height="16" rx="3" />
+            <path d="M7 13h2l2-4 3 7 2-4h2" />
+          </svg>
+        </button>
+        <button
+          class="nav-btn"
+          type="button"
+          :title="t('popup.nav.todos')"
+          :tabindex="findActive ? -1 : undefined"
+          @click="openTodosWindow"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="4" width="18" height="16" rx="3" />
+            <path d="M7 10l2 2 3-3" />
+            <path d="M14.5 10.5H18M7 16h11" />
+          </svg>
+        </button>
+        <button
+          class="nav-btn"
+          type="button"
+          :title="t('popup.nav.history')"
+          :tabindex="findActive ? -1 : undefined"
+          @click="openHistoryWindow"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 3v5h5" />
+            <path d="M3.05 13a9 9 0 1 0 2.5-6.36L3 8" />
+            <path d="M12 7v5l3 2" />
+          </svg>
+        </button>
+        <button
+          class="nav-btn"
+          type="button"
+          :title="t('popup.nav.settings')"
+          :tabindex="findActive ? -1 : undefined"
+          @click="openSettingsWindow"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z" />
+          </svg>
+        </button>
+      </span>
+      <FindBar />
     </span>
   </header>
   <div

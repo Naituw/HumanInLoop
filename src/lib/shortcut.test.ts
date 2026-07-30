@@ -92,6 +92,12 @@ describe("shortcutConflict", () => {
     expect(shortcutConflict(spec({ cmd: true, shift: true, key: "v" }))).toBeNull();
   });
 
+  it("rejects ⌘F reserved for in-page find", () => {
+    expect(shortcutConflict(spec({ cmd: true, key: "f" }))?.key).toBe("find");
+    expect(shortcutConflict(spec({ ctrl: true, key: "f" }))?.key).toBe("find");
+    expect(shortcutConflict(spec({ cmd: true, shift: true, key: "f" }))).toBeNull();
+  });
+
   it("accepts a normal combo", () => {
     expect(shortcutConflict(spec({ cmd: true, key: "d" }))).toBeNull();
   });

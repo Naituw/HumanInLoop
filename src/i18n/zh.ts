@@ -58,6 +58,15 @@ export default {
       viewSource: "查看源码",
       viewRendered: "Markdown 预览",
     },
+    find: {
+      label: "在弹窗中查找",
+      placeholder: "查找",
+      prev: "上一个匹配",
+      next: "下一个匹配",
+      caseSensitive: "区分大小写",
+      close: "关闭查找",
+      ariaShortcut: "Meta+F Control+F",
+    },
     send: "发送",
     prev: "上一个",
     next: "下一个",
@@ -149,6 +158,7 @@ export default {
       brackets: "与「上一题 / 下一题」(⌘[ ⌘]) 冲突",
       options: "与「选项快捷键」(⌘1–9) 冲突",
       editing: "与系统编辑快捷键 (⌘{key}) 冲突，建议加 ⇧ 或换一个",
+      find: "与「查找」(⌘F) 冲突",
     },
   },
   settings: {

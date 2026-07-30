@@ -27,13 +27,13 @@ const {
 
 <template>
   <section v-if="confirmRequest" class="confirm-request">
-    <h1 class="confirm-request-title">{{ confirmRequest.title }}</h1>
-    <p v-if="confirmRequest.detail.summary" class="confirm-reason">
-      <strong>{{ t("popup.permissionReason") }}</strong>
+    <h1 class="confirm-request-title" data-find-seg="confirm-title">{{ confirmRequest.title }}</h1>
+    <p v-if="confirmRequest.detail.summary" class="confirm-reason" data-find-seg="confirm-summary">
+      <strong data-find-skip>{{ t("popup.permissionReason") }}</strong>
       {{ confirmRequest.detail.summary }}
     </p>
     <section class="confirm-tool">
-      <header class="confirm-tool-header">{{ confirmToolName }}</header>
+      <header class="confirm-tool-header" data-find-seg="confirm-tool">{{ confirmToolName }}</header>
       <PermissionDiffPane
         v-if="permissionEdit && permissionDiff"
         :model="permissionDiff"
@@ -47,6 +47,7 @@ const {
         <summary>{{ t("popup.permissionDiff.originalParams") }}</summary>
         <div
           class="markdown-body confirm-detail"
+          data-find-seg="confirm-body"
           v-html="confirmDetailHtml"
           @click="onContentClick"
         ></div>
@@ -54,13 +55,14 @@ const {
       <div
         v-else-if="confirmRequest.detail.bodyMd"
         class="markdown-body confirm-detail"
+        data-find-seg="confirm-body"
         v-html="confirmDetailHtml"
         @click="onContentClick"
       ></div>
     </section>
     <div class="confirm-options" role="radiogroup" :aria-label="confirmRequest.title">
       <!-- 前缀档位选择器（D51）：所有档位 group 共享；切档实时更新下方选项文案。 -->
-      <div v-if="confirmVariantLevels.length" class="confirm-variant-bar">
+      <div v-if="confirmVariantLevels.length" class="confirm-variant-bar" data-find-skip>
         <span class="confirm-variant-title">{{ t("popup.prefixLevel") }}</span>
         <div class="confirm-variant-segments" role="tablist">
           <button
@@ -92,12 +94,12 @@ const {
         @keydown.enter.prevent="selectConfirmChoice(row.index)"
         @keydown.space.prevent="selectConfirmChoice(row.index)"
       >
-        <span class="check radio" aria-hidden="true"></span>
-        <span class="label confirm-option-label">
+        <span class="check radio" aria-hidden="true" data-find-skip></span>
+        <span class="label confirm-option-label" :data-find-seg="`confirm-choice-${rowPosition}`">
           <span>{{ row.choice.label }}</span>
           <small v-if="row.choice.description">{{ row.choice.description }}</small>
         </span>
-        <kbd v-if="rowPosition < 9" class="opt-sc">⌘{{ rowPosition + 1 }}</kbd>
+        <kbd v-if="rowPosition < 9" class="opt-sc" data-find-skip>⌘{{ rowPosition + 1 }}</kbd>
       </div>
     </div>
     <label v-if="showConfirmInput && confirmInput" class="confirm-input-block">

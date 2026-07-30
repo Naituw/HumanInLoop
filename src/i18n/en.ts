@@ -61,6 +61,15 @@ export default {
       viewSource: "View source",
       viewRendered: "Rendered preview",
     },
+    find: {
+      label: "Find in popup",
+      placeholder: "Find",
+      prev: "Previous match",
+      next: "Next match",
+      caseSensitive: "Case sensitive",
+      close: "Close find",
+      ariaShortcut: "Meta+F Control+F",
+    },
     send: "Send",
     prev: "Previous",
     next: "Next",
@@ -157,6 +166,7 @@ export default {
       brackets: "Conflicts with Previous / Next (⌘[ ⌘])",
       options: "Conflicts with option shortcuts (⌘1–9)",
       editing: "Conflicts with system edit shortcut (⌘{key}); add ⇧ or pick another",
+      find: "Conflicts with Find (⌘F)",
     },
   },
   settings: {
