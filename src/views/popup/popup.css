@@ -605,8 +605,7 @@
   width: 280px;
   max-height: 360px;
   overflow-y: auto;
-  /* 用不透明的 --bg：弹窗窗体是毛玻璃，--bg-elevated 仅 3%~6% alpha 会透出底下文字 */
-  background: var(--bg);
+  background: var(--surface-overlay);
   border: 1px solid var(--border, rgba(127, 127, 127, 0.2));
   border-radius: 10px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.28);
@@ -693,7 +692,7 @@
   border-radius: 8px;
   border: var(--hairline) solid var(--border);
   /* Fully opaque so brand/title never show through on a narrow window. */
-  background: var(--bg);
+  background: var(--surface-overlay);
   box-shadow: var(--clickable-shadow);
   pointer-events: auto;
   transform: translateY(-50%);
@@ -1217,7 +1216,8 @@ mark.popup-find-hit-current,
   min-width: 0;
   padding: 8px var(--space-4) 10px;
   border-top: var(--hairline) solid var(--border);
-  background: var(--bg);
+  /* Opaque so scrolled message content does not bleed through the dock. */
+  background: var(--surface-overlay);
   box-shadow: 0 -8px 22px color-mix(in srgb, #000 8%, transparent);
 }
 .composer-dock-home {
@@ -1661,8 +1661,7 @@ mark.popup-find-hit-current,
 }
 .confirm-box {
   width: min(320px, 84%);
-  /* 用不透明 --bg：弹窗是毛玻璃，--card-bg 仅 3~6% alpha 会透出底下内容 */
-  background: var(--bg);
+  background: var(--surface-overlay);
   border: var(--hairline) solid var(--border);
   border-radius: var(--radius-md, 12px);
   padding: 18px 18px 14px;

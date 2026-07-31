@@ -1562,7 +1562,7 @@ onBeforeUnmount(() => {
   padding: 5px 8px;
   border: var(--hairline) solid var(--border);
   border-radius: 6px;
-  background: var(--bg);
+  background: var(--surface-overlay);
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
   color: var(--text-primary);
   font-size: 11px;
@@ -1674,7 +1674,7 @@ onBeforeUnmount(() => {
   padding: 7px 9px;
   border: var(--hairline) solid var(--border);
   border-radius: 7px;
-  background: var(--bg);
+  background: var(--surface-overlay);
   box-shadow: 0 5px 18px rgba(0, 0, 0, 0.22);
   color: var(--text-primary);
   font-size: 11px;
@@ -1693,7 +1693,7 @@ onBeforeUnmount(() => {
   height: 8px;
   border-right: var(--hairline) solid var(--border);
   border-bottom: var(--hairline) solid var(--border);
-  background: var(--bg);
+  background: var(--surface-overlay);
   transform: rotate(45deg);
 }
 .td-del {
@@ -1924,8 +1924,7 @@ onBeforeUnmount(() => {
   width: 300px;
   padding: 20px;
   border-radius: var(--radius, 12px);
-  /* --card-bg 是近乎透明的叠色，会与底下文字混叠；模态框必须不透明底。 */
-  background: var(--bg, #fff);
+  background: var(--surface-overlay);
   border: var(--hairline) solid var(--border);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
 }

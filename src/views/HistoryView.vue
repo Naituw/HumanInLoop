@@ -470,7 +470,7 @@ onBeforeUnmount(() => {
   padding: 4px;
   border: var(--hairline) solid var(--border);
   border-radius: var(--radius-sm, 8px);
-  background: var(--card-bg, var(--bg-elevated));
+  background: var(--surface-overlay);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
 }
 .clear-menu button {
@@ -703,7 +703,8 @@ onBeforeUnmount(() => {
   width: 320px;
   padding: 20px;
   border-radius: var(--radius, 12px);
-  background: var(--card-bg, var(--bg-elevated));
+  border: var(--hairline) solid var(--border);
+  background: var(--surface-overlay);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
 }
 .dialog h3 {

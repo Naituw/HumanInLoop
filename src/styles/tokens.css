@@ -35,6 +35,10 @@
 .theme-light {
   /* 窗口底带一点灰度：让偏白的可点击表面（控件/选项）能从底上浮出来。 */
   --bg: #f0f0f2;
+  /* Floating surfaces (menus / popovers / modal panels) must stay fully opaque.
+     --bg-elevated and --card-bg are low-alpha washes for in-flow elevation only;
+     using them on overlays lets content underneath show through (esp. on glass). */
+  --surface-overlay: var(--bg);
   --bg-elevated: rgba(0, 0, 0, 0.045);
   --card-bg: rgba(0, 0, 0, 0.05);
   /* 分割线/边框刻意做得很轻（用户反馈线太重显厚重）：层级主要靠背景色差表达。 */
