@@ -5,51 +5,95 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { applyTheme } from "../lib/theme";
 import { applyLanguage } from "../i18n";
 import {
-  clearHistory,
+  clearAllHistory,
+  deleteHistoryEntries,
   getHistory,
   getHistoryProjects,
   historyInit,
+  resolveHistorySessionTitles,
 } from "../lib/ipc";
-import type { HistoryEntry, ProjectInfo, ThemeMode } from "../lib/types";
-import { agentKindOf, workspaceNameOf } from "../lib/history";
+import type {
+  HistoryEntry,
+  HistoryOpenRequest,
+  HistorySessionGroup,
+  HistorySessionRef,
+  ProjectInfo,
+  ThemeMode,
+} from "../lib/types";
+import {
+  ALL_HISTORY_SESSIONS,
+  agentKindOf,
+  groupHistorySessions,
+  historySessionOf,
+  historySessionToken,
+  matchesHistorySession,
+  shortSessionId,
+  workspaceNameOf,
+} from "../lib/history";
 import HistoryDetail from "../components/HistoryDetail.vue";
 
 const { t, locale } = useI18n();
-
 const ALL = "__all__";
 
 const currentProject = ref("");
 const currentProjectName = ref("");
 const projects = ref<ProjectInfo[]>([]);
-const selected = ref<string>(ALL); // ALL or a project key ("" = unknown project)
+const selected = ref<string>(ALL);
+const selectedSession = ref(ALL_HISTORY_SESSIONS);
 const entries = ref<HistoryEntry[]>([]);
 const activeId = ref<string | null>(null);
 const loading = ref(false);
-
-// Keyword search: whitespace-split, AND-matched, case-insensitive.
 const query = ref("");
+const sessionTitles = ref<Record<string, string>>({});
+const sessionTitleRequestedAt = new Map<string, number>();
+const SESSION_TITLE_RETRY_MS = 30_000;
 
-// Clear confirmation: null | "current" | "all".
-const confirmKind = ref<null | "current" | "all">(null);
+const confirmKind = ref<null | "scope" | "all">(null);
+const pendingDeleteIds = ref<string[]>([]);
+const pendingDeleteContext = ref<null | {
+  project: string;
+  session: string;
+  keywords: string;
+}>(null);
+const deleteBusy = ref(false);
+const deleteError = ref("");
+const deleteNotice = ref("");
 const menuOpen = ref(false);
+const scopeMenuOpen = ref(false);
+const scopeMenuProject = ref(ALL);
+const pendingDeleteScopeKind = ref<null | "search" | "session" | "project">(null);
+let queuedOpenRequest: HistoryOpenRequest | null = null;
+let noticeTimer: ReturnType<typeof setTimeout> | null = null;
 
-// Lowercased keywords (whitespace-split, empties dropped).
 const keywords = computed(() =>
   query.value.trim().toLowerCase().split(/\s+/).filter(Boolean)
 );
 
-// Localized agent family label (falls back to the raw id for unknown families).
-function agentLabelOf(e: HistoryEntry): string {
-  const k = agentKindOf(e);
-  if (!k) return "";
-  const label = t(`agents.kind.${k}`);
-  return label === `agents.kind.${k}` ? k : label;
+function agentLabel(kind: string): string {
+  if (!kind) return "";
+  const label = t(`agents.kind.${kind}`);
+  return label === `agents.kind.${kind}` ? kind : label;
 }
 
-// Build the searchable haystack for one entry: shared message + each question
-// prompt + selected options + typed replies + attachment / reply file names +
-// workspace (name + full path) + agent (family id + localized label) + caller
-// source name + channel (id + localized name).
+function agentLabelOf(e: HistoryEntry): string {
+  return agentLabel(agentKindOf(e));
+}
+
+function fileName(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
+
+function projectName(path: string): string {
+  if (!path) return t("history.unknownProject");
+  return projects.value.find((project) => project.key === path)?.name || fileName(path);
+}
+
+function channelName(id: string): string {
+  const key = `history.channel.${id}`;
+  const name = t(key);
+  return name === key ? t("history.channel.unknown") : name;
+}
+
 function haystackOf(e: HistoryEntry): string {
   const parts: string[] = [];
   if (e.message.text) parts.push(e.message.text);
@@ -61,114 +105,276 @@ function haystackOf(e: HistoryEntry): string {
     for (const img of a.images) parts.push(fileName(img));
     for (const f of a.files) parts.push(fileName(f));
   }
-  if (e.project) {
-    parts.push(e.project);
-    parts.push(workspaceNameOf(e));
-  }
+  if (e.project) parts.push(e.project, workspaceNameOf(e));
   const kind = agentKindOf(e);
-  if (kind) {
-    parts.push(kind);
-    parts.push(agentLabelOf(e));
-  }
+  if (kind) parts.push(kind, agentLabel(kind));
+  const session = historySessionOf(e);
+  const token = historySessionToken(session);
+  if (session.type === "agent") parts.push(session.sessionId, session.agentKind);
+  if (session.type === "mcp") parts.push(session.instanceId, session.project, "mcp");
+  if (sessionTitles.value[token]) parts.push(sessionTitles.value[token]);
   if (e.source) parts.push(e.source);
-  parts.push(e.channel);
-  parts.push(channelName(e.channel));
+  parts.push(e.channel, channelName(e.channel));
   return parts.join("\n").toLowerCase();
 }
 
-// Entries matching every keyword (applied on top of the project filter).
-const filteredEntries = computed(() => {
-  const kws = keywords.value;
-  if (!kws.length) return entries.value;
-  return entries.value.filter((e) => {
-    const hay = haystackOf(e);
-    return kws.every((k) => hay.includes(k));
-  });
-});
-
-const activeEntry = computed(
-  () => filteredEntries.value.find((e) => e.id === activeId.value) ?? null
+const projectEntries = computed(() =>
+  selected.value === ALL
+    ? entries.value
+    : entries.value.filter((entry) => entry.project === selected.value)
 );
-
-function fileName(path: string): string {
-  return path.split(/[\\/]/).pop() || path;
-}
-
-function escapeHtml(s: string): string {
-  return s.replace(
-    /[&<>"]/g,
-    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!
-  );
-}
-
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-// Render text with matched keywords wrapped in <mark>. The text is
-// HTML-escaped first; keywords are escaped the same way so matching stays in
-// sync (and special chars can never break out of the markup).
-function highlightText(text: string): string {
-  const esc = escapeHtml(text);
-  const kws = keywords.value;
-  if (!kws.length) return esc;
-  const pattern = kws
-    .map((k) => escapeRegExp(escapeHtml(k)))
-    .sort((a, b) => b.length - a.length)
-    .join("|");
-  try {
-    return esc.replace(new RegExp(`(${pattern})`, "gi"), "<mark>$1</mark>");
-  } catch {
-    return esc;
-  }
-}
-
-function highlightedSummary(e: HistoryEntry): string {
-  return highlightText(summaryOf(e) || t("history.noReply"));
-}
-
-// Keep the selection valid as the filtered set changes (typing / reload).
-watch(filteredEntries, (list) => {
-  if (!list.some((e) => e.id === activeId.value)) {
-    activeId.value = list.length ? list[0].id : null;
-  }
-});
+const sessionGroups = computed(() => groupHistorySessions(projectEntries.value));
 
 interface Opt {
   token: string;
   label: string;
+  compactLabel: string;
+  title?: string;
 }
 
 const projectOptions = computed<Opt[]>(() => {
-  const opts: Opt[] = [{ token: ALL, label: t("history.allProjects") }];
+  const opts: Opt[] = [
+    {
+      token: ALL,
+      label: t("history.allProjects"),
+      compactLabel: t("history.allProjects"),
+    },
+  ];
   let hasCurrent = false;
-  for (const p of projects.value) {
-    if (p.key === currentProject.value) hasCurrent = true;
-    const name = p.key ? p.name : t("history.unknownProject");
-    opts.push({ token: p.key, label: `${name} (${p.count})` });
+  for (const project of projects.value) {
+    if (project.key === currentProject.value) hasCurrent = true;
+    const name = project.key ? project.name : t("history.unknownProject");
+    opts.push({
+      token: project.key,
+      label: `${name} (${project.count})`,
+      compactLabel: name,
+      title: project.key,
+    });
   }
-  // Always offer the current project even if it has no history yet.
   if (!hasCurrent && currentProject.value) {
-    opts.push({ token: currentProject.value, label: `${currentProjectName.value} (0)` });
+    opts.push({
+      token: currentProject.value,
+      label: `${currentProjectName.value || projectName(currentProject.value)} (0)`,
+      compactLabel: currentProjectName.value || projectName(currentProject.value),
+      title: currentProject.value,
+    });
   }
   return opts;
 });
 
-function channelName(id: string): string {
-  const key = `history.channel.${id}`;
-  const name = t(key);
-  return name === key ? t("history.channel.unknown") : name;
+function sessionOption(group: HistorySessionGroup): Opt {
+  const count = group.count;
+  const ref = group.ref;
+  if (ref.type === "agent") {
+    const title = sessionTitles.value[group.token];
+    const id = shortSessionId(ref.sessionId);
+    const compactLabel = title
+      ? t("history.sessionAgentTitleCompact", {
+          agent: agentLabel(ref.agentKind),
+          title,
+          id,
+        })
+      : t("history.sessionAgentCompact", { agent: agentLabel(ref.agentKind), id });
+    return {
+      token: group.token,
+      label: title
+        ? t("history.sessionAgentTitle", {
+            agent: agentLabel(ref.agentKind),
+            title,
+            id,
+            count,
+          })
+        : t("history.sessionAgent", { agent: agentLabel(ref.agentKind), id, count }),
+      compactLabel,
+      title: `${agentLabel(ref.agentKind)} · ${title ? `${title} · ` : ""}${ref.sessionId}`,
+    };
+  }
+  if (ref.type === "mcp") {
+    return {
+      token: group.token,
+      label: t("history.sessionMcp", { id: shortSessionId(ref.instanceId), count }),
+      compactLabel: t("history.sessionMcpCompact", {
+        id: shortSessionId(ref.instanceId),
+      }),
+      title: `${t("history.sessionMcpFull")} · ${ref.instanceId} · ${ref.project}`,
+    };
+  }
+  return {
+    token: group.token,
+    label: t("history.sessionUnbound", { count }),
+    compactLabel: t("history.sessionUnboundCompact"),
+  };
 }
 
-function summaryOf(e: HistoryEntry): string {
-  const msg = e.message.text.trim();
-  if (msg) return firstLine(msg);
-  const q = e.questions.find((x) => x.message.trim());
-  return q ? firstLine(q.message) : "";
+const sessionOptions = computed<Opt[]>(() => [
+  {
+    token: ALL_HISTORY_SESSIONS,
+    label: t("history.allSessions"),
+    compactLabel: t("history.allSessions"),
+  },
+  ...sessionGroups.value.map(sessionOption),
+]);
+
+function entriesForProject(projectToken: string): HistoryEntry[] {
+  return projectToken === ALL
+    ? entries.value
+    : entries.value.filter((entry) => entry.project === projectToken);
 }
 
-function firstLine(s: string): string {
-  const line = s.split("\n").find((l) => l.trim()) ?? "";
+const scopeMenuSessionGroups = computed(() =>
+  groupHistorySessions(entriesForProject(scopeMenuProject.value))
+);
+const scopeMenuSessionOptions = computed<Opt[]>(() => [
+  {
+    token: ALL_HISTORY_SESSIONS,
+    label: t("history.allSessions"),
+    compactLabel: t("history.allSessions"),
+  },
+  ...scopeMenuSessionGroups.value.map(sessionOption),
+]);
+const scopeMenuSpecificSessionOptions = computed(() =>
+  scopeMenuSessionOptions.value.slice(1)
+);
+const scopeMenuAllSessionsLabel = computed(() =>
+  scopeMenuProject.value === ALL
+    ? t("history.allProjectsAllSessions")
+    : t("history.thisProjectAllSessions")
+);
+
+const selectedProjectOption = computed(
+  () =>
+    projectOptions.value.find((option) => option.token === selected.value) ??
+    projectOptions.value[0]
+);
+const selectedSessionOption = computed(
+  () =>
+    sessionOptions.value.find((option) => option.token === selectedSession.value) ??
+    sessionOptions.value[0]
+);
+const scopeButtonLabel = computed(
+  () => `${selectedProjectOption.value.compactLabel} · ${selectedSessionOption.value.compactLabel}`
+);
+const scopeButtonTooltip = computed(() =>
+  [
+    selectedProjectOption.value.title || selectedProjectOption.value.compactLabel,
+    selectedSessionOption.value.title || selectedSessionOption.value.compactLabel,
+  ].join(" · ")
+);
+
+const sessionEntries = computed(() =>
+  projectEntries.value.filter((entry) =>
+    matchesHistorySession(entry, selectedSession.value)
+  )
+);
+
+const filteredEntries = computed(() => {
+  const kws = keywords.value;
+  if (!kws.length) return sessionEntries.value;
+  return sessionEntries.value.filter((entry) => {
+    const haystack = haystackOf(entry);
+    return kws.every((keyword) => haystack.includes(keyword));
+  });
+});
+
+const cleanupScopeKind = computed<"search" | "session" | "project" | "all">(
+  () => {
+    if (keywords.value.length) return "search";
+    if (selectedSession.value !== ALL_HISTORY_SESSIONS) return "session";
+    if (selected.value !== ALL) return "project";
+    return "all";
+  }
+);
+const cleanupScopeEntries = computed(() =>
+  keywords.value.length ? filteredEntries.value : sessionEntries.value
+);
+const showScopeCleanup = computed(() => cleanupScopeKind.value !== "all");
+const scopeCleanupLabel = computed(() => {
+  const n = cleanupScopeEntries.value.length;
+  switch (cleanupScopeKind.value) {
+    case "search":
+      return t("history.deleteSearchResults", { n });
+    case "session":
+      return t("history.clearSelectedSession", { n });
+    case "project":
+      return t("history.clearSelectedProject", { n });
+    case "all":
+      return t("history.clearAllCount", { n });
+  }
+});
+const scopeConfirmTitle = computed(() => {
+  switch (pendingDeleteScopeKind.value) {
+    case "search":
+      return t("history.confirmDeleteSearchTitle");
+    case "session":
+      return t("history.confirmClearSelectedSessionTitle");
+    case "project":
+      return t("history.confirmClearSelectedProjectTitle");
+    default:
+      return "";
+  }
+});
+const scopeConfirmDesc = computed(() => {
+  const n = pendingDeleteIds.value.length;
+  switch (pendingDeleteScopeKind.value) {
+    case "search":
+      return t("history.confirmDeleteSearchDesc", { n });
+    case "session":
+      return t("history.confirmClearSelectedSessionDesc", { n });
+    case "project":
+      return t("history.confirmClearSelectedProjectDesc", { n });
+    default:
+      return "";
+  }
+});
+
+const activeEntry = computed(
+  () => filteredEntries.value.find((entry) => entry.id === activeId.value) ?? null
+);
+const activeSessionTitle = computed(() => {
+  const entry = activeEntry.value;
+  if (!entry) return "";
+  return sessionTitles.value[historySessionToken(historySessionOf(entry))] ?? "";
+});
+
+function escapeHtml(value: string): string {
+  return value.replace(
+    /[&<>"]/g,
+    (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[char]!
+  );
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function highlightText(value: string): string {
+  const escaped = escapeHtml(value);
+  const kws = keywords.value;
+  if (!kws.length) return escaped;
+  const pattern = kws
+    .map((keyword) => escapeRegExp(escapeHtml(keyword)))
+    .sort((a, b) => b.length - a.length)
+    .join("|");
+  try {
+    return escaped.replace(new RegExp(`(${pattern})`, "gi"), "<mark>$1</mark>");
+  } catch {
+    return escaped;
+  }
+}
+
+function highlightedSummary(entry: HistoryEntry): string {
+  return highlightText(summaryOf(entry) || t("history.noReply"));
+}
+
+function summaryOf(entry: HistoryEntry): string {
+  const message = entry.message.text.trim();
+  if (message) return firstLine(message);
+  const question = entry.questions.find((item) => item.message.trim());
+  return question ? firstLine(question.message) : "";
+}
+
+function firstLine(value: string): string {
+  const line = value.split("\n").find((item) => item.trim()) ?? "";
   return line.replace(/^#+\s*/, "").trim();
 }
 
@@ -180,111 +386,325 @@ function relativeTime(ms: number): string {
   if (min < 60) return t("history.time.minutesAgo", { n: min });
   const hr = Math.floor(min / 60);
   if (hr < 24) return t("history.time.hoursAgo", { n: hr });
-  const d = new Date(ms);
-  const yd = new Date(now - 86400000);
+  const date = new Date(ms);
+  const yesterday = new Date(now - 86400000);
   if (
-    d.getFullYear() === yd.getFullYear() &&
-    d.getMonth() === yd.getMonth() &&
-    d.getDate() === yd.getDate()
+    date.getFullYear() === yesterday.getFullYear() &&
+    date.getMonth() === yesterday.getMonth() &&
+    date.getDate() === yesterday.getDate()
   ) {
     return t("history.time.yesterday");
   }
   try {
-    return new Intl.DateTimeFormat(locale.value, { dateStyle: "short" }).format(d);
+    return new Intl.DateTimeFormat(locale.value, { dateStyle: "short" }).format(date);
   } catch {
-    return d.toLocaleDateString();
+    return date.toLocaleDateString();
   }
+}
+
+watch(filteredEntries, (list) => {
+  if (!list.some((entry) => entry.id === activeId.value)) {
+    activeId.value = list.length ? list[0].id : null;
+  }
+});
+
+watch(sessionGroups, (groups) => {
+  if (
+    selectedSession.value !== ALL_HISTORY_SESSIONS &&
+    !groups.some((group) => group.token === selectedSession.value)
+  ) {
+    selectedSession.value = ALL_HISTORY_SESSIONS;
+  }
+});
+
+watch(projectOptions, (options) => {
+  if (!options.some((option) => option.token === selected.value)) {
+    selected.value = ALL;
+    selectedSession.value = ALL_HISTORY_SESSIONS;
+  }
+});
+
+async function refreshSessionTitles(list: HistoryEntry[]) {
+  const now = Date.now();
+  const requests = groupHistorySessions(list)
+    .filter(
+      (group) =>
+        group.ref.type === "agent" &&
+        !sessionTitles.value[group.token] &&
+        now - (sessionTitleRequestedAt.get(group.token) ?? 0) >= SESSION_TITLE_RETRY_MS
+    )
+    .map((group) => {
+      const ref = group.ref as Extract<HistorySessionRef, { type: "agent" }>;
+      return {
+        token: group.token,
+        agentKind: ref.agentKind,
+        sessionId: ref.sessionId,
+      };
+    });
+  if (!requests.length) return;
+  for (const request of requests) sessionTitleRequestedAt.set(request.token, now);
+  try {
+    const results = await resolveHistorySessionTitles(requests);
+    const next = { ...sessionTitles.value };
+    for (const result of results) next[result.token] = result.title;
+    sessionTitles.value = next;
+  } catch {
+    // Titles are a best-effort enhancement; identity and filtering remain available.
+  }
+}
+
+let loadSeq = 0;
+let openInFlight = 0;
+let reloadAfterOpen = false;
+function acceptEntries(list: HistoryEntry[]) {
+  entries.value = list;
+  if (!list.some((entry) => entry.id === activeId.value)) {
+    activeId.value = filteredEntries.value[0]?.id ?? null;
+  }
+  void refreshSessionTitles(list);
 }
 
 async function reload() {
+  const seq = ++loadSeq;
   loading.value = true;
   try {
-    const list =
-      selected.value === ALL
-        ? await getHistory(null, true)
-        : await getHistory(selected.value, false);
-    entries.value = list;
-    // Preserve the entry the user is currently viewing; only fall back to the
-    // first one when the previous selection no longer exists (or none was set).
-    if (!list.some((e) => e.id === activeId.value)) {
-      activeId.value = list.length ? list[0].id : null;
-    }
+    const list = await getHistory(null, true);
+    if (seq !== loadSeq) return;
+    acceptEntries(list);
   } finally {
-    loading.value = false;
+    if (seq === loadSeq) loading.value = false;
   }
 }
 
-async function onSelectProject(token: string) {
-  selected.value = token;
+function toggleScopeMenu() {
+  menuOpen.value = false;
+  scopeMenuProject.value = selected.value;
+  scopeMenuOpen.value = !scopeMenuOpen.value;
+}
+
+function selectScope(projectToken: string, sessionToken: string) {
+  selected.value = projectToken;
+  selectedSession.value = sessionToken;
+  scopeMenuOpen.value = false;
+  activeId.value = filteredEntries.value[0]?.id ?? null;
+}
+
+function toggleCleanupMenu() {
+  scopeMenuOpen.value = false;
+  menuOpen.value = !menuOpen.value;
+}
+
+let openSeq = 0;
+async function applyOpenRequest(request: HistoryOpenRequest) {
+  const seq = ++openSeq;
+  openInFlight += 1;
+  const requestProject = request.project ?? currentProject.value;
+  if (request.project !== undefined && request.project !== null) {
+    currentProject.value = request.project;
+    currentProjectName.value = projectName(request.project);
+  }
+  selectedSession.value = ALL_HISTORY_SESSIONS;
   activeId.value = null;
+  const load = ++loadSeq;
+  loading.value = true;
+  try {
+    const allEntries = await getHistory(null, true);
+    if (seq !== openSeq || load !== loadSeq) return;
+    acceptEntries(allEntries);
+    if (request.target) {
+      const targetToken = historySessionToken(request.target);
+      if (allEntries.some((entry) => matchesHistorySession(entry, targetToken))) {
+        selected.value = ALL;
+        selectedSession.value = targetToken;
+        activeId.value = filteredEntries.value[0]?.id ?? null;
+        return;
+      }
+    }
+
+    selected.value = request.all ? ALL : requestProject;
+    selectedSession.value = ALL_HISTORY_SESSIONS;
+    activeId.value = filteredEntries.value[0]?.id ?? null;
+  } finally {
+    if (seq === openSeq && load === loadSeq) loading.value = false;
+    openInFlight -= 1;
+    if (openInFlight === 0 && reloadAfterOpen) {
+      reloadAfterOpen = false;
+      void refreshAfterHistoryUpdate();
+    }
+  }
+}
+
+async function refreshAfterHistoryUpdate() {
+  const nextProjects = await getHistoryProjects();
+  if (openInFlight > 0) {
+    reloadAfterOpen = true;
+    return;
+  }
+  projects.value = nextProjects;
   await reload();
 }
 
-function askClear(kind: "current" | "all") {
+async function handleOpenRequest(request: HistoryOpenRequest) {
   menuOpen.value = false;
+  scopeMenuOpen.value = false;
+  if (deleteBusy.value) {
+    queuedOpenRequest = request;
+    return;
+  }
+  confirmKind.value = null;
+  pendingDeleteIds.value = [];
+  pendingDeleteContext.value = null;
+  pendingDeleteScopeKind.value = null;
+  deleteError.value = "";
+  query.value = "";
+  await applyOpenRequest(request);
+}
+
+function askClear(kind: "scope" | "all") {
+  menuOpen.value = false;
+  scopeMenuOpen.value = false;
+  deleteError.value = "";
+  if (kind === "scope") {
+    pendingDeleteIds.value = cleanupScopeEntries.value.map((entry) => entry.id);
+    if (!pendingDeleteIds.value.length) return;
+    const scopeKind = cleanupScopeKind.value;
+    if (scopeKind === "all") {
+      pendingDeleteIds.value = [];
+      return;
+    }
+    pendingDeleteScopeKind.value = scopeKind;
+    pendingDeleteContext.value = {
+      project: selectedProjectOption.value.compactLabel,
+      session: selectedSessionOption.value.compactLabel,
+      keywords: query.value.trim() || t("history.noKeywords"),
+    };
+  } else {
+    pendingDeleteIds.value = [];
+    pendingDeleteContext.value = null;
+    pendingDeleteScopeKind.value = null;
+  }
   confirmKind.value = kind;
+}
+
+function closeConfirm() {
+  if (deleteBusy.value) return;
+  confirmKind.value = null;
+  pendingDeleteIds.value = [];
+  pendingDeleteContext.value = null;
+  pendingDeleteScopeKind.value = null;
+  deleteError.value = "";
+}
+
+function showDeleteNotice(count: number) {
+  deleteNotice.value = t("history.deletedCount", { n: count });
+  if (noticeTimer) clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => (deleteNotice.value = ""), 2500);
+}
+
+function onWindowPointerDown(event: PointerEvent) {
+  const target = event.target;
+  if (
+    menuOpen.value &&
+    (!(target instanceof Element) || !target.closest(".clear-wrap"))
+  ) {
+    menuOpen.value = false;
+  }
+  if (
+    scopeMenuOpen.value &&
+    (!(target instanceof Element) || !target.closest(".scope-wrap"))
+  ) {
+    scopeMenuOpen.value = false;
+  }
+}
+
+function onWindowBlur() {
+  menuOpen.value = false;
+  scopeMenuOpen.value = false;
 }
 
 async function doClear() {
   const kind = confirmKind.value;
-  confirmKind.value = null;
-  if (!kind) return;
-  if (kind === "all") {
-    await clearHistory(true, null);
-  } else {
-    const proj = selected.value === ALL ? currentProject.value : selected.value;
-    await clearHistory(false, proj);
+  if (!kind || deleteBusy.value) return;
+  const ids = [...pendingDeleteIds.value];
+  deleteBusy.value = true;
+  deleteError.value = "";
+  try {
+    const count =
+      kind === "all" ? await clearAllHistory() : await deleteHistoryEntries(ids);
+    confirmKind.value = null;
+    pendingDeleteIds.value = [];
+    pendingDeleteContext.value = null;
+    pendingDeleteScopeKind.value = null;
+    showDeleteNotice(count);
+    projects.value = await getHistoryProjects();
+    await reload();
+  } catch (error) {
+    deleteError.value = t("history.deleteFailed", { error: String(error) });
+  } finally {
+    deleteBusy.value = false;
+    const queued = queuedOpenRequest;
+    queuedOpenRequest = null;
+    if (queued) await handleOpenRequest(queued);
   }
-  projects.value = await getHistoryProjects();
-  await reload();
 }
 
 let unlistenUpdated: UnlistenFn | null = null;
 let unlistenSettings: UnlistenFn | null = null;
+let unlistenOpenTarget: UnlistenFn | null = null;
 
 onMounted(async () => {
+  window.addEventListener("pointerdown", onWindowPointerDown);
+  window.addEventListener("blur", onWindowBlur);
   const init = await historyInit();
   applyTheme(init.theme);
-  // 精确语言来自 history_init（main.ts 只做 auto 兜底，不再读配置）。
   applyLanguage(init.lang);
   projects.value = await getHistoryProjects();
 
   const params = new URLSearchParams(window.location.search);
-  // When opened via the unified GUI host, the caller's project is carried in the URL
-  // (the host process's own project is meaningless). Prefer it over historyInit()'s.
   const urlProject = params.get("project");
-  if (urlProject !== null) {
-    currentProject.value = urlProject;
-    currentProjectName.value = params.get("projectName") ?? urlProject;
-  } else {
-    currentProject.value = init.project;
-    currentProjectName.value = init.projectName;
-  }
+  currentProject.value = urlProject ?? init.project;
+  currentProjectName.value =
+    params.get("projectName") ??
+    (urlProject !== null ? projectName(urlProject) : init.projectName);
 
-  // Default to the current project; `--history --all` opens with everything.
-  selected.value = params.get("all") === "1" ? ALL : currentProject.value;
-  await reload();
-
-  // Live update: the backend watches history.jsonl and emits this when a new
-  // reply (from any process) is recorded. reload() keeps the current selection.
-  unlistenUpdated = await listen("history-updated", async () => {
-    projects.value = await getHistoryProjects();
-    await reload();
+  unlistenUpdated = await listen("history-updated", () => {
+    void refreshAfterHistoryUpdate();
   });
-
-  // 设置变更实时生效（主题/语言与设置窗口同宿主进程广播）。
+  unlistenOpenTarget = await listen<HistoryOpenRequest>(
+    "history-open-target",
+    (event) => void handleOpenRequest(event.payload)
+  );
   unlistenSettings = await listen<{ theme?: ThemeMode; language?: string }>(
     "settings-updated",
-    (e) => {
-      if (typeof e.payload.theme === "string") applyTheme(e.payload.theme);
-      if (typeof e.payload.language === "string") applyLanguage(e.payload.language);
+    (event) => {
+      if (typeof event.payload.theme === "string") applyTheme(event.payload.theme);
+      if (typeof event.payload.language === "string") applyLanguage(event.payload.language);
     }
   );
+
+  let target: HistoryOpenRequest["target"] = null;
+  const encodedTarget = params.get("historyTarget");
+  if (encodedTarget) {
+    try {
+      target = JSON.parse(encodedTarget) as HistoryOpenRequest["target"];
+    } catch {
+      target = null;
+    }
+  }
+  await handleOpenRequest({
+    all: params.get("all") === "1",
+    project: currentProject.value,
+    target,
+  });
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener("pointerdown", onWindowPointerDown);
+  window.removeEventListener("blur", onWindowBlur);
   unlistenUpdated?.();
   unlistenSettings?.();
+  unlistenOpenTarget?.();
+  if (noticeTimer) clearTimeout(noticeTimer);
 });
 </script>
 
@@ -293,30 +713,102 @@ onBeforeUnmount(() => {
     <header class="hist-header" data-tauri-drag-region>
       <span class="hist-title" data-tauri-drag-region>{{ t("history.title") }}</span>
       <div class="hist-tools">
-        <select
-          class="project-select"
-          :value="selected"
-          @change="onSelectProject(($event.target as HTMLSelectElement).value)"
-        >
-          <option v-for="o in projectOptions" :key="o.token" :value="o.token">
-            {{ o.label }}
-          </option>
-        </select>
+        <span v-if="deleteNotice" class="hist-notice" role="status">{{ deleteNotice }}</span>
+        <div class="scope-wrap">
+          <button
+            class="scope-btn"
+            :class="{ 'session-scoped': selectedSession !== ALL_HISTORY_SESSIONS }"
+            type="button"
+            :title="scopeButtonTooltip"
+            :aria-label="t('history.scopeFilter')"
+            :aria-expanded="scopeMenuOpen"
+            aria-haspopup="menu"
+            @click="toggleScopeMenu"
+          >
+            <svg class="scope-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18M6 12h12M10 19h4" /></svg>
+            <span class="scope-btn-label">{{ scopeButtonLabel }}</span>
+            <svg class="scope-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
+          </button>
+          <div v-if="scopeMenuOpen" class="scope-menu" role="menu">
+            <div class="scope-project-menu" :aria-label="t('history.projectFilter')">
+              <button
+                v-for="o in projectOptions"
+                :key="o.token"
+                type="button"
+                role="menuitem"
+                :class="{
+                  active: scopeMenuProject === o.token,
+                  selected: selected === o.token,
+                }"
+                :title="o.title"
+                @pointerenter="scopeMenuProject = o.token"
+                @focus="scopeMenuProject = o.token"
+                @click="scopeMenuProject = o.token"
+              >
+                <span class="scope-project-label">{{ o.label }}</span>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6" /></svg>
+              </button>
+            </div>
+            <div class="scope-session-menu" :aria-label="t('history.sessionFilter')">
+              <button
+                type="button"
+                role="menuitemradio"
+                :aria-checked="
+                  selected === scopeMenuProject &&
+                  selectedSession === ALL_HISTORY_SESSIONS
+                "
+                :class="{
+                  selected:
+                    selected === scopeMenuProject &&
+                    selectedSession === ALL_HISTORY_SESSIONS,
+                }"
+                @click="selectScope(scopeMenuProject, ALL_HISTORY_SESSIONS)"
+              >
+                <span class="scope-check">✓</span>
+                <span>{{ scopeMenuAllSessionsLabel }}</span>
+              </button>
+              <div
+                v-if="scopeMenuSpecificSessionOptions.length"
+                class="scope-divider"
+                role="separator"
+              ></div>
+              <button
+                v-for="o in scopeMenuSpecificSessionOptions"
+                :key="o.token"
+                type="button"
+                role="menuitemradio"
+                :aria-checked="
+                  selected === scopeMenuProject && selectedSession === o.token
+                "
+                :class="{
+                  selected:
+                    selected === scopeMenuProject && selectedSession === o.token,
+                }"
+                :title="o.title"
+                @click="selectScope(scopeMenuProject, o.token)"
+              >
+                <span class="scope-check">✓</span>
+                <span class="scope-session-label">{{ o.label }}</span>
+              </button>
+            </div>
+          </div>
+        </div>
         <div class="clear-wrap">
-          <button class="clear-btn" type="button" @click="menuOpen = !menuOpen">
-            {{ t("history.clear") }}
+          <button class="clear-btn" type="button" @click="toggleCleanupMenu">
+            {{ t("history.cleanup") }}
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></svg>
           </button>
           <div v-if="menuOpen" class="clear-menu">
             <button
+              v-if="showScopeCleanup"
               type="button"
-              :disabled="selected === ALL && !currentProject"
-              @click="askClear('current')"
+              :disabled="cleanupScopeEntries.length === 0"
+              @click="askClear('scope')"
             >
-              {{ t("history.clearCurrent") }}
+              {{ scopeCleanupLabel }}
             </button>
             <button type="button" @click="askClear('all')">
-              {{ t("history.clearAll") }}
+              {{ t("history.clearAllCount", { n: entries.length }) }}
             </button>
           </div>
         </div>
@@ -368,7 +860,10 @@ onBeforeUnmount(() => {
           </div>
         </li>
       </ul>
-      <div v-else-if="keywords.length" class="empty">
+      <div
+        v-else-if="keywords.length || selectedSession !== ALL_HISTORY_SESSIONS"
+        class="empty"
+      >
         <p class="empty-title">{{ t("history.searchEmpty") }}</p>
         <p class="empty-hint">{{ t("history.searchEmptyHint") }}</p>
       </div>
@@ -379,19 +874,76 @@ onBeforeUnmount(() => {
 
       <!-- Right detail -->
       <div class="detail-pane">
-        <HistoryDetail v-if="activeEntry" :key="activeEntry.id" :entry="activeEntry" />
+        <HistoryDetail
+          v-if="activeEntry"
+          :key="activeEntry.id"
+          :entry="activeEntry"
+          :session-title="activeSessionTitle"
+        />
         <div v-else class="select-hint">{{ t("history.selectHint") }}</div>
       </div>
     </div>
 
-    <!-- Clear confirmation -->
-    <div v-if="confirmKind" class="overlay" @click.self="confirmKind = null">
+    <!-- Destructive confirmation -->
+    <div v-if="confirmKind" class="overlay" @click.self="closeConfirm">
       <div class="dialog">
-        <h3>{{ confirmKind === "all" ? t("history.confirmClearAllTitle") : t("history.confirmClearCurrentTitle") }}</h3>
-        <p>{{ confirmKind === "all" ? t("history.confirmClearAllDesc") : t("history.confirmClearCurrentDesc") }}</p>
+        <h3>
+          {{
+            confirmKind === "all"
+              ? t("history.confirmClearAllTitle")
+              : scopeConfirmTitle
+          }}
+        </h3>
+        <p>
+          {{
+            confirmKind === "all"
+              ? t("history.confirmClearAllDesc")
+              : scopeConfirmDesc
+          }}
+        </p>
+        <dl
+          v-if="confirmKind === 'scope' && pendingDeleteContext"
+          class="delete-context"
+        >
+          <div>
+            <dt>{{ t("history.deleteScopeProject") }}</dt>
+            <dd>{{ pendingDeleteContext.project }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("history.deleteScopeSession") }}</dt>
+            <dd>{{ pendingDeleteContext.session }}</dd>
+          </div>
+          <div>
+            <dt>{{ t("history.deleteScopeKeywords") }}</dt>
+            <dd>{{ pendingDeleteContext.keywords }}</dd>
+          </div>
+        </dl>
+        <p v-if="deleteError" class="dialog-error" role="alert">{{ deleteError }}</p>
         <div class="dialog-actions">
-          <button class="btn-ghost" type="button" @click="confirmKind = null">{{ t("history.confirmCancel") }}</button>
-          <button class="btn-danger" type="button" @click="doClear">{{ t("history.confirmOk") }}</button>
+          <button
+            class="btn-ghost"
+            type="button"
+            :disabled="deleteBusy"
+            @click="closeConfirm"
+          >
+            {{ t("history.confirmCancel") }}
+          </button>
+          <button
+            class="btn-danger"
+            type="button"
+            :disabled="deleteBusy"
+            @click="doClear"
+          >
+            {{
+              deleteBusy
+                ? t("history.deleting")
+                : confirmKind === "all"
+                  ? t("history.confirmOk")
+                  : pendingDeleteScopeKind === "search"
+                    ? t("history.deleteOk")
+                    : t("history.confirmOk")
+            }}
+          </button>
         </div>
       </div>
     </div>
@@ -407,6 +959,7 @@ onBeforeUnmount(() => {
 }
 /* Header */
 .hist-header {
+  position: relative;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -421,22 +974,148 @@ onBeforeUnmount(() => {
   font-size: 14px;
   font-weight: 600;
   flex: 1 1 auto;
+  min-width: 64px;
 }
 .hist-tools {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
-.project-select {
+.hist-notice {
+  position: absolute;
+  z-index: 20;
+  right: 14px;
+  top: calc(100% + 6px);
+  padding: 6px 9px;
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-sm, 8px);
+  background: var(--surface-overlay);
+  color: var(--text-primary);
+  font-size: 12px;
+  white-space: nowrap;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+}
+.scope-wrap {
+  position: relative;
+  min-width: 0;
+}
+.scope-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: clamp(240px, 40vw, 420px);
   height: 30px;
-  max-width: 240px;
-  padding: 0 28px 0 10px;
+  padding: 0 8px;
   border: var(--hairline) solid var(--border);
   border-radius: var(--radius-sm, 8px);
   background: var(--control-bg);
   color: var(--text-primary);
   font-size: 12px;
+  cursor: pointer;
   box-shadow: var(--clickable-shadow);
+}
+.scope-btn.session-scoped {
+  border-color: color-mix(in srgb, var(--accent) 66%, var(--border));
+  background: color-mix(in srgb, var(--accent) 13%, var(--control-bg));
+  font-weight: 600;
+}
+.scope-icon,
+.scope-chevron {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+}
+.scope-icon {
+  color: var(--text-secondary);
+}
+.scope-chevron {
+  margin-left: auto;
+}
+.scope-btn-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.scope-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  right: 0;
+  display: grid;
+  grid-template-columns: minmax(170px, 0.8fr) minmax(260px, 1.35fr);
+  width: min(560px, calc(100vw - 28px));
+  max-height: min(420px, calc(100vh - 100px));
+  overflow: hidden;
+  border: var(--hairline) solid var(--border);
+  border-radius: var(--radius-sm, 8px);
+  background: var(--surface-overlay);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+}
+.scope-project-menu,
+.scope-session-menu {
+  min-width: 0;
+  overflow-y: auto;
+  padding: 4px;
+}
+.scope-project-menu {
+  border-right: var(--hairline) solid var(--border);
+  background: color-mix(in srgb, var(--text-primary) 3%, var(--surface-overlay));
+}
+.scope-project-menu button,
+.scope-session-menu button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.scope-project-menu button.active,
+.scope-project-menu button:hover,
+.scope-session-menu button:hover {
+  background: color-mix(in srgb, var(--text-primary) 8%, transparent);
+}
+.scope-project-menu button.selected {
+  font-weight: 600;
+}
+.scope-project-menu button svg {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  margin-left: auto;
+  color: var(--text-secondary);
+}
+.scope-project-label,
+.scope-session-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.scope-session-menu button.selected {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  font-weight: 600;
+}
+.scope-check {
+  flex: 0 0 15px;
+  width: 15px;
+  visibility: hidden;
+}
+.scope-session-menu button.selected .scope-check {
+  visibility: visible;
+}
+.scope-divider {
+  height: var(--hairline);
+  margin: 4px 6px;
+  background: var(--border);
 }
 .clear-wrap {
   position: relative;
@@ -464,7 +1143,7 @@ onBeforeUnmount(() => {
   right: 0;
   top: calc(100% + 4px);
   z-index: 10;
-  min-width: 170px;
+  min-width: 300px;
   display: flex;
   flex-direction: column;
   padding: 4px;
@@ -700,7 +1379,7 @@ onBeforeUnmount(() => {
   background: rgba(0, 0, 0, 0.32);
 }
 .dialog {
-  width: 320px;
+  width: 360px;
   padding: 20px;
   border-radius: var(--radius, 12px);
   border: var(--hairline) solid var(--border);
@@ -715,6 +1394,36 @@ onBeforeUnmount(() => {
   margin: 0 0 18px;
   font-size: 13px;
   color: var(--text-secondary);
+}
+.delete-context {
+  display: grid;
+  gap: 6px;
+  margin: -6px 0 18px;
+  padding: 9px 10px;
+  border-radius: var(--radius-sm, 8px);
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  font-size: 11px;
+}
+.delete-context div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+}
+.delete-context dt {
+  color: var(--text-secondary);
+}
+.delete-context dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dialog .dialog-error {
+  margin-top: -8px;
+  color: #ff453a;
+  word-break: break-word;
 }
 .dialog-actions {
   display: flex;
@@ -738,5 +1447,10 @@ onBeforeUnmount(() => {
   border: none;
   background: #ff453a;
   color: #fff;
+}
+.btn-ghost:disabled,
+.btn-danger:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 </style>

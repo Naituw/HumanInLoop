@@ -20,9 +20,15 @@ import {
   showAttachmentMenu,
 } from "../lib/ipc";
 import type { FileAttachment, HistoryAnswer, HistoryEntry } from "../lib/types";
-import { agentKindOf, customSourceOf, workspaceNameOf } from "../lib/history";
+import {
+  agentKindOf,
+  customSourceOf,
+  historySessionOf,
+  shortSessionId,
+  workspaceNameOf,
+} from "../lib/history";
 
-const props = defineProps<{ entry: HistoryEntry }>();
+const props = defineProps<{ entry: HistoryEntry; sessionTitle?: string }>();
 const { t, locale } = useI18n();
 
 // —— 来源 meta（agent 家族 / 自定义来源名 / workspace）——
@@ -34,8 +40,44 @@ const agentLabel = computed(() => {
 });
 const customSource = computed(() => customSourceOf(props.entry, agentLabel.value));
 const workspaceName = computed(() => workspaceNameOf(props.entry));
+const sessionRef = computed(() => historySessionOf(props.entry));
+const sessionLabel = computed(() => {
+  const session = sessionRef.value;
+  if (session.type === "agent") {
+    const id = shortSessionId(session.sessionId);
+    return props.sessionTitle ? `${props.sessionTitle} · ${id}` : id;
+  }
+  if (session.type === "mcp") {
+    return t("history.sessionMcpDetail", { id: shortSessionId(session.instanceId) });
+  }
+  return "";
+});
+const sessionTooltip = computed(() => {
+  const session = sessionRef.value;
+  if (session.type === "agent") {
+    return [agentLabel.value, props.sessionTitle, session.sessionId].filter(Boolean).join(" · ");
+  }
+  if (session.type === "mcp") {
+    return `${t("history.sessionMcpFull")} · ${session.instanceId} · ${session.project}`;
+  }
+  return "";
+});
+const sessionPlainText = computed(() => {
+  const session = sessionRef.value;
+  if (session.type === "agent") {
+    return [props.sessionTitle, session.sessionId].filter(Boolean).join(" · ");
+  }
+  if (session.type === "mcp") {
+    return `${t("history.sessionMcpFull")} · ${session.instanceId}`;
+  }
+  return "";
+});
 const hasMeta = computed(
-  () => !!agentLabel.value || !!customSource.value || !!workspaceName.value
+  () =>
+    !!agentLabel.value ||
+    !!customSource.value ||
+    !!sessionLabel.value ||
+    !!workspaceName.value
 );
 
 function openWorkspace() {
@@ -101,6 +143,9 @@ function buildPlainText(): string {
   const meta: string[] = [];
   if (agentLabel.value) meta.push(agentLabel.value);
   if (customSource.value) meta.push(customSource.value);
+  if (sessionPlainText.value) {
+    meta.push(t("history.copySession", { session: sessionPlainText.value }));
+  }
   if (e.project) meta.push(e.project);
   if (meta.length) lines.push(meta.join(" · "));
 
@@ -369,9 +414,16 @@ watch(
       </button>
     </div>
 
-    <!-- Source meta: agent family / custom source name / workspace -->
+    <!-- Source meta: agent family / session / custom source name / workspace -->
     <div v-if="hasMeta" class="meta-row">
       <span v-if="agentLabel" class="meta-chip">{{ agentLabel }}</span>
+      <span
+        v-if="sessionLabel"
+        class="meta-chip meta-session"
+        :title="sessionTooltip"
+      >
+        {{ t("history.sessionMeta", { value: sessionLabel }) }}
+      </span>
       <span v-if="customSource" class="meta-chip">{{ customSource }}</span>
       <button
         v-if="workspaceName"
@@ -597,6 +649,11 @@ watch(
   flex: 0 0 auto;
   width: 11px;
   height: 11px;
+}
+.meta-session {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .meta-workspace {
   cursor: pointer;

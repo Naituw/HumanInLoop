@@ -354,6 +354,10 @@ export interface HistoryEntry {
   source: string;
   /** Caller agent family (claude/codex/cursor/grok); absent on legacy entries. */
   agentKind?: string | null;
+  /** Native Agent conversation/session id; absent on legacy or unbound entries. */
+  agentSessionId?: string | null;
+  /** AskHuman MCP server process id; a fallback partition when no native session is known. */
+  mcpInstanceId?: string | null;
   /** Channel that submitted / cancelled: popup / dingding / feishu / telegram. */
   channel: string;
   action: ChannelAction;
@@ -369,6 +373,43 @@ export interface ProjectInfo {
   name: string;
   count: number;
   lastMs: number;
+}
+
+/** Trustworthy session partition used by the history filter. */
+export type HistorySessionRef =
+  | { type: "agent"; agentKind: string; sessionId: string }
+  | { type: "mcp"; project: string; instanceId: string }
+  | { type: "unbound" };
+
+/** One aggregated session option derived from the currently loaded history entries. */
+export interface HistorySessionGroup {
+  token: string;
+  ref: HistorySessionRef;
+  count: number;
+  lastMs: number;
+}
+
+/** Batch title lookup sent only for exact native Agent sessions. */
+export interface HistorySessionTitleRequest {
+  token: string;
+  agentKind: string;
+  sessionId: string;
+}
+
+export interface HistorySessionTitleResult {
+  token: string;
+  title: string;
+}
+
+/** Popup-originated initial/retarget filter for the global history window. */
+export type HistoryOpenTarget =
+  | { type: "agent"; agentKind: string; sessionId: string }
+  | { type: "mcp"; project: string; instanceId: string };
+
+export interface HistoryOpenRequest {
+  all: boolean;
+  project?: string | null;
+  target?: HistoryOpenTarget | null;
 }
 
 /** History window init payload. */

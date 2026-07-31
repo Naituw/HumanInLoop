@@ -1062,6 +1062,7 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
                 cwd: None,
             }),
             None,
+            None,
         );
         return;
     }
@@ -1087,6 +1088,7 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
                     agent: Some(a.kind),
                     cwd: a.cwd,
                 }),
+                None,
                 None,
             );
         }
@@ -1134,7 +1136,7 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
         let project = cwd
             .map(|c| crate::project::detect_from(std::path::Path::new(&c)))
             .filter(|k| !k.is_empty());
-        open_window(app, WindowKind::Todos, false, project, None, None);
+        open_window(app, WindowKind::Todos, false, project, None, None, None);
         return;
     }
     // Agent 子菜单「聚焦终端」：AppleScript 可能阻塞（授权弹窗等），放后台线程。
@@ -1156,14 +1158,14 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
         return;
     }
     match id {
-        "open_settings" => open_window(app, WindowKind::Settings, false, None, None, None),
+        "open_settings" => open_window(app, WindowKind::Settings, false, None, None, None, None),
         // 托盘「历史」无调用方项目上下文 → 默认展示全部项目。
-        "open_history" => open_window(app, WindowKind::History, true, None, None, None),
-        "open_agents" => open_window(app, WindowKind::Agents, false, None, None, None),
+        "open_history" => open_window(app, WindowKind::History, true, None, None, None, None),
+        "open_agents" => open_window(app, WindowKind::Agents, false, None, None, None, None),
         // 托盘「待办」无项目上下文 → 由前端自选默认项目。
-        "open_todos" => open_window(app, WindowKind::Todos, false, None, None, None),
+        "open_todos" => open_window(app, WindowKind::Todos, false, None, None, None, None),
         // 托盘「新建 Agent 任务」（spec gui-agent-task-launch）：无预选打开通用表单。
-        "open_new_task" => open_window(app, WindowKind::NewTask, false, None, None, None),
+        "open_new_task" => open_window(app, WindowKind::NewTask, false, None, None, None, None),
         "check_update" => {
             let Some(state) = app.try_state::<HostState>() else {
                 return;
@@ -1270,6 +1272,7 @@ pub(crate) fn open_window(
     param: Option<String>,
     target: Option<crate::gui_host::InterjectTarget>,
     todo: Option<String>,
+    history_target: Option<crate::gui_host::HistoryOpenTarget>,
 ) {
     let cfg = AppConfig::load_without_secrets();
     // 弹窗在「另一个进程」（daemon 拉起的助手），宿主无 popup 窗口可探测；改据 daemon 在途请求数
@@ -1283,9 +1286,14 @@ pub(crate) fn open_window(
         WindowKind::Settings => {
             crate::app::create_settings_window(app, &cfg, pin_above_popup, param.as_deref())
         }
-        WindowKind::History => {
-            crate::app::create_history_window(app, &cfg, all, param.as_deref(), pin_above_popup)
-        }
+        WindowKind::History => crate::app::create_history_window(
+            app,
+            &cfg,
+            all,
+            param.as_deref(),
+            history_target.as_ref(),
+            pin_above_popup,
+        ),
         WindowKind::Agents => crate::app::create_agents_window(
             app,
             &cfg,
@@ -1340,6 +1348,7 @@ fn open_window_settings_tab(app: &AppHandle, tab: &str) {
         WindowKind::Settings,
         false,
         Some(tab.to_string()),
+        None,
         None,
         None,
     );
@@ -1495,6 +1504,7 @@ async fn handle_host_conn(stream: tokio::net::UnixStream, app: AppHandle) {
                 agent,
                 cwd,
                 todo,
+                history_target,
             } => {
                 // 回执（让客户端确认已受理），再到主线程开窗。
                 let _ = ipc::write_msg(&mut w, &HostMsg::Ping).await;
@@ -1505,7 +1515,7 @@ async fn handle_host_conn(stream: tokio::net::UnixStream, app: AppHandle) {
                 });
                 let app2 = app.clone();
                 let _ = app.run_on_main_thread(move || {
-                    open_window(&app2, kind, all, project, target, todo)
+                    open_window(&app2, kind, all, project, target, todo, history_target)
                 });
             }
             HostMsg::Ping => {

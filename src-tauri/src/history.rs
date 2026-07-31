@@ -3,13 +3,14 @@
 //! Recording is a best-effort side channel invoked from the per-request coordinator after a
 //! terminal result is produced; it must never affect the main flow (stdout / exit code). Image and
 //! reply-file values are stored as paths only (never base64); display is best-effort (a missing
-//! file just renders a placeholder). Mutating ops (record / trim / clear) hold a cross-process
-//! file lock and write atomically (temp + rename). Reads tolerate malformed lines.
+//! file just renders a placeholder). Mutating ops hold a cross-process file lock. Rewrites use an
+//! atomic temp-file rename, while full deletion removes the store. Reads tolerate malformed lines.
 
 use crate::models::{ChannelAction, MessagePrompt, Question};
 use crate::paths;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io;
 use std::path::Path;
 
 /// One question's recorded answer (paths only, no base64).
@@ -78,14 +79,6 @@ pub struct ProjectInfo {
     pub last_ms: i64,
 }
 
-/// Scope for clearing history.
-pub enum ClearScope {
-    /// Remove all entries.
-    All,
-    /// Remove entries of one project key.
-    Project(String),
-}
-
 /// Current unix time in milliseconds.
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -141,10 +134,20 @@ pub fn trim(limit: u32) -> usize {
     trim_at(&paths::history_file(), limit)
 }
 
-/// Clear history by scope (all, or one project).
-pub fn clear(scope: ClearScope) {
-    let _guard = lock();
-    clear_at(&paths::history_file(), scope);
+/// Delete the exact entry ids selected by the history UI. Unlike best-effort recording, this is a
+/// user-initiated destructive operation and therefore reports lock/read/write failures.
+pub fn delete_ids(ids: &[String]) -> io::Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let _guard = lock_strict()?;
+    delete_ids_at(&paths::history_file(), ids)
+}
+
+/// Clear every valid history entry and return how many were removed.
+pub fn clear_all() -> io::Result<usize> {
+    let _guard = lock_strict()?;
+    clear_all_at(&paths::history_file())
 }
 
 // ===== Core logic (path-parameterized, lock-free; unit-testable) =====
@@ -235,16 +238,38 @@ fn trim_at(path: &Path, limit: u32) -> usize {
     entries.len()
 }
 
-fn clear_at(path: &Path, scope: ClearScope) {
-    match scope {
-        ClearScope::All => {
-            let _ = std::fs::remove_file(path);
+fn delete_ids_at(path: &Path, ids: &[String]) -> io::Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let ids: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let text = read_text_strict_at(path)?;
+    let mut output = String::with_capacity(text.len());
+    let mut deleted = 0;
+    for line in text.split_inclusive('\n') {
+        let json = line.strip_suffix('\n').unwrap_or(line);
+        let json = json.strip_suffix('\r').unwrap_or(json);
+        let matches = serde_json::from_str::<HistoryEntry>(json)
+            .map(|entry| ids.contains(entry.id.as_str()))
+            .unwrap_or(false);
+        if matches {
+            deleted += 1;
+        } else {
+            output.push_str(line);
         }
-        ClearScope::Project(key) => {
-            let mut entries = read_all_at(path);
-            entries.retain(|e| e.project != key);
-            let _ = write_all_at(path, &entries);
-        }
+    }
+    if deleted > 0 {
+        write_bytes_at(path, output.as_bytes())?;
+    }
+    Ok(deleted)
+}
+
+fn clear_all_at(path: &Path) -> io::Result<usize> {
+    let count = read_all_strict_at(path)?.len();
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(count),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error),
     }
 }
 
@@ -258,20 +283,27 @@ fn trim_vec(entries: &mut Vec<HistoryEntry>, limit: usize) {
 }
 
 fn read_all_at(path: &Path) -> Vec<HistoryEntry> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(_) => return Vec::new(),
-    };
-    text.lines()
+    read_all_strict_at(path).unwrap_or_default()
+}
+
+fn read_all_strict_at(path: &Path) -> io::Result<Vec<HistoryEntry>> {
+    let text = read_text_strict_at(path)?;
+    Ok(text
+        .lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str::<HistoryEntry>(l).ok())
-        .collect()
+        .collect())
+}
+
+fn read_text_strict_at(path: &Path) -> io::Result<String> {
+    Ok(match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    })
 }
 
 fn write_all_at(path: &Path, entries: &[HistoryEntry]) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
     let mut buf = String::new();
     for e in entries {
         if let Ok(line) = serde_json::to_string(e) {
@@ -279,8 +311,15 @@ fn write_all_at(path: &Path, entries: &[HistoryEntry]) -> std::io::Result<()> {
             buf.push('\n');
         }
     }
+    write_bytes_at(path, buf.as_bytes())
+}
+
+fn write_bytes_at(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
     let tmp = path.with_extension(format!("jsonl.tmp-{}", uuid::Uuid::new_v4()));
-    std::fs::write(&tmp, buf.as_bytes())?;
+    std::fs::write(&tmp, bytes)?;
     harden(&tmp);
     std::fs::rename(&tmp, path)?;
     harden(path);
@@ -310,25 +349,35 @@ struct LockGuard {
 /// Acquire an exclusive (blocking) advisory lock for the duration of a write. Released on drop.
 #[cfg(unix)]
 fn lock() -> Option<LockGuard> {
+    lock_strict().ok()
+}
+
+#[cfg(unix)]
+fn lock_strict() -> io::Result<LockGuard> {
     use std::os::unix::io::AsRawFd;
     if let Some(dir) = paths::history_lock().parent() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir)?;
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
-        .open(paths::history_lock())
-        .ok()?;
-    unsafe {
-        libc::flock(file.as_raw_fd(), libc::LOCK_EX);
+        .open(paths::history_lock())?;
+    let status = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if status != 0 {
+        return Err(io::Error::last_os_error());
     }
-    Some(LockGuard { _file: file })
+    Ok(LockGuard { _file: file })
 }
 
 #[cfg(not(unix))]
 fn lock() -> Option<()> {
-    None
+    lock_strict().ok()
+}
+
+#[cfg(not(unix))]
+fn lock_strict() -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -506,15 +555,59 @@ mod tests {
     }
 
     #[test]
-    fn clear_scopes() {
+    fn delete_ids_removes_only_the_frozen_snapshot() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("history.jsonl");
-        record_at(&path, entry("a", "/p1", 1), 200);
-        record_at(&path, entry("b", "/p2", 2), 200);
-        clear_at(&path, ClearScope::Project("/p1".to_string()));
-        assert_eq!(load_at(&path, None, true).len(), 1);
-        clear_at(&path, ClearScope::All);
-        assert_eq!(read_all_at(&path).len(), 0);
+        record_at(&path, entry("a", "/p", 1), 200);
+        record_at(&path, entry("b", "/p", 2), 200);
+        let frozen = vec!["a".to_string(), "missing".to_string(), "a".to_string()];
+
+        // A matching record arriving after the UI snapshot must survive exact-id deletion.
+        record_at(&path, entry("new", "/p", 3), 200);
+        assert_eq!(delete_ids_at(&path, &frozen).unwrap(), 1);
+        let ids: Vec<String> = read_all_at(&path)
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        assert_eq!(ids, vec!["b", "new"]);
+    }
+
+    #[test]
+    fn delete_ids_empty_is_a_noop_and_clear_all_reports_count() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        record_at(&path, entry("a", "/p", 1), 200);
+        assert_eq!(delete_ids_at(&path, &[]).unwrap(), 0);
+        assert_eq!(read_all_at(&path).len(), 1);
+        assert_eq!(clear_all_at(&path).unwrap(), 1);
+        assert!(!path.exists());
+        assert_eq!(clear_all_at(&path).unwrap(), 0);
+    }
+
+    #[test]
+    fn destructive_reads_fail_closed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        std::fs::create_dir(&path).unwrap();
+        assert!(delete_ids_at(&path, &["a".to_string()]).is_err());
+        assert!(path.is_dir());
+        assert!(clear_all_at(&path).is_err());
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn exact_delete_preserves_malformed_lines() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let a = serde_json::to_string(&entry("a", "/p", 1)).unwrap();
+        let b = serde_json::to_string(&entry("b", "/p", 2)).unwrap();
+        std::fs::write(&path, format!("not json\n{a}\n{{}}\n{b}")).unwrap();
+
+        assert_eq!(delete_ids_at(&path, &["a".to_string()]).unwrap(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("not json\n{{}}\n{b}")
+        );
     }
 
     #[test]

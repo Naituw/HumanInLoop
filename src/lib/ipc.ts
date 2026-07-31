@@ -18,6 +18,8 @@ import type {
   ClaudeHookStatus,
   HistoryEntry,
   HistoryInit,
+  HistorySessionTitleRequest,
+  HistorySessionTitleResult,
   HookStatus,
   InterjectInit,
   LifecycleStatus,
@@ -220,8 +222,17 @@ export const historyCount = () => invoke<number>("history_count");
 export const trimHistory = (limit: number) =>
   invoke<number>("trim_history", { limit });
 
-export const clearHistory = (all: boolean, project: string | null) =>
-  invoke<void>("clear_history", { all, project });
+export const deleteHistoryEntries = (ids: string[]) =>
+  invoke<number>("delete_history_entries", { ids });
+
+export const clearAllHistory = () => invoke<number>("clear_all_history");
+
+export const resolveHistorySessionTitles = (
+  requests: HistorySessionTitleRequest[]
+) =>
+  invoke<HistorySessionTitleResult[]>("resolve_history_session_titles", {
+    requests,
+  });
 
 export const applyWindowEffect = (effect: WindowEffect) =>
   invoke<void>("apply_window_effect", { effect });

@@ -43,6 +43,11 @@ pub struct AppState {
     pub project: String,
     /// 发起本次提问的 agent 家族（claude/codex/cursor/grok），仅弹窗（Daemon 上送）有值；其它窗口为 None。
     pub agent_kind: Option<String>,
+    /// Native Agent session used by reply-history filtering. This is independent from whether the
+    /// session is currently tracked by AgentRegistry.
+    pub agent_session_id: Option<String>,
+    /// MCP process fallback used only when no native Agent session is available.
+    pub mcp_instance_id: Option<String>,
     /// 发起本次提问的 agent 进程 pid，仅弹窗（Daemon 上送）有值；用于「聚焦终端」与终端可激活性判断。
     pub agent_pid: Option<u32>,
     /// 已严格匹配到 AgentRegistry 活动记录的会话 ID。仅用于弹窗打开并定位 Agent 状态窗口。
@@ -461,13 +466,16 @@ fn active_messaging_channels(config: &AppConfig) -> Vec<Arc<dyn Channel>> {
 /// GUI 弹窗路径；若 Tauri 构建失败（GUI 不可用），按消息渠道是否可用兜底。
 fn run_gui_ask(request: AskRequest, config: AppConfig, messaging_active: bool) -> ! {
     let lang = Lang::resolve(&config.general.language);
+    let caller = crate::cli::caller_context();
     let state = AppState {
         interaction: InteractionRequest::Ask(request.clone()),
         popup_edit: None,
         config: config.clone(),
         source: crate::models::source_name(),
         project: crate::project::detect(),
-        agent_kind: None,
+        agent_kind: caller.agent_kind,
+        agent_session_id: caller.agent_session_id,
+        mcp_instance_id: caller.mcp_instance_id,
         agent_pid: None,
         agent_console_session_id: None,
         // 单进程弹窗无 daemon：以构造时刻为提问时间锚点。
@@ -708,6 +716,8 @@ pub fn run_settings(config: AppConfig) -> ! {
         source: crate::models::source_name(),
         project: crate::project::detect(),
         agent_kind: None,
+        agent_session_id: None,
+        mcp_instance_id: None,
         agent_pid: None,
         agent_console_session_id: None,
         created_at_ms: 0,
@@ -738,6 +748,8 @@ pub fn run_history(project: String, all: bool, config: AppConfig) -> ! {
         source: crate::models::source_name(),
         project,
         agent_kind: None,
+        agent_session_id: None,
+        mcp_instance_id: None,
         agent_pid: None,
         agent_console_session_id: None,
         created_at_ms: 0,
@@ -769,6 +781,8 @@ pub fn run_todos(project: String, config: AppConfig) -> ! {
         source: crate::models::source_name(),
         project,
         agent_kind: None,
+        agent_session_id: None,
+        mcp_instance_id: None,
         agent_pid: None,
         agent_console_session_id: None,
         created_at_ms: 0,
@@ -800,6 +814,8 @@ pub fn run_agents(config: AppConfig) -> ! {
         source: crate::models::source_name(),
         project: crate::project::detect(),
         agent_kind: None,
+        agent_session_id: None,
+        mcp_instance_id: None,
         agent_pid: None,
         agent_console_session_id: None,
         created_at_ms: 0,
@@ -836,6 +852,8 @@ pub fn run_gui_host(config: AppConfig) -> ! {
         source: crate::models::source_name(),
         project: crate::project::detect(),
         agent_kind: None,
+        agent_session_id: None,
+        mcp_instance_id: None,
         agent_pid: None,
         agent_console_session_id: None,
         created_at_ms: 0,
@@ -894,6 +912,8 @@ pub fn run_gui_helper(_endpoint: String, token: String, warm: bool) -> ! {
             source: String::new(),
             project: String::new(),
             agent_kind: None,
+            agent_session_id: None,
+            mcp_instance_id: None,
             agent_pid: None,
             agent_console_session_id: None,
             // 待命态：领用时由 `Show` 注入真正的创建时刻（popup_init 读 WarmPopup.show）。
@@ -962,6 +982,8 @@ pub fn run_gui_helper(_endpoint: String, token: String, warm: bool) -> ! {
         source: show.source,
         project: show.project,
         agent_kind: show.agent_kind,
+        agent_session_id: show.agent_session_id,
+        mcp_instance_id: show.mcp_instance_id,
         agent_pid: show.agent_pid,
         agent_console_session_id: show.agent_console_session_id,
         created_at_ms: show.created_at_ms,
@@ -1129,7 +1151,9 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             crate::commands::get_history_projects,
             crate::commands::history_count,
             crate::commands::trim_history,
-            crate::commands::clear_history,
+            crate::commands::delete_history_entries,
+            crate::commands::clear_all_history,
+            crate::commands::resolve_history_session_titles,
             crate::commands::get_app_version,
             crate::commands::update_check,
             crate::commands::update_get_notes,
@@ -1500,7 +1524,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                     // History window only needs general (theme); skip keychain.
                     let config = AppConfig::load_without_secrets();
                     // 进程内默认项目（AppState.project = CLI 探测的当前项目）→ 传 None 沿用。
-                    create_history_window(app, &config, all, None, popup_pin(app, &config))?;
+                    create_history_window(app, &config, all, None, None, popup_pin(app, &config))?;
                 }
                 #[cfg(unix)]
                 View::Todos => {
@@ -2169,6 +2193,7 @@ pub(crate) fn create_history_window<R, M>(
     config: &AppConfig,
     all: bool,
     project_override: Option<&str>,
+    history_target: Option<&crate::gui_host::HistoryOpenTarget>,
     pin_above_popup: bool,
 ) -> tauri::Result<()>
 where
@@ -2176,6 +2201,15 @@ where
     M: Manager<R>,
 {
     if let Some(w) = manager.get_webview_window("history") {
+        use tauri::Emitter;
+        let _ = w.emit(
+            "history-open-target",
+            crate::gui_host::HistoryOpenRequest {
+                all,
+                project: project_override.map(str::to_string),
+                target: history_target.cloned(),
+            },
+        );
         let _ = w.set_focus();
         return Ok(());
     }
@@ -2193,6 +2227,12 @@ where
         url.push_str(&urlencode(key));
         url.push_str("&projectName=");
         url.push_str(&urlencode(&crate::project::display_name(key)));
+    }
+    if let Some(target) = history_target {
+        if let Ok(json) = serde_json::to_string(target) {
+            url.push_str("&historyTarget=");
+            url.push_str(&urlencode(&json));
+        }
     }
     let window_effect = config.general.window_effect;
     let effective_window_effect = effective_window_effect(window_effect);

@@ -273,6 +273,8 @@ pub fn create_internal_confirm(
         lang: lang.to_string(),
         project: project.to_string(),
         agent_kind: Some(agent_kind.to_string()),
+        agent_session_id: None,
+        mcp_instance_id: None,
         agent_pid: None,
         agent_console_session_id: None,
         perf_id: String::new(),
@@ -440,6 +442,8 @@ impl RequestRegistry {
             gui.clone(),
         )));
 
+        let show_agent_session_id = task.agent_session_id.clone();
+        let show_mcp_instance_id = task.mcp_instance_id.clone();
         let show = ShowPayload {
             request_id: request_id.clone(),
             interaction: InteractionRequest::Ask(request),
@@ -448,6 +452,8 @@ impl RequestRegistry {
             lang: task.lang,
             project: task.project,
             agent_kind: task.agent_kind,
+            agent_session_id: show_agent_session_id,
+            mcp_instance_id: show_mcp_instance_id,
             agent_pid: task.agent_pid,
             agent_console_session_id,
             // 方案6：透传 perf 上下文，热 helper 领用时据此开启埋点（无 env 也能量化热路径）。
@@ -573,6 +579,8 @@ impl RequestRegistry {
             lang: task.lang.clone(),
             project: task.project.clone(),
             agent_kind: Some(task.agent_kind.clone()),
+            agent_session_id: Some(task.agent_session_id.clone()),
+            mcp_instance_id: None,
             agent_pid: None,
             agent_console_session_id,
             perf_id: String::new(),
@@ -1005,6 +1013,11 @@ mod tests {
             )
         );
         assert_eq!(entry.agent_session_id.as_deref(), Some("conversation-1"));
+        assert_eq!(
+            entry.show.agent_session_id.as_deref(),
+            Some("conversation-1")
+        );
+        assert_eq!(entry.show.mcp_instance_id.as_deref(), Some("instance-1"));
         assert_eq!(
             entry.show.agent_console_session_id.as_deref(),
             Some("conversation-1")

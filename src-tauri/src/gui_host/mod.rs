@@ -25,6 +25,34 @@ pub enum WindowKind {
     NewTask,
 }
 
+/// Exact reply-history filter requested by a popup. Native Agent sessions are globally scoped;
+/// MCP fallbacks include their project because one process id is only a weak partition.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum HistoryOpenTarget {
+    Agent {
+        agent_kind: String,
+        session_id: String,
+    },
+    Mcp {
+        project: String,
+        instance_id: String,
+    },
+}
+
+/// Initial or retargeting request consumed by the history window.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryOpenRequest {
+    pub all: bool,
+    pub project: Option<String>,
+    pub target: Option<HistoryOpenTarget>,
+}
+
 /// CLI / 弹窗 → 宿主 的消息。
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -49,6 +77,9 @@ pub enum HostMsg {
         cwd: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         todo: Option<String>,
+        /// Popup-originated reply-history target. Other window kinds ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        history_target: Option<HistoryOpenTarget>,
     },
     /// 探活（保留；当前 `host_open` 不依赖回包）。
     Ping,
@@ -74,11 +105,11 @@ pub fn interject_label(session_id: &str) -> String {
 }
 
 #[cfg(unix)]
-pub use unix_impl::{bind, host_open, spawn_detached, spawn_detached_from};
+pub use unix_impl::{bind, host_open, host_open_history, spawn_detached, spawn_detached_from};
 
 #[cfg(unix)]
 mod unix_impl {
-    use super::{HostMsg, InterjectTarget, WindowKind};
+    use super::{HistoryOpenTarget, HostMsg, InterjectTarget, WindowKind};
     use crate::ipc;
     use crate::paths::gui_host_sock;
     use std::io::{Error, ErrorKind};
@@ -148,11 +179,44 @@ mod unix_impl {
         target: Option<InterjectTarget>,
         todo: Option<String>,
     ) -> std::io::Result<()> {
+        host_open_inner(kind, all, project, target, todo, None)
+    }
+
+    /// Open or retarget the global history window from a popup's exact caller binding.
+    pub fn host_open_history(
+        project: Option<String>,
+        history_target: Option<HistoryOpenTarget>,
+    ) -> std::io::Result<()> {
+        host_open_inner(
+            WindowKind::History,
+            false,
+            project,
+            None,
+            None,
+            history_target,
+        )
+    }
+
+    fn host_open_inner(
+        kind: WindowKind,
+        all: bool,
+        project: Option<String>,
+        target: Option<InterjectTarget>,
+        todo: Option<String>,
+        history_target: Option<HistoryOpenTarget>,
+    ) -> std::io::Result<()> {
         let handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
-            rt.block_on(host_open_async(kind, all, project, target, todo))
+            rt.block_on(host_open_async(
+                kind,
+                all,
+                project,
+                target,
+                todo,
+                history_target,
+            ))
         });
         match handle.join() {
             Ok(r) => r,
@@ -166,10 +230,11 @@ mod unix_impl {
         project: Option<String>,
         target: Option<InterjectTarget>,
         todo: Option<String>,
+        history_target: Option<HistoryOpenTarget>,
     ) -> std::io::Result<()> {
         // 1. 宿主已在 → 直接发送。
         if let Ok(stream) = connect().await {
-            return send_open(stream, kind, all, project, target, todo).await;
+            return send_open(stream, kind, all, project, target, todo, history_target).await;
         }
         // 2. 宿主不在 → 拉起后轮询重连（最多约 6 秒，覆盖 Tauri 进程启动 + socket 就绪）。
         spawn_detached()?;
@@ -177,7 +242,7 @@ mod unix_impl {
         while start.elapsed() < Duration::from_secs(6) {
             tokio::time::sleep(Duration::from_millis(80)).await;
             if let Ok(stream) = connect().await {
-                return send_open(stream, kind, all, project, target, todo).await;
+                return send_open(stream, kind, all, project, target, todo, history_target).await;
             }
         }
         Err(Error::new(
@@ -193,6 +258,7 @@ mod unix_impl {
         project: Option<String>,
         target: Option<InterjectTarget>,
         todo: Option<String>,
+        history_target: Option<HistoryOpenTarget>,
     ) -> std::io::Result<()> {
         let (r, mut w) = stream.into_split();
         let (session, agent, cwd) = match target {
@@ -210,6 +276,7 @@ mod unix_impl {
                 agent,
                 cwd,
                 todo,
+                history_target,
             },
         )
         .await?;
@@ -221,5 +288,34 @@ mod unix_impl {
         )
         .await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_target_roundtrips_and_old_open_window_defaults_none() {
+        let target = HistoryOpenTarget::Agent {
+            agent_kind: "codex".into(),
+            session_id: "session-1".into(),
+        };
+        let json = serde_json::to_string(&target).unwrap();
+        assert!(json.contains(r#""type":"agent""#));
+        assert!(json.contains(r#""agentKind":"codex""#));
+        assert_eq!(
+            serde_json::from_str::<HistoryOpenTarget>(&json).unwrap(),
+            target
+        );
+
+        let legacy = r#"{"type":"openWindow","kind":"history","all":false}"#;
+        assert!(matches!(
+            serde_json::from_str::<HostMsg>(legacy).unwrap(),
+            HostMsg::OpenWindow {
+                history_target: None,
+                ..
+            }
+        ));
     }
 }

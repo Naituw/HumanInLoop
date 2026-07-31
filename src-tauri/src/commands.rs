@@ -7,7 +7,9 @@ use crate::integrations::cursor_hook;
 use crate::models::{ChannelAction, ChannelResult, InteractionRequest, QuestionAnswer};
 use crate::telegram::TelegramClient;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 /// 弹窗初始化负载：请求内容 + 主题 + 是否置顶（前端据此套用样式、初始化导航栏）。
@@ -967,9 +969,14 @@ fn route_open_window(
                     // `project` 槽位在设置窗口语义下是「初始定位 tab」（同 gui_host::open_window）。
                     crate::app::create_settings_window(&fallback, &cfg, pin, project.as_deref())
                 }
-                WindowKind::History => {
-                    crate::app::create_history_window(&fallback, &cfg, all, project.as_deref(), pin)
-                }
+                WindowKind::History => crate::app::create_history_window(
+                    &fallback,
+                    &cfg,
+                    all,
+                    project.as_deref(),
+                    None,
+                    pin,
+                ),
                 WindowKind::Agents => crate::app::create_agents_window(
                     &fallback,
                     &cfg,
@@ -997,22 +1004,80 @@ fn route_open_window(
     });
 }
 
-/// 解析弹窗当前生效的项目 key：方案6 预热弹窗领用后项目在 `WarmPopup.show`（其 `AppState.project`
-/// 恒为空串），冷 / 单进程弹窗在 `AppState.project`。与 `popup_init` 的取值口径保持一致，避免历史窗口
-/// 默认过滤到空（未知）项目而看不到最近历史。
-#[cfg(unix)]
-fn effective_popup_project(app: &AppHandle, state: &State<AppState>) -> String {
-    if let Some(w) = app.try_state::<crate::app::WarmPopup>() {
-        if let Some(project) = w
-            .show
-            .lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|s| s.project.clone()))
-        {
-            return project;
+fn history_open_target(
+    project: &str,
+    agent_kind: Option<&str>,
+    agent_session_id: Option<&str>,
+    mcp_instance_id: Option<&str>,
+) -> Option<crate::gui_host::HistoryOpenTarget> {
+    fn nonempty(value: Option<&str>) -> Option<&str> {
+        value.map(str::trim).filter(|value| !value.is_empty())
+    }
+    if let (Some(agent_kind), Some(session_id)) = (nonempty(agent_kind), nonempty(agent_session_id))
+    {
+        return Some(crate::gui_host::HistoryOpenTarget::Agent {
+            agent_kind: agent_kind.to_string(),
+            session_id: session_id.to_string(),
+        });
+    }
+    nonempty(mcp_instance_id).and_then(|instance_id| {
+        let project = project.trim();
+        (!project.is_empty()).then(|| crate::gui_host::HistoryOpenTarget::Mcp {
+            project: project.to_string(),
+            instance_id: instance_id.to_string(),
+        })
+    })
+}
+
+fn effective_popup_history_context(
+    app: &AppHandle,
+    state: &State<AppState>,
+) -> (String, Option<crate::gui_host::HistoryOpenTarget>) {
+    #[cfg(unix)]
+    if let Some(warm) = app.try_state::<crate::app::WarmPopup>() {
+        if let Some(show) = warm.show.lock().ok().and_then(|show| show.clone()) {
+            let target = history_open_target(
+                &show.project,
+                show.agent_kind.as_deref(),
+                show.agent_session_id.as_deref(),
+                show.mcp_instance_id.as_deref(),
+            );
+            return (show.project, target);
         }
     }
-    state.project.clone()
+    let target = history_open_target(
+        &state.project,
+        state.agent_kind.as_deref(),
+        state.agent_session_id.as_deref(),
+        state.mcp_instance_id.as_deref(),
+    );
+    (state.project.clone(), target)
+}
+
+#[cfg(unix)]
+fn route_open_history_window(
+    app: AppHandle,
+    project: String,
+    target: Option<crate::gui_host::HistoryOpenTarget>,
+) {
+    std::thread::spawn(move || {
+        if crate::gui_host::host_open_history(Some(project.clone()), target.clone()).is_ok() {
+            return;
+        }
+        let fallback = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let cfg = AppConfig::load_without_secrets();
+            let pin = crate::app::popup_pin(&fallback, &cfg);
+            let _ = crate::app::create_history_window(
+                &fallback,
+                &cfg,
+                false,
+                Some(project.as_str()),
+                target.as_ref(),
+                pin,
+            );
+        });
+    });
 }
 
 /// Resolve the popup's daemon-validated Agent Window target. Warm helpers keep per-request context
@@ -1066,25 +1131,25 @@ pub fn open_agent_console(app: AppHandle, state: State<AppState>) -> Result<(), 
 /// 从弹窗导航栏打开独立历史窗口：路由到统一宿主（全局单窗），默认过滤到弹窗所属项目。
 #[tauri::command]
 pub fn open_history(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    let (project, target) = effective_popup_history_context(&app, &state);
     #[cfg(unix)]
     {
-        let project = effective_popup_project(&app, &state);
-        route_open_window(
-            app,
-            crate::gui_host::WindowKind::History,
-            false,
-            Some(project),
-            None,
-            None,
-        );
+        route_open_history_window(app, project, target);
         Ok(())
     }
     #[cfg(not(unix))]
     {
-        let _ = &state;
         let cfg = AppConfig::load_without_secrets();
         let pin = crate::app::popup_pin(&app, &cfg);
-        crate::app::create_history_window(&app, &cfg, false, None, pin).map_err(|e| e.to_string())
+        crate::app::create_history_window(
+            &app,
+            &cfg,
+            false,
+            Some(project.as_str()),
+            target.as_ref(),
+            pin,
+        )
+        .map_err(|e| e.to_string())
     }
 }
 
@@ -1112,15 +1177,139 @@ pub fn trim_history(limit: u32) -> usize {
     crate::history::trim(limit)
 }
 
-/// 清空历史：`all` 为 true 清全部，否则清 `project`（缺省空串）。
+/// Delete the exact history entries frozen by the UI before it opened the confirmation dialog.
 #[tauri::command]
-pub fn clear_history(all: bool, project: Option<String>) {
-    let scope = if all {
-        crate::history::ClearScope::All
-    } else {
-        crate::history::ClearScope::Project(project.unwrap_or_default())
-    };
-    crate::history::clear(scope);
+pub fn delete_history_entries(ids: Vec<String>) -> Result<usize, String> {
+    crate::history::delete_ids(&ids).map_err(|error| error.to_string())
+}
+
+/// Clear every reply-history entry and report the actual number removed.
+#[tauri::command]
+pub fn clear_all_history() -> Result<usize, String> {
+    crate::history::clear_all().map_err(|error| error.to_string())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistorySessionTitleRequest {
+    token: String,
+    agent_kind: String,
+    session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistorySessionTitleResult {
+    token: String,
+    title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HistoryTitleKey {
+    kind: crate::agents::AgentKind,
+    session_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct CachedHistoryTitle {
+    title: Option<String>,
+    checked_at: Instant,
+}
+
+const HISTORY_TITLE_BATCH_MAX: usize = 512;
+const HISTORY_TITLE_CACHE_MAX: usize = 512;
+const HISTORY_TITLE_HIT_TTL: Duration = Duration::from_secs(5 * 60);
+const HISTORY_TITLE_MISS_TTL: Duration = Duration::from_secs(30);
+
+fn history_title_cache() -> &'static std::sync::Mutex<HashMap<HistoryTitleKey, CachedHistoryTitle>>
+{
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<HistoryTitleKey, CachedHistoryTitle>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn resolve_history_session_titles_with(
+    requests: Vec<HistorySessionTitleRequest>,
+    now: Instant,
+    cache: &mut HashMap<HistoryTitleKey, CachedHistoryTitle>,
+    mut resolver: impl FnMut(crate::agents::AgentKind, &str) -> Option<String>,
+) -> Vec<HistorySessionTitleResult> {
+    let mut output = Vec::new();
+    let mut seen_tokens = HashSet::new();
+    for request in requests.into_iter().take(HISTORY_TITLE_BATCH_MAX) {
+        let token = request.token.trim();
+        let session_id = request.session_id.trim();
+        let Some(kind) = crate::agents::AgentKind::parse(&request.agent_kind) else {
+            continue;
+        };
+        if token.is_empty() || session_id.is_empty() || !seen_tokens.insert(token.to_string()) {
+            continue;
+        }
+        let key = HistoryTitleKey {
+            kind,
+            session_id: session_id.to_string(),
+        };
+        let cached = cache.get(&key).filter(|entry| {
+            let ttl = if entry.title.is_some() {
+                HISTORY_TITLE_HIT_TTL
+            } else {
+                HISTORY_TITLE_MISS_TTL
+            };
+            now.saturating_duration_since(entry.checked_at) <= ttl
+        });
+        let title = match cached {
+            Some(entry) => entry.title.clone(),
+            None => {
+                let resolved = resolver(kind, session_id)
+                    .map(|title| title.trim().to_string())
+                    .filter(|title| !title.is_empty());
+                cache.insert(
+                    key,
+                    CachedHistoryTitle {
+                        title: resolved.clone(),
+                        checked_at: now,
+                    },
+                );
+                resolved
+            }
+        };
+        if let Some(title) = title {
+            output.push(HistorySessionTitleResult {
+                token: token.to_string(),
+                title,
+            });
+        }
+    }
+    while cache.len() > HISTORY_TITLE_CACHE_MAX {
+        let Some(oldest) = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.checked_at)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        cache.remove(&oldest);
+    }
+    output
+}
+
+/// Resolve exact native Agent session titles in one best-effort cached batch.
+#[tauri::command]
+pub async fn resolve_history_session_titles(
+    requests: Vec<HistorySessionTitleRequest>,
+) -> Vec<HistorySessionTitleResult> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut cache = history_title_cache().lock().unwrap();
+        resolve_history_session_titles_with(
+            requests,
+            Instant::now(),
+            &mut cache,
+            crate::agents::title::resolve_title,
+        )
+    })
+    .await
+    .unwrap_or_default()
 }
 
 // ===== 设置页命令 =====
@@ -3306,5 +3495,102 @@ mod tests {
         assert!(err.contains("permission"));
         let err = launch("claude", "yolo", "bad\0task").await.unwrap_err();
         assert!(err.contains("NUL"));
+    }
+
+    fn title_request(
+        token: &str,
+        agent_kind: &str,
+        session_id: &str,
+    ) -> HistorySessionTitleRequest {
+        HistorySessionTitleRequest {
+            token: token.to_string(),
+            agent_kind: agent_kind.to_string(),
+            session_id: session_id.to_string(),
+        }
+    }
+
+    #[test]
+    fn history_title_batch_validates_deduplicates_and_caches() {
+        let now = Instant::now();
+        let mut cache = HashMap::new();
+        let mut calls = 0;
+        let output = resolve_history_session_titles_with(
+            vec![
+                title_request("a", "codex", "s1"),
+                title_request("a", "codex", "s1"), // duplicate token
+                title_request("b", "codex", "s1"), // same lookup, distinct token
+                title_request("bad", "unknown", "s2"),
+                title_request("empty", "cursor", "  "),
+            ],
+            now,
+            &mut cache,
+            |_, _| {
+                calls += 1;
+                Some("  Session title  ".to_string())
+            },
+        );
+        assert_eq!(calls, 1);
+        assert_eq!(
+            output,
+            vec![
+                HistorySessionTitleResult {
+                    token: "a".into(),
+                    title: "Session title".into(),
+                },
+                HistorySessionTitleResult {
+                    token: "b".into(),
+                    title: "Session title".into(),
+                },
+            ]
+        );
+
+        let cached = resolve_history_session_titles_with(
+            vec![title_request("c", "codex", "s1")],
+            now + Duration::from_secs(1),
+            &mut cache,
+            |_, _| panic!("fresh cache entry should be reused"),
+        );
+        assert_eq!(cached[0].title, "Session title");
+    }
+
+    #[test]
+    fn missing_history_title_is_retried_after_short_ttl() {
+        let now = Instant::now();
+        let mut cache = HashMap::new();
+        let missing = resolve_history_session_titles_with(
+            vec![title_request("a", "cursor", "s")],
+            now,
+            &mut cache,
+            |_, _| None,
+        );
+        assert!(missing.is_empty());
+
+        let found = resolve_history_session_titles_with(
+            vec![title_request("a", "cursor", "s")],
+            now + HISTORY_TITLE_MISS_TTL + Duration::from_secs(1),
+            &mut cache,
+            |_, _| Some("Now available".into()),
+        );
+        assert_eq!(found[0].title, "Now available");
+    }
+
+    #[test]
+    fn popup_history_target_prefers_native_session_then_project_scoped_mcp() {
+        assert_eq!(
+            history_open_target("/p", Some("codex"), Some("session"), Some("instance")),
+            Some(crate::gui_host::HistoryOpenTarget::Agent {
+                agent_kind: "codex".into(),
+                session_id: "session".into(),
+            })
+        );
+        assert_eq!(
+            history_open_target("/p", None, Some("orphan"), Some("instance")),
+            Some(crate::gui_host::HistoryOpenTarget::Mcp {
+                project: "/p".into(),
+                instance_id: "instance".into(),
+            })
+        );
+        assert!(history_open_target("", None, None, Some("instance")).is_none());
+        assert!(history_open_target("/p", Some("codex"), None, None).is_none());
     }
 }

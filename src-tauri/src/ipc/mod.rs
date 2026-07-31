@@ -343,6 +343,13 @@ pub struct ShowPayload {
     /// 发起本次提问的 agent 家族（claude/codex/cursor/grok），探测不到为 None。弹窗据此显示来源 agent badge。
     #[serde(default)]
     pub agent_kind: Option<String>,
+    /// Native Agent conversation/session id used by reply-history filtering. Unlike
+    /// `agent_console_session_id`, this does not require an active AgentRegistry record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<String>,
+    /// MCP process fallback used by reply-history filtering when no native session is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_instance_id: Option<String>,
     /// 发起本次提问的 agent 进程 pid（进程树 walk 得到），探测不到为 None。弹窗据此判断 / 执行「聚焦终端」。
     #[serde(default)]
     pub agent_pid: Option<u32>,

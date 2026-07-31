@@ -231,7 +231,7 @@ AskHuman/
 - 弹窗：`popup_init`、`submit_popup`、`cancel_popup`
 - 附件：`open_path`、`preview_attachments`、`close_preview`、`read_image_data_url`、`file_icon_data_url`、`show_attachment_menu`
 - 设置：`get_settings`、`save_settings`、`get_prompt`、`set_theme`、`update_theme`、`open_settings`、`popup_sound_support`、`play_popup_sound`
-- 历史：`open_history`、`history_init`、`get_history`、`get_history_projects`、`history_count`、`trim_history`、`clear_history`
+- 历史：`open_history`、`history_init`、`get_history`、`get_history_projects`、`history_count`、`trim_history`、`resolve_history_session_titles`、`delete_history_entries`、`clear_all_history`
 - Cursor / Claude 超时 Hook：`cursor_hook_status` / `install` / `update` / `uninstall` / `reveal`；Claude 同名前缀命令
 - Agent Rules：`agent_rule_status` / `install` / `update` / `uninstall` / `reveal` / `open`
 - Agent 模式与配置文件：`agent_mode_status` / `set` / `update`、`mcp_config_reveal` / `open`、`agent_hook_reveal` / `open`、`mcp_command_path`
@@ -279,7 +279,12 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
   或 MCP `show_last` 可在上下文压缩后读取当前会话最近一条提问语境与实际答案（省略空字段、
   未选候选项和 recommended 标记）。取得真实 session 后只做精确查询，不向弱键级联；
   只有完全非 Agent 的 CLI 才按项目回退。
-- 历史窗口提供跨项目查看与搜索；完整约束见 `docs/specs/reply-history.md`。
+- 历史窗口用单一两级菜单按“项目 → 单个 session → 多关键词 AND 搜索”组合筛选；真实 Agent session 使用
+  `agentKind + agentSessionId`，缺失时才以 `project + mcpInstanceId` 作为明确标注的近似分组。
+  从弹窗进入会优先定位本次 ask 的真实历史绑定，已打开的全局单窗也会重新定位。
+- 清理菜单按上下文显示“删除当前搜索结果 / 清空所选会话 / 清空所选项目”；范围清理只提交确认时
+  冻结的 entry ID，全量清空是独立动作，两者都只改
+  `history.jsonl`，不触碰 daemon 重放缓存或待答卡片。完整约束见 `docs/specs/reply-history.md`。
 
 ### 密钥安全
 

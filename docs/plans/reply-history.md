@@ -2,6 +2,8 @@
 
 > 关联需求：`docs/specs/reply-history.md`
 > 计划描述方案与技术 / 规则细节，具体代码以实现为准。
+> 2026-07-31 起，session 筛选、弹窗定位与精确删除行为由
+> `docs/plans/reply-history-session-filter.md` 取代本计划中的旧项目级清空设计。
 
 ## 0. 方案总览
 
