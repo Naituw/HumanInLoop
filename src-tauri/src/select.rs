@@ -639,6 +639,7 @@ mod tests {
                 created_at_ms: 1,
                 agent_kind: None,
                 auto: false,
+                attachments: Vec::new(),
             },
             crate::todos::TodoEntry {
                 id: "id-b".into(),
@@ -646,6 +647,7 @@ mod tests {
                 created_at_ms: 2,
                 agent_kind: None,
                 auto: false,
+                attachments: Vec::new(),
             },
         ];
         let opts = todo_rm_options(&entries);
@@ -668,6 +670,7 @@ mod tests {
                 created_at_ms: 1,
                 agent_kind: None,
                 auto: true,
+                attachments: Vec::new(),
             },
             crate::todos::TodoEntry {
                 id: "id-b".into(),
@@ -675,6 +678,7 @@ mod tests {
                 created_at_ms: 2,
                 agent_kind: None,
                 auto: false,
+                attachments: Vec::new(),
             },
         ];
         let opts = todo_auto_options(&entries, Lang::Zh);

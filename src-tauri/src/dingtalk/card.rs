@@ -23,6 +23,8 @@ const OPT_FONT_SIZE: &str = "common_h5_text_style__font_size";
 const GREEN_COLOR: &str = "common_green1_color";
 /// Todo marker amber colorToken.
 const ORANGE_COLOR: &str = "common_orange1_color";
+/// Todo attachment badge uses secondary text so it remains distinct without competing with TODO.
+const GREY_COLOR: &str = "common_level3_base_color";
 
 /// 一次卡片「提交」回调的解析结果。
 pub struct CardSubmit {
@@ -46,7 +48,14 @@ fn option_md(
     } else {
         &opt.text
     };
-    let body = format!("<font sizeToken={}>{}</font>", OPT_FONT_SIZE, display_text);
+    let (display_text, attachment_badge) = crate::todos::split_attachment_badge(display_text);
+    let mut body = format!("<font sizeToken={}>{}</font>", OPT_FONT_SIZE, display_text);
+    if let Some(badge) = attachment_badge {
+        body.push_str(&format!(
+            " <font sizeToken={} colorTokenV2={}>{}</font>",
+            OPT_FONT_SIZE, GREY_COLOR, badge
+        ));
+    }
     if opt.todo_id.is_some() {
         format!(
             "<font sizeToken={} colorTokenV2={}>{}</font> {}",
@@ -320,6 +329,33 @@ mod tests {
         assert!(md.contains("【TODO】"));
         assert!(md.contains("修复登录"));
         assert!(!md.contains("执行待办："));
+    }
+
+    #[test]
+    fn todo_attachment_badge_uses_grey_rich_text() {
+        let mut option = OptionItem::with_todo("执行待办：修复登录 【1 个附件】", "todo-1");
+        option.todo_attachments = vec![crate::todo_attachments::TodoAttachmentSnapshot {
+            id: "attachment-1".into(),
+            name: "brief.md".into(),
+            path: "/tmp/brief.md".into(),
+            source_path: "/tmp/brief.md".into(),
+            storage: crate::todo_attachments::TodoAttachmentStorage::Reference,
+        }];
+        let map = build_card_param_map_with_todo(
+            "T",
+            "Q",
+            &[option],
+            false,
+            false,
+            "【👍推荐】",
+            "执行待办：",
+            "【TODO】",
+        );
+        let parsed: Value =
+            serde_json::from_str(map.get("options").unwrap().as_str().unwrap()).unwrap();
+        let md = parsed[0]["md"].as_str().unwrap();
+        assert!(md.contains("colorTokenV2=common_level3_base_color>【1 个附件】</font>"));
+        assert!(!md.contains("📎"));
     }
 
     #[test]

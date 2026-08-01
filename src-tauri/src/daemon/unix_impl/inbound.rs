@@ -1368,12 +1368,26 @@ async fn start_task_input_form(
             channel: channel.clone(),
             target: task_source_target(&config, &channel),
         };
-        let launch = match crate::integrations::agent_launch::create_record(
+        let delivery_request_id = uuid::Uuid::new_v4().to_string();
+        let delivery = if let Some(todo) = todo.as_ref() {
+            let expected: Vec<_> = todo.attachments.iter().map(|a| a.snapshot()).collect();
+            crate::todos::prepare_delivery_consistent(
+                &todo_project,
+                &todo.id,
+                &expected,
+                &delivery_request_id,
+            )
+        } else {
+            crate::todo_attachments::TodoDelivery::default()
+        };
+        let launch = match crate::integrations::agent_launch::create_record_with_files(
             source,
             std::path::Path::new(&payload.workspace),
             kind,
             permission,
             &task,
+            &delivery.files,
+            &delivery.warnings,
         ) {
             Ok(record) => {
                 register_pending_launch_watch(&state, &record, &channel, &config, lang);
@@ -1386,6 +1400,7 @@ async fn start_task_input_form(
                         Ok(record)
                     }
                     Err(error) => {
+                        crate::todo_attachments::cleanup_delivery(&delivery_request_id);
                         state
                             .pending_launches
                             .lock()
@@ -1395,7 +1410,10 @@ async fn start_task_input_form(
                     }
                 }
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                crate::todo_attachments::cleanup_delivery(&delivery_request_id);
+                Err(error)
+            }
         };
         let text = match launch {
             Ok(_) => match lang {
@@ -2594,6 +2612,7 @@ mod task_input_tests {
             created_at_ms: 1,
             agent_kind: None,
             auto: false,
+            attachments: Vec::new(),
         }
     }
 
@@ -2627,6 +2646,23 @@ mod task_input_tests {
         assert_eq!(task_todo_label(&entry, Lang::En), "Run todo: fix login");
         entry.auto = true;
         assert_eq!(task_todo_label(&entry, Lang::Zh), "执行待办：⚡ fix login");
+        entry
+            .attachments
+            .push(crate::todo_attachments::TodoAttachment {
+                id: "attachment-1".into(),
+                name: "brief.md".into(),
+                size: 1,
+                is_image: false,
+                source_path: "/tmp/brief.md".into(),
+                path: "/tmp/brief.md".into(),
+                storage: crate::todo_attachments::TodoAttachmentStorage::Reference,
+                thumbnail_path: None,
+                source_modified_ms: None,
+            });
+        assert_eq!(
+            task_todo_label(&entry, Lang::Zh),
+            "执行待办：⚡ fix login 【1 个附件】"
+        );
     }
 }
 

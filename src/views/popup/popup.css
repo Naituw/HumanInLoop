@@ -1206,9 +1206,6 @@ mark.popup-find-hit-current,
     var(--space-2) + var(--focus-ring-width) - var(--space-3)
   );
 }
-.composer-attachments {
-  display: contents;
-}
 .composer-dock {
   position: relative;
   z-index: 10;
@@ -1552,56 +1549,6 @@ mark.popup-find-hit-current,
 .todo-option .todo-del-confirm:hover {
   background: color-mix(in srgb, #ff453a 22%, transparent);
 }
-/* 回复文件 chip */
-.reply-files {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-}
-.reply-file {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 220px;
-  padding: 4px 6px 4px 8px;
-  border-radius: var(--radius-sm);
-  border: 1px solid transparent;
-  background: var(--bg-elevated);
-  font-size: 12px;
-}
-.reply-file .rf-icon {
-  flex: 0 0 auto;
-  font-size: 13px;
-  line-height: 1;
-}
-.reply-file .rf-name {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-primary);
-}
-.reply-file .rf-remove {
-  flex: 0 0 auto;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  border: none;
-  background: rgba(128, 128, 128, 0.25);
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1;
-  cursor: default;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.reply-file .rf-remove:hover {
-  background: rgba(128, 128, 128, 0.4);
-  color: var(--text-primary);
-}
-
 /* 选项末尾的快捷键标注（⌘1…⌘9） */
 .option .opt-sc {
   flex: 0 0 auto;

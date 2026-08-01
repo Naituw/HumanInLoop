@@ -24,6 +24,7 @@ describe("refreshWhatsNextTodos", () => {
       latest,
       [],
       "Run todo: ",
+      (count) => `【${count} attachments】`,
     );
 
     expect(refreshed.options).toHaveLength(10);
@@ -36,7 +37,36 @@ describe("refreshWhatsNextTodos", () => {
     expect(refreshed.hiddenTodos).toBe(2);
   });
 
-  it("preserves a selected TODO by id across edits and clears removed selections", () => {
+  it("uses the localized bracket badge for attachment counts", () => {
+    const entry = todo("todo-1", "review brief");
+    entry.attachments = [
+      {
+        id: "attachment-1",
+        name: "brief.md",
+        size: 1,
+        isImage: false,
+        sourcePath: "/tmp/brief.md",
+        path: "/tmp/brief.md",
+        storage: "reference",
+        available: true,
+      },
+    ];
+    const refreshed = refreshWhatsNextTodos(
+      [end],
+      [end],
+      [entry],
+      [],
+      "Run todo: ",
+      (count) => `【${count} attachments】`,
+    );
+    expect(refreshed.options[0]).toMatchObject({
+      text: "Run todo: review brief 【1 attachments】",
+      todoText: "review brief",
+    });
+    expect(refreshed.options[0].text).not.toContain("📎");
+  });
+
+  it("freezes a selected TODO snapshot across edits and clears removed selections", () => {
     const oldTodo: OptionItem = {
       text: "Run todo: old text",
       recommended: false,
@@ -48,8 +78,9 @@ describe("refreshWhatsNextTodos", () => {
       [todo("todo-1", "new text")],
       [oldTodo.text],
       "Run todo: ",
+      (count) => `【${count} attachments】`,
     );
-    expect(kept.selectedOptions).toEqual(["Run todo: new text"]);
+    expect(kept.selectedOptions).toEqual(["Run todo: old text"]);
 
     const removed = refreshWhatsNextTodos(
       kept.options,
@@ -57,6 +88,7 @@ describe("refreshWhatsNextTodos", () => {
       [],
       kept.selectedOptions,
       "Run todo: ",
+      (count) => `【${count} attachments】`,
     );
     expect(removed.selectedOptions).toEqual([]);
   });
@@ -68,6 +100,7 @@ describe("refreshWhatsNextTodos", () => {
       [todo("todo-1")],
       [suggestion.text],
       "Run todo: ",
+      (count) => `【${count} attachments】`,
     );
     expect(refreshed.selectedOptions).toEqual([suggestion.text]);
   });
@@ -83,6 +116,7 @@ describe("refreshWhatsNextTodos", () => {
       [todo("todo-1")],
       [],
       "Run todo: ",
+      (count) => `【${count} attachments】`,
     );
     expect(refreshed.options).toEqual([...suggestions, end]);
     expect(refreshed.hiddenTodos).toBe(0);
@@ -90,11 +124,21 @@ describe("refreshWhatsNextTodos", () => {
 });
 
 describe("selectedWhatsNextTodo", () => {
-  it("returns the latest raw text and stable id for submission", () => {
+  it("returns the frozen raw text, attachments, and stable id for submission", () => {
     const option: OptionItem = {
-      text: "Run todo: old text",
+      text: "Run todo: old text 【1 attachment】",
       recommended: false,
       todoId: "todo-1",
+      todoText: "old text",
+      todoAttachments: [
+        {
+          id: "attachment-1",
+          name: "brief.md",
+          path: "/tmp/brief.md",
+          sourcePath: "/source/brief.md",
+          storage: "managed",
+        },
+      ],
     };
     expect(
       selectedWhatsNextTodo(
@@ -105,8 +149,9 @@ describe("selectedWhatsNextTodo", () => {
       ),
     ).toEqual({
       id: "todo-1",
-      text: "new text",
+      text: "old text",
       optionText: option.text,
+      attachments: option.todoAttachments,
     });
   });
 });

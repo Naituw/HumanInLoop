@@ -9,5 +9,5 @@ export function optionDisplayText(
   if (!whatsNext || !option.todoId || !option.text.startsWith(todoPrefix)) {
     return option.text;
   }
-  return option.text.slice(todoPrefix.length);
+  return option.todoText ?? option.text.slice(todoPrefix.length);
 }

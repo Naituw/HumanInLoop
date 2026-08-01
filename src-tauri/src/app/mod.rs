@@ -1039,6 +1039,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
     crate::perf::mark_env("gui.build_start");
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_drag::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_liquid_glass::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
@@ -1165,6 +1166,10 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             crate::commands::channel_health,
             crate::commands::todos_list,
             crate::commands::todos_add,
+            crate::commands::todos_update,
+            crate::commands::todos_update_attachments,
+            crate::commands::todos_attach_pasted_images,
+            crate::commands::todo_attachment_thumbnail,
             crate::commands::todos_remove,
             crate::commands::todos_complete,
             crate::commands::todos_clear,
@@ -2407,9 +2412,6 @@ where
         .min_inner_size(400.0, 320.0)
         .center()
         .always_on_top(pin_above_popup)
-        // 拖拽排序用 HTML5 DnD：Tauri 原生 drag-drop 处理器会吞掉 webview 内的
-        // dragover/drop 事件（macOS WKWebView），必须禁用；本窗口不需要文件拖入。
-        .disable_drag_drop_handler()
         .theme(theme);
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     let win = apply_surface(builder, window_bg, effective_window_effect).build()?;

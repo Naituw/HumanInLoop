@@ -669,6 +669,7 @@ export function usePopupCore() {
   const todosOpen = ref(false);
   // 选中的待办条目 id（提交时文本并入回答、id 送后端出队）。
   const todoChosenIds = ref<string[]>([]);
+  const todoChosenSnapshots = ref<Record<string, TodoEntry>>({});
   // 点选作答在严格选择（禁自由文本）之外都启用；选中文本恒并入**最后一题**的回答。
   const todoChipsEnabled = computed(() => !selectOnly.value);
   // 跟在最后一个问题后面、仅在有待办时显示：whats-next 弹窗不显示（待办已是选项本体）；
@@ -682,7 +683,9 @@ export function usePopupCore() {
       (verticalMode.value || current.value === total.value - 1)
   );
   const selectedTodos = computed(() =>
-    todos.value.filter((td) => todoChosenIds.value.includes(td.id))
+    todoChosenIds.value
+      .map((id) => todoChosenSnapshots.value[id])
+      .filter((todo): todo is TodoEntry => !!todo)
   );
 
   let todoLoadGeneration = 0;
@@ -703,6 +706,7 @@ export function usePopupCore() {
           latest,
           chosenByQ.value[0] ?? [],
           t("popup.todos.optionPrefix"),
+          (count) => t("common.attachmentBadge", { n: count }),
         );
         question.predefinedOptions = refreshed.options;
         question.message = refreshed.hiddenTodos
@@ -713,6 +717,9 @@ export function usePopupCore() {
       }
       // External deletes/completions must also clear stale local selections.
       todoChosenIds.value = todoChosenIds.value.filter((id) => liveIds.has(id));
+      for (const id of Object.keys(todoChosenSnapshots.value)) {
+        if (!liveIds.has(id)) delete todoChosenSnapshots.value[id];
+      }
     } catch {
       /* 旧后端无此命令：待办区保持空 */
     }
@@ -721,13 +728,24 @@ export function usePopupCore() {
   function toggleTodo(id: string) {
     if (!todoChipsEnabled.value) return;
     const i = todoChosenIds.value.indexOf(id);
-    if (i >= 0) todoChosenIds.value.splice(i, 1);
-    else todoChosenIds.value.push(id);
+    if (i >= 0) {
+      todoChosenIds.value.splice(i, 1);
+      delete todoChosenSnapshots.value[id];
+    } else {
+      const todo = todos.value.find((entry) => entry.id === id);
+      if (!todo) return;
+      todoChosenSnapshots.value[id] = {
+        ...todo,
+        attachments: (todo.attachments ?? []).map((attachment) => ({ ...attachment })),
+      };
+      todoChosenIds.value.push(id);
+    }
   }
 
   async function removeTodo(id: string) {
     todos.value = todos.value.filter((td) => td.id !== id);
     todoChosenIds.value = todoChosenIds.value.filter((x) => x !== id);
+    delete todoChosenSnapshots.value[id];
     try {
       await todosRemove(projectPath.value, id);
     } catch {
@@ -1539,6 +1557,9 @@ export function usePopupCore() {
           .filter((text) => text.trim())
           .join("\n\n");
         answer.todoIds = [whatsNextTodo.id];
+        answer.todoSelections = [
+          { id: whatsNextTodo.id, attachments: whatsNextTodo.attachments },
+        ];
       }
       // 待办下拉区选中的条目（恒归**最后一题**，spec D7 第 11 轮改版）：每条加「另外看一下
       // 这个待办任务：」前缀并入 userInput（手输文本在前、待办在后，空行分隔），id 送后端出队。
@@ -1556,6 +1577,16 @@ export function usePopupCore() {
           .filter((s) => s.trim())
           .join("\n\n");
         answer.todoIds = selectedTodos.value.map((td) => td.id);
+        answer.todoSelections = selectedTodos.value.map((td) => ({
+          id: td.id,
+          attachments: (td.attachments ?? []).map((attachment) => ({
+            id: attachment.id,
+            name: attachment.name,
+            path: attachment.path,
+            sourcePath: attachment.sourcePath,
+            storage: attachment.storage,
+          })),
+        }));
       }
       return answer;
     });
@@ -2055,6 +2086,7 @@ export function usePopupCore() {
     todos.value = [];
     todosOpen.value = false;
     todoChosenIds.value = [];
+    todoChosenSnapshots.value = {};
     attach.loadThumbs();
     attach.loadDragIcons();
     // 纵向模式（实验开关开 且 多题）：不自动聚焦、保持全部折叠、建哨兵观察。

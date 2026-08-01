@@ -173,6 +173,7 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         // 待办选项的展示前缀（whats-next / Stop 卡共用）；发给 agent 的任务文本会剥掉它
         // （`output::strip_todo_prefix`，两种语言都尝试）。
         "whatsNext.todoPrefix" => pick(lang, "Run todo: ", "执行待办："),
+        "todo.attachmentBadge" => pick(lang, "【{n} attachments】", "【{n} 个附件】"),
         // 选项类展示点超过 MAX_OPTION_TODOS 时的溢出提示（附正文尾部，第 14 轮定案）。
         "todo.moreNote" => pick(
             lang,
@@ -212,8 +213,8 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         ),
         "todo.unknownSubcommand" => pick(
             lang,
-            "unknown todo subcommand: {cmd} (use add / list / rm / clear)",
-            "未知的 todo 子命令: {cmd}（可用 add / list / rm / clear）",
+            "unknown todo subcommand: {cmd} (use add / list / attach / detach / rm / clear)",
+            "未知的 todo 子命令: {cmd}（可用 add / list / attach / detach / rm / clear）",
         ),
 
         // —— 文件附件解析错误 ——

@@ -193,7 +193,10 @@ pub fn whats_next_reply(request: &AskRequest, result: &ChannelResult) -> WhatsNe
         });
     if let Some(todo) = selected_todo {
         // 选项文本带展示前缀（「执行待办：」），发给 agent 的任务文本还原为待办原文。
-        let raw = strip_todo_prefix(&todo.text);
+        let raw = todo
+            .todo_text
+            .as_deref()
+            .unwrap_or_else(|| strip_todo_prefix(&todo.text));
         let text = match input {
             Some(extra) => format!("{}\n\n{}", raw, extra),
             None => raw.to_string(),
@@ -507,6 +510,7 @@ mod tests {
             images: Vec::new(),
             files: files.iter().map(|x| x.to_string()).collect(),
             todo_ids: Vec::new(),
+            todo_selections: Vec::new(),
         }
     }
 

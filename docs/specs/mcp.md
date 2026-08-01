@@ -13,7 +13,7 @@
 > **实现期补充（2026-07-23）**：Codex 桌面版 Suggested prompts 使用
 > `thread_source=system` 的内部 thread。AskHuman 对 Codex 每次 `tools/call._meta` 做前置检查，命中
 > `x-codex-turn-metadata.thread_source == "system"` 时在任何子进程、daemon 或 todo 副作用前本地拒绝
-> `ask`、`whats_next`、`show_last`、`todo_add`，并向 `~/.askhuman/daemon.log` 追加一条结构化抑制
+> `ask`、`whats_next`、`show_last`、`todo_add`、`todo_update`，并向 `~/.askhuman/daemon.log` 追加一条结构化抑制
 > 审计；其它来源与缺失 / 异常 metadata 保持 fail-open。
 >
 > **实现期补充（2026-07-24）**：ChatGPT.app 26.721 把 ambient/Suggested prompts 线程的
@@ -47,7 +47,7 @@
 ## 2. 目标形态
 
 - 新增子命令 `AskHuman mcp`：以 STDIO 运行 MCP server，暴露 `ask`、`whats_next`、
-  `show_last`、`todo_add`；`ask` 覆盖现 CLI `AskHuman` 的全部提问能力。
+  `show_last`、`todo_add`、`todo_list`、`todo_update`；`ask` 覆盖现 CLI `AskHuman` 的全部提问能力。
 - MCP server 为**薄壳**：每次 `ask` 调用就 spawn 一个现有的 `AskHuman …` 子进程（默认文本输出），复用全部既有 ask 流程（弹窗 / IM / 抢答 / 历史 / 落盘 / 排空与重连），结果区块文本原样透传，再把人类回复中的图片读回、转 `ImageContent` 直接返回给模型。
 - 自动集成：每家 Agent 改为「**CLI | MCP | 未集成**」三态互斥选择。CLI 模式绑定 `Rule + 超时 Hook`，MCP 模式绑定 `Rule + MCP 配置`。
 - 手动集成：参考提示词提供 **CLI 版 / MCP 版**两份可切换展示；MCP 版同时展示各家 **MCP 配置实例**。
@@ -59,8 +59,8 @@
 | D1 | 模式互斥 | 每个 agent 三态「CLI / MCP / 未集成」，互斥。同一 agent 不同时安装 CLI 与 MCP 产物（避免双触发/冲突） |
 | D2 | MCP server 形态 | **薄壳**：不自带提问/弹窗/IM 逻辑；正常 `ask` 调用 spawn 现有 `AskHuman …` 子进程（默认文本输出）复用全流程。Codex 拦截来源（`system` / `ambient_suggestions`）thread 在 spawn 前本地拒绝 |
 | D3 | 启动方式 | 新增 busybox 角色子命令 `AskHuman mcp`（与 `daemon`/`--popup`/`__agent-hook` 并列），用 `rmcp` 跑 STDIO server |
-| D4 | 工具与 Schema | `ask` 入参为 `message`、`questions[{question, options[{text, recommended}]}]`、`files[]`；`whats_next` 承载完成报告/建议，`show_last` 对模型为零业务参数，`todo_add` 写项目待办。会话 token 字段可被托管 Hook 注入但必须从 `tools/list` schema 隐藏。`questions` / `options` item 直接内联，不得依赖本地 `$ref` |
-| D5 | 输出（文本区块透传 + 图片直返）| `ask` **不声明 output schema**、不返回 `structuredContent`：子进程以默认文本模式调用，stdout 的结果区块（`[selected_options]` / `[user_input]` / `[files]` / `[status]`，多题 `# Qn` 分组）**原样透传**为 `content[0]` 的 `TextContent`，与 CLI 契约同一份字节。**取消时**即 `[status]` 区块引导文案（必须重新确认直到用户明确答复，不得当作放行）。区块格式说明放在工具 description（tools/list 每会话必达，替代 CLI 侧 `--agent-help` 的对应两节）。人类回复中的图片按 `[files]` 区块路径读出后以 `ImageContent`(base64+mimeType) 一并放入 `content` 直返模型；非图片文件以路径出现在 `[files]` 区块中。`todo_add` 同理只返回一行文本（如 `Added todo #3: …`）。（二轮定案 2026-07-25，依据见 §10） |
+| D4 | 工具与 Schema | `ask` 入参为 `message`、`questions[{question, options[{text, recommended}]}]`、`files[]`；`whats_next` 承载完成报告/建议，`show_last` 对模型为零业务参数；`todo_add` 写项目待办，`todo_list` 只读列稳定 Todo/附件 ID，`todo_update` 按稳定 ID 增删附件。会话 token 字段可被托管 Hook 注入但必须从 `tools/list` schema 隐藏。`questions` / `options` item 直接内联，不得依赖本地 `$ref` |
+| D5 | 输出（文本区块透传 + 图片直返）| `ask` **不声明 output schema**、不返回 `structuredContent`：子进程以默认文本模式调用，stdout 的结果区块（`[selected_options]` / `[user_input]` / `[files]` / `[status]`，多题 `# Qn` 分组）**原样透传**为 `content[0]` 的 `TextContent`，与 CLI 契约同一份字节。**取消时**即 `[status]` 区块引导文案（必须重新确认直到用户明确答复，不得当作放行）。区块格式说明放在工具 description（tools/list 每会话必达，替代 CLI 侧 `--agent-help` 的对应两节）。人类回复中的图片按 `[files]` 区块路径读出后以 `ImageContent`(base64+mimeType) 一并放入 `content` 直返模型；非图片文件以路径出现在 `[files]` 区块中。三个 Todo 工具返回包含稳定 ID 的文本结果。（二轮定案 2026-07-25，依据见 §10） |
 | D6 | 超时 | MCP 模式**不需要超时 Hook**，但需按各家机制配置工具超时（否则长等待被取消）：**Codex** 写 `tool_timeout_sec=86400`(秒)+`startup_timeout_sec=30`；**Grok** 另写 `tool_timeouts = { ask = 86400 }`；**Claude Code(CLI)** 在 `mcpServers.askhuman` 写 `timeout=86400000`(**毫秒**,24h)；**Cursor** 工具/elicitation 超时 ~60s **硬编码不可配置**，不写 timeout（Cursor 推荐 CLI 模式） |
 | D7 | MCP 配置落点 | **用户级全局**（与现有 Rules/Hook 一致）：Codex `~/.codex/config.toml`、Grok `~/.grok/config.toml`、Claude `~/.claude.json`（top-level `mcpServers`）、Cursor `~/.cursor/mcp.json` |
 | D8 | 模式切换 | **一键切换**：切到另一模式时自动卸载旧模式全部产物，再安装新模式。选「未集成」= 卸载当前模式全部产物 |
@@ -70,7 +70,7 @@
 | D12 | 平台范围 | **全平台**。统一用 spawn 子进程：Unix 子进程是「瘦客户端→daemon」，Windows 子进程是现有「单进程弹窗」回退。MCP server 自身不直接弹窗，绕开 Windows 上「stdio 主循环 vs Tauri 主线程」冲突 |
 | D13 | 漂移检测 | `needs_update` 覆盖 MCP Rule + MCP 配置：已安装但内置提示词/配置模板有更新时显示「更新」 |
 | D14 | CLI/doctor | `agents mode/update/show` 与 `doctor` 纳入 MCP 模式状态与整包操作（headless 一致可用） |
-| D15 | 命名 | 子命令 `mcp`；工具名 `ask` / `whats_next` / `show_last` / `todo_add`；各家配置中 server 名 `askhuman` |
+| D15 | 命名 | 子命令 `mcp`；工具名 `ask` / `whats_next` / `show_last` / `todo_add` / `todo_list` / `todo_update`；各家配置中 server 名 `askhuman` |
 | D16 | 配置 command | 配置里的 `command` 写**当前可执行文件绝对路径**（`current_exe()`，与 Hook 脚本写绝对路径一致），因部分客户端不继承 shell PATH |
 
 ## 4. MCP server 运行流程（薄壳）
@@ -78,7 +78,7 @@
 ```
 客户端(Codex/Claude/Cursor)
   └─ 按配置 spawn: <AskHuman 绝对路径> mcp        （STDIO，session 期常驻）
-       └─ rmcp STDIO server，暴露 `ask` / `whats_next` / `show_last` / `todo_add`
+       └─ rmcp STDIO server，暴露 `ask` / `whats_next` / `show_last` / `todo_add` / `todo_list` / `todo_update`
             └─ 收到 ask 调用：
                  0. 检查 Codex turn metadata；拦截来源 thread 直接返回 terminal error
                  1. 入参 Schema → argv（message / -q / -o / -o! / -f；默认文本输出）
@@ -102,14 +102,15 @@ object 或 JSON 字符串，只对其中精确小写的 `thread_source ∈ {"sys
 任意同名 `thread_source`。字段缺失、格式错误、`user`、`automation` 或未知值均 fail-open，避免误伤
 旧 Codex 与其它 MCP 客户端。
 
-命中后 `ask`、`whats_next`、`show_last`、`todo_add` 返回 `isError: true`，固定文本为：
+命中后 `ask`、`whats_next`、`show_last`、`todo_add`、`todo_update` 返回 `isError: true`；只读
+`todo_list` 不产生副作用，可继续读取。固定错误文本为：
 
 ```text
 AskHuman is disabled for this Codex system-generated background thread.
 Do not retry or contact the human; finish the host-requested non-interactive output directly.
 ```
 
-该返回不伪造 human answer 或结束批准；四个 handler 都在参数业务校验、spawn 子 CLI、项目检测与 todo
+该返回不伪造 human answer 或结束批准；五个有副作用/交互的 handler 都在参数业务校验、spawn 子 CLI、项目检测与 todo
 落盘前执行同一 guard。因此 Suggested prompts 即使按通用 Rules 尝试调用 AskHuman，也不会触发
 popup、IM 或项目 todo。
 
@@ -197,7 +198,7 @@ argv 映射：`message`→首个位置参数（或经 `-q` 拆分）；每个 qu
 
 ## 9. 验收标准
 
-1. `AskHuman mcp` 启动 STDIO MCP server，`tools/list` 含 `ask`、`whats_next`、`show_last`、`todo_add`；`ask` input schema 直接保留 `questions[].question` 与 `questions[].options[].text`（无 `$defs` / `$ref`），三个交互工具的隐藏 token 字段均不出现在 schema。
+1. `AskHuman mcp` 启动 STDIO MCP server，`tools/list` 含 `ask`、`whats_next`、`show_last`、`todo_add`、`todo_list`、`todo_update`；`ask` input schema 直接保留 `questions[].question` 与 `questions[].options[].text`（无 `$defs` / `$ref`），三个交互工具的隐藏 token 字段均不出现在 schema；Todo 读写按稳定 ID 工作。
 2. 在 Codex 中：写入 `[mcp_servers.askhuman]`（含大 `tool_timeout_sec`）后，调用 `ask` 能弹窗/经 IM 提问、长时间等待不超时；人类回复正常返回。
 3. `ask` 覆盖核心能力：多问题、`options`/`recommended`、`files` 均按 CLI 语义生效；`message`/`question` 按 Markdown 渲染；取消时输出顶层 `status` 引导。
 4. 人类回复图片：模型侧收到 `ImageContent`（可见图像），非图片文件以路径出现在文本中。
@@ -208,7 +209,7 @@ argv 映射：`message`→首个位置参数（或经 `-q` 拆分）；每个 qu
 9. 三家 MCP 配置写入为最小化编辑：保留用户其它条目/注释；重复安装幂等；卸载只移除自有条目；解析失败不破坏文件（单测覆盖）。
 10. Windows：`AskHuman mcp` 经子进程单进程弹窗回退完成提问（无 daemon）。
 11. 既有 CLI 模式（Rule/Hook）与所有现有功能回归正常。
-12. raw `tools/call` 携带 Codex `thread_source=system` 或 `ambient_suggestions` 时四个工具均返回固定
+12. raw `tools/call` 携带 Codex `thread_source=system` 或 `ambient_suggestions` 时五个交互/副作用工具均返回固定
     terminal error 且无副作用；同时写入含工具名、`codex_blocked_thread_source` 原因与 `threadSource`
     原值的结构化审计；`user`、`automation`、缺失和异常 metadata 不命中拦截，但写 `action="passed"`
     放行审计。
@@ -220,7 +221,7 @@ argv 映射：`message`→首个位置参数（或经 `-q` 拆分）；每个 qu
 
 > 已定（首轮）：`ask` 输出走 JSON / 结构化 + output schema（子进程 `--output json` → `structuredContent` + 序列化 JSON 文本 + `ImageContent`）；Claude 用户级 `~/.claude.json` 当前版本支持，无需回退。
 >
-> **已定（二轮，2026-07-25，推翻首轮输出形态）**：`ask` / `todo_add` 改为**纯文本透传**（D5 现行文）。依据（o200k tokenizer 实测 + 客户端源码/文档核实）：
+> **已定（二轮，2026-07-25，推翻首轮输出形态）**：`ask` 与 Todo 工具改为**纯文本透传**（D5 现行文）。依据（o200k tokenizer 实测 + 客户端源码/文档核实）：
 >
 > - outputSchema 在 tools/list 中每会话固定 ~345 token，而等价格式说明放 description 仅 ~66 token；每次调用 JSON 比文本区块多 5–13 token（多题含未答题时 JSON 略省，但文本明确标出「用户未回答」信息量更足，采纳）；
 > - Claude Code（官方 Agent SDK 文档）与 Codex（`as_function_call_output_payload`）在有 `structuredContent` 时都**只**把它喂给模型、丢弃 `content` 文本——「双份兼容文本」对模型无益、纯增传输；无 `structuredContent` 时两家都原样转发文本与图片块，Cursor/Grok 与 `whats_next` 现行纯文本同路径在产验证；

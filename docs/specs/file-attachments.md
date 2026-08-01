@@ -2,6 +2,8 @@
 
 > 状态：已实现
 > 关联计划：`docs/plans/file-attachments.md`
+> Todo 图片 / 文件附件是独立的持久化与派发需求，见 `docs/specs/todo-attachments.md`；其 128 px
+> 托管缩略图不改变本 spec 中普通 Ask 附件的现有整图读取行为。
 
 ## 1. 背景
 

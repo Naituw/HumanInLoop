@@ -139,6 +139,29 @@ pub struct TodoAddParams {
     /// When true, mark the todo for auto-run on the next `whats_next` (⚡).
     #[serde(default)]
     pub auto: Option<bool>,
+    /// Optional local file paths to attach. Paths may be absolute or relative to the MCP
+    /// server's working directory. Files up to 10 MiB are copied into managed storage;
+    /// larger files are retained as references.
+    #[serde(default)]
+    pub files: Option<Vec<String>>,
+}
+
+// Publicly zero-argument input for `todo_list`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct TodoListParams {}
+
+// Input for stable-id attachment edits on an existing todo.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoUpdateParams {
+    /// Stable todo UUID returned by `todo_add` or `todo_list`.
+    pub todo_id: String,
+    /// Local paths to append to this todo. Relative paths use the MCP server cwd.
+    #[serde(default)]
+    pub add_files: Option<Vec<String>>,
+    /// Stable attachment UUIDs to remove from this todo.
+    #[serde(default)]
+    pub remove_attachment_ids: Option<Vec<String>>,
 }
 
 // Input for `whats_next` (spec todo-whats-next D2).
@@ -193,7 +216,7 @@ pub struct AskOption {
     pub recommended: bool,
 }
 
-/// MCP server：暴露 `ask`、`whats_next`、`show_last`、`todo_add`。
+/// MCP server：暴露提问、handoff、session recovery 与 Todo 管理工具。
 #[derive(Clone)]
 pub struct AskServer {
     tool_router: ToolRouter<Self>,
@@ -446,7 +469,8 @@ you are unsure of the exact prior AskHuman exchange. Takes no public arguments."
         description = "Add a project todo for the human to pick up later (whats-next chips / todos \
 window / IM). Use only when the human asked to record a deferred task or accepted a concrete \
 suggestion for later — never for your own work plan. Attaches to the project of the MCP server's \
-cwd (git root). Returns the 1-based index and stored text on success.",
+cwd (git root). Optional `files` attach local files explicitly requested by the human. Returns the \
+stable todo ID, 1-based index, stored text, and attachment IDs on success.",
         // Appending a todo is additive (not destructive) and touches no external world.
         annotations(destructive_hint = false, open_world_hint = false)
     )]
@@ -465,7 +489,7 @@ cwd (git root). Returns the 1-based index and stored text on success.",
                 None,
             ));
         }
-        let project = crate::project::detect();
+        let project = self.project.clone();
         if project.is_empty() {
             return Err(McpError::internal_error(
                 "cannot determine project (cwd unavailable)",
@@ -473,12 +497,25 @@ cwd (git root). Returns the 1-based index and stored text on success.",
             ));
         }
         let auto = params.auto.unwrap_or(false);
+        let files = params.files.unwrap_or_default();
         let agent = crate::agents::detect::detect_invoking_agent();
-        let added = match agent {
-            Some(agent) => crate::todos::add_from_agent(&project, text, auto, agent),
-            None if auto => crate::todos::add_auto(&project, text),
-            None => crate::todos::add(&project, text),
-        };
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let project_for_add = project.clone();
+        let text_for_add = text.to_string();
+        let added = tokio::task::spawn_blocking(move || {
+            crate::todos::add_with_attachments(
+                &project_for_add,
+                &text_for_add,
+                auto,
+                agent,
+                &files,
+                &cwd,
+            )
+        })
+        .await
+        .map_err(|error| {
+            McpError::internal_error(format!("todo_add task failed: {error}"), None)
+        })?;
         let entry = match added {
             Ok(entry) => entry,
             Err(crate::todos::AddError::EmptyInput) => {
@@ -493,18 +530,123 @@ cwd (git root). Returns the 1-based index and stored text on success.",
 (check permissions).",
                 )]));
             }
+            Err(crate::todos::AddError::Attachment(message)) => {
+                return Err(McpError::invalid_params(message, None));
+            }
         };
         let Some(index) = crate::todos::index_of(&project, &entry.id) else {
             return Ok(CallToolResult::error(vec![ContentBlock::text(
                 "Failed to save todo: entry missing after write (not persisted).",
             )]));
         };
-        // 一行文本足矣（消费者是模型）；id/project 等细节对模型无用，不再返回结构化 JSON。
         let kind = if entry.auto { "auto-run todo" } else { "todo" };
+        let attachment_summary = format_attachment_ids(&entry.attachments);
         Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-            "Added {kind} #{index}: {}",
-            entry.text
+            "Added {kind} #{index} (id: {}): {}{}",
+            entry.id, entry.text, attachment_summary
         ))]))
+    }
+
+    /// Read the current project's pending todos, including stable todo and attachment IDs.
+    #[tool(
+        name = "todo_list",
+        description = "List pending todos for the MCP server's current project. Returns stable todo \
+and attachment IDs plus text, auto-run state, storage kind, size, and current availability. Use \
+these IDs before calling `todo_update`.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn todo_list(
+        &self,
+        Parameters(_params): Parameters<TodoListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let project = self.project.clone();
+        let entries = tokio::task::spawn_blocking(move || crate::todos::list(&project))
+            .await
+            .map_err(|error| {
+                McpError::internal_error(format!("todo_list task failed: {error}"), None)
+            })?;
+        let output = format_todo_list(&entries);
+        Ok(CallToolResult::success(vec![ContentBlock::text(output)]))
+    }
+
+    /// Add or remove attachments on a todo selected by its stable UUID.
+    #[tool(
+        name = "todo_update",
+        description = "Modify attachments on an existing project todo by stable IDs. Use only when \
+the human explicitly asks to attach or remove files. `todo_id` comes from `todo_add` or \
+`todo_list`; `remove_attachment_ids` must belong to that todo. At least one add/remove operation is \
+required.",
+        annotations(destructive_hint = true, open_world_hint = false)
+    )]
+    async fn todo_update(
+        &self,
+        Parameters(params): Parameters<TodoUpdateParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        if let Some(blocked) = codex_thread_guard(&context.meta, "todo_update") {
+            return Ok(blocked);
+        }
+        let todo_id = params.todo_id.trim().to_string();
+        if uuid::Uuid::parse_str(&todo_id).is_err() {
+            return Err(McpError::invalid_params(
+                "todo_update requires a valid UUID in `todoId`",
+                None,
+            ));
+        }
+        let add_files = params.add_files.unwrap_or_default();
+        let remove_ids = params.remove_attachment_ids.unwrap_or_default();
+        if add_files.is_empty() && remove_ids.is_empty() {
+            return Err(McpError::invalid_params(
+                "todo_update requires at least one `addFiles` or `removeAttachmentIds` entry",
+                None,
+            ));
+        }
+        if remove_ids
+            .iter()
+            .any(|id| uuid::Uuid::parse_str(id).is_err())
+        {
+            return Err(McpError::invalid_params(
+                "every `removeAttachmentIds` entry must be a valid UUID",
+                None,
+            ));
+        }
+        let project = self.project.clone();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let updated = tokio::task::spawn_blocking(move || {
+            crate::todos::update_attachment_ids(&project, &todo_id, &add_files, &remove_ids, &cwd)
+        })
+        .await
+        .map_err(|error| {
+            McpError::internal_error(format!("todo_update task failed: {error}"), None)
+        })?;
+        match updated {
+            Ok(entry) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                "Updated todo {}: {} attachment(s){}",
+                entry.id,
+                entry.attachments.len(),
+                format_attachment_ids(&entry.attachments)
+            ))])),
+            Err(crate::todos::UpdateError::NotFound) => Err(McpError::invalid_params(
+                "todo_update target was not found in this project",
+                None,
+            )),
+            Err(crate::todos::UpdateError::UnknownAttachment) => Err(McpError::invalid_params(
+                "one or more attachment IDs do not belong to this todo",
+                None,
+            )),
+            Err(crate::todos::UpdateError::Conflict) => {
+                Ok(CallToolResult::error(vec![ContentBlock::text(
+                    "Todo changed concurrently; call todo_list and retry.",
+                )]))
+            }
+            Err(error) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "Failed to update todo: {error}"
+            ))])),
+        }
     }
 
     fn configure_child(
@@ -560,6 +702,54 @@ cwd (git root). Returns the 1-based index and stored text on success.",
             session_id,
         })
     }
+}
+
+fn format_attachment_ids(attachments: &[crate::todo_attachments::TodoAttachment]) -> String {
+    if attachments.is_empty() {
+        return String::new();
+    }
+    let items = attachments
+        .iter()
+        .map(|attachment| format!("{} (id: {})", attachment.name, attachment.id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("; attachments: {items}")
+}
+
+fn format_todo_list(entries: &[crate::todos::TodoEntry]) -> String {
+    if entries.is_empty() {
+        return "No pending todos for this project.".to_string();
+    }
+    let mut lines = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        let auto = if entry.auto { ", auto: true" } else { "" };
+        let origin = entry
+            .agent_kind
+            .as_deref()
+            .map(|kind| format!(", origin: {kind}"))
+            .unwrap_or_default();
+        lines.push(format!(
+            "{}. {} (todo id: {}{auto}{origin})",
+            index + 1,
+            entry.text,
+            entry.id
+        ));
+        for attachment in &entry.attachments {
+            let storage = match attachment.storage {
+                crate::todo_attachments::TodoAttachmentStorage::Managed => "managed",
+                crate::todo_attachments::TodoAttachmentStorage::Reference => "reference",
+            };
+            lines.push(format!(
+                "   - {} (attachment id: {}, {} bytes, storage: {}, available: {})",
+                attachment.name,
+                attachment.id,
+                attachment.size,
+                storage,
+                attachment.available()
+            ));
+        }
+    }
+    lines.join("\n")
 }
 
 fn show_last_scope(
@@ -743,8 +933,8 @@ impl ServerHandler for AskServer {
 need the human to decide, clarify, review, or approve something; it blocks until they reply. \
 Call the `whats_next` tool after completing the current task and before ending your turn to ask \
 the human what to do next. Call `show_last` after context summarization when exact prior AskHuman \
-details may be missing. Call the `todo_add` tool when the human asks to record a deferred \
-project todo.",
+details may be missing. Call the `todo_add` tool when the human asks to record a deferred project \
+todo.",
         );
         // `from_build_env()` 的名字/版本来自 rmcp crate 自身，改成本应用的品牌名与版本。
         let mut implementation = Implementation::from_build_env();
@@ -1432,11 +1622,42 @@ mod tests {
             auto_type == Some(json!("boolean")) || auto_type == Some(json!(["boolean", "null"])),
             "unexpected auto type: {auto_type:?}"
         );
+        assert!(schema.pointer("/properties/files").is_some());
         assert!(tool
             .description
             .as_deref()
             .unwrap_or("")
             .contains("never for your own work plan"));
+    }
+
+    #[test]
+    fn todo_list_and_update_tools_expose_stable_id_contracts() {
+        let server = AskServer::new();
+        let instructions = server.get_info().instructions.unwrap_or_default();
+        assert!(instructions.contains("todo_add"));
+        assert!(!instructions.contains("todo_list"));
+        assert!(!instructions.contains("todo_update"));
+        assert!(!instructions.contains("attachments"));
+        let list = server.tool_router.get("todo_list").unwrap();
+        assert_eq!(
+            list.annotations.as_ref().and_then(|a| a.read_only_hint),
+            Some(true)
+        );
+        let update = server.tool_router.get("todo_update").unwrap();
+        let schema = Value::Object((*update.input_schema).clone());
+        assert_eq!(
+            schema.pointer("/properties/todoId/type"),
+            Some(&json!("string"))
+        );
+        assert!(schema.pointer("/properties/addFiles").is_some());
+        assert!(schema.pointer("/properties/removeAttachmentIds").is_some());
+        assert_eq!(
+            update
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.destructive_hint),
+            Some(true)
+        );
     }
 
     #[test]

@@ -2,10 +2,20 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { applyTheme } from "../lib/theme";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { applyTheme, fileToDataUrl } from "../lib/theme";
+import { isWindows } from "../lib/platform";
 import { applyLanguage } from "../i18n";
+import ComposerAttachments from "../components/ComposerAttachments.vue";
+import TodoAttachmentList from "./todos/TodoAttachmentList.vue";
+import {
+  clipboardImageFiles,
+  nextTodoSelection,
+} from "./todos/todoInteraction";
 import {
   openNewTask,
+  readImageDataUrl,
   todosAdd,
   todosClear,
   todosComplete,
@@ -19,11 +29,14 @@ import {
   todosReorder,
   todosRestore,
   todosSetAuto,
-  todosSetText,
+  todosAttachPastedImages,
+  todosUpdate,
+  todosUpdateAttachments,
 } from "../lib/ipc";
 import type {
   PopupSubmitKey,
   ThemeMode,
+  ImageAttachment,
   TodoDoneEntry,
   TodoEntry,
   TodoProjectInfo,
@@ -60,6 +73,7 @@ async function createTaskFrom(e: TodoEntry): Promise<void> {
 const projects = ref<TodoProjectInfo[]>([]);
 const selected = ref<string>("");
 const entries = ref<TodoEntry[]>([]);
+const selectedTodoId = ref<string | null>(null);
 
 /** Selector section: projects that currently have pending todos. */
 const projectsWithTodos = computed(() =>
@@ -72,6 +86,52 @@ const projectsRecent = computed(() =>
 // 首次加载完成前显示 Loading（避免空态闪现误导）。
 const loaded = ref(false);
 const newText = ref("");
+const newFiles = ref<string[]>([]);
+interface PastedImageDraft {
+  key: string;
+  image: ImageAttachment;
+}
+const newPastedImages = ref<PastedImageDraft[]>([]);
+const newFileThumbs = ref<Record<string, string>>({});
+const newAttachmentBusy = ref(false);
+let pastedImageDraftSequence = 0;
+interface NewComposerImage {
+  key: string;
+  data: string;
+  filename: string;
+  source: "file" | "pasted";
+  sourceKey: string;
+}
+const newComposerImages = computed<NewComposerImage[]>(() => [
+  ...newFiles.value.flatMap((path) => {
+    const data = newFileThumbs.value[path];
+    return data
+      ? [
+          {
+            key: `file:${path}`,
+            data,
+            filename: draftName(path),
+            source: "file" as const,
+            sourceKey: path,
+          },
+        ]
+      : [];
+  }),
+  ...newPastedImages.value.map((draft) => ({
+    key: draft.key,
+    data: draft.image.data,
+    filename: draft.image.filename ?? t("todosWin.attachment"),
+    source: "pasted" as const,
+    sourceKey: draft.key,
+  })),
+]);
+const newComposerFiles = computed(() =>
+  newFiles.value
+    .filter((path) => !newFileThumbs.value[path])
+    .map((path) => ({ key: path, path, name: draftName(path) }))
+);
+const attachmentError = ref("");
+const operationError = ref("");
 // 清空确认改为模态 alert（第 18 轮定案：危险操作需要光标移动后再确认，且提示无法恢复）；
 // 'todos'＝清空待办队列，'history'＝清空执行历史。
 const confirmKind = ref<"todos" | "history" | null>(null);
@@ -173,6 +233,28 @@ async function reloadEntries(): Promise<void> {
     todosList(selected.value),
     todosHistory(selected.value),
   ]);
+  if (
+    selectedTodoId.value &&
+    !entries.value.some((entry) => entry.id === selectedTodoId.value)
+  ) {
+    selectedTodoId.value = null;
+  }
+  const pendingAttachmentRemoval = confirmAttachmentRemoval.value;
+  if (
+    pendingAttachmentRemoval &&
+    !entries.value.some(
+      (entry) =>
+        entry.id === pendingAttachmentRemoval.todoId &&
+        (entry.attachments ?? []).some(
+          (attachment) => attachment.id === pendingAttachmentRemoval.attachmentId
+        )
+    )
+  ) {
+    confirmAttachmentRemoval.value = null;
+  }
+  if (editingId.value && !entries.value.some((entry) => entry.id === editingId.value)) {
+    cancelEdit();
+  }
   // Drop optimistic complete state for ids that no longer exist in the queue.
   for (const id of [...pendingCompleteTimers.keys()]) {
     if (!entries.value.some((e) => e.id === id)) {
@@ -199,6 +281,9 @@ async function reloadAll(): Promise<void> {
 async function onSelect(): Promise<void> {
   confirmKind.value = null;
   confirmDeleteId.value = null;
+  operationError.value = "";
+  selectedTodoId.value = null;
+  confirmAttachmentRemoval.value = null;
   cancelEdit();
   histOpen.value = false;
   clearAllPendingComplete();
@@ -230,16 +315,27 @@ function toggleNewAuto(): void {
 
 async function addEntry(): Promise<void> {
   const text = newText.value.trim();
-  if (!text || !selected.value || adding.value) return;
+  if (!text || !selected.value || adding.value || newAttachmentBusy.value) return;
   adding.value = true;
   try {
-    await todosAdd(selected.value, text, newAuto.value);
+    await todosAdd(
+      selected.value,
+      text,
+      newAuto.value,
+      newFiles.value,
+      newPastedImages.value.map((draft) => draft.image)
+    );
     newText.value = "";
+    newFiles.value = [];
+    newPastedImages.value = [];
+    newFileThumbs.value = {};
+    attachmentError.value = "";
     await nextTick();
     syncAddInputHeight();
     await reloadAll();
   } catch (err) {
     console.warn("todo add failed", err);
+    attachmentError.value = String(err);
   } finally {
     adding.value = false;
   }
@@ -280,6 +376,8 @@ function onNewInput(): void {
 // ===== 行内编辑：复制旁「编辑」进入；变成「保存 / 取消」；提交键保存、Esc 取消 =====
 const editingId = ref<string | null>(null);
 const editText = ref("");
+const editExpectedText = ref("");
+const editExpectedAttachmentIds = ref<string[]>([]);
 const editSaving = ref(false);
 /** Function ref — plain `ref` inside `v-for` becomes an array in Vue 3. */
 const editInputRef = ref<HTMLTextAreaElement | null>(null);
@@ -300,8 +398,11 @@ async function beginEdit(e: TodoEntry): Promise<void> {
     cancelEdit();
   }
   confirmDeleteId.value = null;
+  selectedTodoId.value = e.id;
   editingId.value = e.id;
   editText.value = e.text;
+  editExpectedText.value = e.text;
+  editExpectedAttachmentIds.value = (e.attachments ?? []).map((attachment) => attachment.id);
   await nextTick();
   const el = editInputRef.value;
   if (el) {
@@ -323,33 +424,323 @@ function onEditInput(): void {
 function cancelEdit(): void {
   editingId.value = null;
   editText.value = "";
+  editExpectedText.value = "";
+  editExpectedAttachmentIds.value = [];
+  attachmentError.value = "";
 }
 
 async function commitEdit(): Promise<void> {
   const id = editingId.value;
   if (!id || !selected.value || editSaving.value) return;
   const text = editText.value.trim();
-  const original = entries.value.find((e) => e.id === id)?.text ?? "";
   if (!text) return; // Keep editing; Save stays disabled in UI when empty.
-  if (text === original) {
+  if (text === editExpectedText.value) {
     cancelEdit();
     return;
   }
   editSaving.value = true;
   try {
-    const stored = await todosSetText(selected.value, id, text);
-    if (stored != null) {
-      // Optimistic local update; todos-updated / reload will converge.
-      const row = entries.value.find((e) => e.id === id);
-      if (row) row.text = stored;
-    }
-    editingId.value = null;
-    editText.value = "";
+    const stored = await todosUpdate(
+      selected.value,
+      id,
+      editExpectedText.value,
+      editExpectedAttachmentIds.value,
+      text,
+      editExpectedAttachmentIds.value,
+      []
+    );
+    const rowIndex = entries.value.findIndex((entry) => entry.id === id);
+    if (rowIndex >= 0) entries.value[rowIndex] = stored;
+    cancelEdit();
   } catch (err) {
-    console.warn("todo set text failed", err);
+    console.warn("todo update failed", err);
+    attachmentError.value = String(err);
   } finally {
     editSaving.value = false;
   }
+}
+
+const IMAGE_FILE_EXT = /\.(png|jpe?g|gif|webp|bmp|heic|heif|tiff?|svg)$/i;
+
+async function loadNewFileThumbnail(path: string): Promise<void> {
+  if (!IMAGE_FILE_EXT.test(path) || newFileThumbs.value[path]) return;
+  try {
+    const data = await readImageDataUrl(path);
+    if (newFiles.value.includes(path)) newFileThumbs.value[path] = data;
+  } catch (err) {
+    console.warn("todo draft image preview failed", path, err);
+  }
+}
+
+function appendNewPaths(paths: string[]): void {
+  const list = newFiles.value;
+  let exceeded = false;
+  const added: string[] = [];
+  for (const path of paths) {
+    if (list.includes(path)) continue;
+    if (list.length + newPastedImages.value.length >= 20) {
+      exceeded = true;
+      continue;
+    }
+    list.push(path);
+    added.push(path);
+  }
+  attachmentError.value = exceeded ? t("todosWin.attachmentLimit", { n: 20 }) : "";
+  for (const path of added) void loadNewFileThumbnail(path);
+}
+
+function removeNewFile(path: string): void {
+  const index = newFiles.value.indexOf(path);
+  if (index >= 0) newFiles.value.splice(index, 1);
+  delete newFileThumbs.value[path];
+}
+
+function removeNewComposerImage(index: number): void {
+  const item = newComposerImages.value[index];
+  if (!item) return;
+  if (item.source === "file") {
+    removeNewFile(item.sourceKey);
+    return;
+  }
+  const draftIndex = newPastedImages.value.findIndex(
+    (draft) => draft.key === item.sourceKey
+  );
+  if (draftIndex >= 0) newPastedImages.value.splice(draftIndex, 1);
+}
+
+function removeNewComposerFile(index: number): void {
+  const item = newComposerFiles.value[index];
+  if (item) removeNewFile(item.path);
+}
+
+async function chooseNewFiles(): Promise<void> {
+  try {
+    const result = await openDialog({ multiple: true, directory: false });
+    const paths = Array.isArray(result) ? result : result ? [result] : [];
+    appendNewPaths(paths);
+  } catch (err) {
+    attachmentError.value = String(err);
+  }
+}
+
+const attachmentBusyIds = ref<Set<string>>(new Set());
+const attachmentRowErrors = ref<Record<string, string>>({});
+
+function isAttachmentBusy(id: string): boolean {
+  return attachmentBusyIds.value.has(id);
+}
+
+function setAttachmentBusy(id: string, busy: boolean): void {
+  const next = new Set(attachmentBusyIds.value);
+  if (busy) next.add(id);
+  else next.delete(id);
+  attachmentBusyIds.value = next;
+}
+
+function applyStoredEntry(stored: TodoEntry): void {
+  const rowIndex = entries.value.findIndex((entry) => entry.id === stored.id);
+  if (rowIndex >= 0) entries.value[rowIndex] = stored;
+  if (editingId.value === stored.id) {
+    editExpectedAttachmentIds.value = (stored.attachments ?? []).map(
+      (attachment) => attachment.id
+    );
+  }
+}
+
+async function updateTodoAttachments(
+  entry: TodoEntry,
+  addPaths: string[],
+  removeAttachmentIds: string[] = []
+): Promise<void> {
+  if (!selected.value || isCompleting(entry.id) || isAttachmentBusy(entry.id)) return;
+  const knownPaths = new Set(
+    (entry.attachments ?? []).flatMap((attachment) => [attachment.path, attachment.sourcePath])
+  );
+  const uniquePaths = [...new Set(addPaths)].filter((path) => !knownPaths.has(path));
+  const remainingCount = (entry.attachments?.length ?? 0) - removeAttachmentIds.length;
+  if (remainingCount + uniquePaths.length > 20) {
+    attachmentRowErrors.value = {
+      ...attachmentRowErrors.value,
+      [entry.id]: t("todosWin.attachmentLimit", { n: 20 }),
+    };
+    return;
+  }
+  if (!uniquePaths.length && !removeAttachmentIds.length) return;
+  setAttachmentBusy(entry.id, true);
+  try {
+    const stored = await todosUpdateAttachments(
+      selected.value,
+      entry.id,
+      uniquePaths,
+      removeAttachmentIds
+    );
+    applyStoredEntry(stored);
+    const nextErrors = { ...attachmentRowErrors.value };
+    delete nextErrors[entry.id];
+    attachmentRowErrors.value = nextErrors;
+  } catch (err) {
+    console.warn("todo attachment update failed", err);
+    attachmentRowErrors.value = {
+      ...attachmentRowErrors.value,
+      [entry.id]: t("todosWin.operationFailed", { e: String(err) }),
+    };
+  } finally {
+    setAttachmentBusy(entry.id, false);
+  }
+}
+
+async function chooseTodoFiles(entry: TodoEntry): Promise<void> {
+  selectedTodoId.value = entry.id;
+  try {
+    const result = await openDialog({ multiple: true, directory: false });
+    const paths = Array.isArray(result) ? result : result ? [result] : [];
+    await updateTodoAttachments(entry, paths);
+  } catch (err) {
+    attachmentRowErrors.value = {
+      ...attachmentRowErrors.value,
+      [entry.id]: t("todosWin.operationFailed", { e: String(err) }),
+    };
+  }
+}
+
+const confirmAttachmentRemoval = ref<{
+  todoId: string;
+  attachmentId: string;
+} | null>(null);
+
+function confirmedAttachmentId(todoId: string): string | null {
+  return confirmAttachmentRemoval.value?.todoId === todoId
+    ? confirmAttachmentRemoval.value.attachmentId
+    : null;
+}
+
+function removeTodoAttachment(entry: TodoEntry, attachmentId: string): void {
+  const pending = confirmAttachmentRemoval.value;
+  if (pending?.todoId !== entry.id || pending.attachmentId !== attachmentId) {
+    confirmAttachmentRemoval.value = { todoId: entry.id, attachmentId };
+    return;
+  }
+  confirmAttachmentRemoval.value = null;
+  void updateTodoAttachments(entry, [], [attachmentId]);
+}
+
+function focusTodoRow(id: string): void {
+  const index = entries.value.findIndex((entry) => entry.id === id);
+  if (index < 0) return;
+  const row = document.querySelectorAll<HTMLElement>(".td-list > .td-row")[index];
+  row?.focus({ preventScroll: true });
+  row?.scrollIntoView({ block: "nearest" });
+}
+
+function selectTodo(id: string, focus = false): void {
+  selectedTodoId.value = id;
+  if (focus) void nextTick(() => focusTodoRow(id));
+}
+
+function onTodoNavigation(event: KeyboardEvent): void {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+  if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+  const target = event.target;
+  if (
+    target instanceof HTMLElement &&
+    target.closest("textarea, input, select, [contenteditable='true'], .todo-attachments-list")
+  ) {
+    return;
+  }
+  if (!entries.value.length) return;
+  event.preventDefault();
+  const id = nextTodoSelection(
+    entries.value.map((entry) => entry.id),
+    selectedTodoId.value,
+    event.key === "ArrowDown" ? 1 : -1
+  );
+  if (!id) return;
+  selectedTodoId.value = id;
+  void nextTick(() => focusTodoRow(id));
+}
+
+async function onTodoPaste(event: ClipboardEvent): Promise<void> {
+  const files = clipboardImageFiles(event.clipboardData?.items);
+  if (!files.length) return;
+  if (event.target === addInputRef.value) {
+    event.preventDefault();
+    if (adding.value || newAttachmentBusy.value) return;
+    if (newFiles.value.length + newPastedImages.value.length + files.length > 20) {
+      attachmentError.value = t("todosWin.attachmentLimit", { n: 20 });
+      return;
+    }
+    if (files.some((file) => file.size > 10 * 1024 * 1024)) {
+      attachmentError.value = t("todosWin.pastedImageTooLarge");
+      return;
+    }
+    newAttachmentBusy.value = true;
+    try {
+      const images = await imageAttachmentsFromFiles(files);
+      newPastedImages.value.push(
+        ...images.map((image) => ({
+          key: `pasted-${++pastedImageDraftSequence}`,
+          image,
+        }))
+      );
+      attachmentError.value = "";
+    } catch (err) {
+      attachmentError.value = t("todosWin.operationFailed", { e: String(err) });
+    } finally {
+      newAttachmentBusy.value = false;
+    }
+    return;
+  }
+  const id = selectedTodoId.value;
+  if (!id || !selected.value || isAttachmentBusy(id)) return;
+  const entry = entries.value.find((item) => item.id === id);
+  if (!entry) return;
+  event.preventDefault();
+  if ((entry.attachments?.length ?? 0) + files.length > 20) {
+    attachmentRowErrors.value = {
+      ...attachmentRowErrors.value,
+      [entry.id]: t("todosWin.attachmentLimit", { n: 20 }),
+    };
+    return;
+  }
+  if (files.some((file) => file.size > 10 * 1024 * 1024)) {
+    attachmentRowErrors.value = {
+      ...attachmentRowErrors.value,
+      [entry.id]: t("todosWin.pastedImageTooLarge"),
+    };
+    return;
+  }
+  setAttachmentBusy(entry.id, true);
+  try {
+    const images = await imageAttachmentsFromFiles(files);
+    const stored = await todosAttachPastedImages(selected.value, entry.id, images);
+    applyStoredEntry(stored);
+    const nextErrors = { ...attachmentRowErrors.value };
+    delete nextErrors[entry.id];
+    attachmentRowErrors.value = nextErrors;
+  } catch (err) {
+    console.warn("todo clipboard image failed", err);
+    attachmentRowErrors.value = {
+      ...attachmentRowErrors.value,
+      [entry.id]: t("todosWin.operationFailed", { e: String(err) }),
+    };
+  } finally {
+    setAttachmentBusy(entry.id, false);
+  }
+}
+
+async function imageAttachmentsFromFiles(files: File[]): Promise<ImageAttachment[]> {
+  const pastedAt = Date.now();
+  return Promise.all(
+    files.map(async (file, index) => ({
+      data: await fileToDataUrl(file),
+      mediaType: file.type || "image/png",
+      filename: file.name || `pasted-image-${pastedAt}-${index + 1}.png`,
+    }))
+  );
+}
+
+function draftName(path: string): string {
+  return path.replace(/\\/g, "/").split("/").pop() || path;
 }
 
 function onEditKeydown(e: KeyboardEvent): void {
@@ -379,6 +770,7 @@ const confirmDeleteId = ref<string | null>(null);
 
 function onRootClick(): void {
   confirmDeleteId.value = null;
+  confirmAttachmentRemoval.value = null;
 }
 
 async function removeEntry(id: string): Promise<void> {
@@ -388,18 +780,22 @@ async function removeEntry(id: string): Promise<void> {
     return;
   }
   confirmDeleteId.value = null;
+  if (confirmAttachmentRemoval.value?.todoId === id) {
+    confirmAttachmentRemoval.value = null;
+  }
   clearPendingComplete(id);
   try {
     await todosRemove(selected.value, id);
+    operationError.value = "";
   } catch (err) {
     console.warn("todo remove failed", err);
+    operationError.value = t("todosWin.operationFailed", { e: String(err) });
   }
   await reloadAll();
 }
 
 async function doConfirmedClear(): Promise<void> {
   const kind = confirmKind.value;
-  confirmKind.value = null;
   if (!selected.value || !kind) return;
   if (kind === "todos") clearAllPendingComplete();
   try {
@@ -408,8 +804,11 @@ async function doConfirmedClear(): Promise<void> {
     } else {
       await todosHistoryClear(selected.value);
     }
+    operationError.value = "";
+    confirmKind.value = null;
   } catch (err) {
     console.warn("todo clear failed", err);
+    operationError.value = t("todosWin.operationFailed", { e: String(err) });
   }
   await reloadAll();
 }
@@ -551,24 +950,18 @@ async function copyTodoText(id: string, text: string): Promise<void> {
   }
 }
 
-// ===== 拖拽排序（第 14 轮定案，仅 GUI 窗口）=====
-// 手柄 dragstart 记起点；经过其它行时本地 splice 实时预览；dragend 一次性持久化
-// （todos.json 写入触发 todos-updated → reloadAll，与其它进程的并发增删自然合流）。
+// ===== Pointer 排序（不使用 HTML5 DnD，避免与 Tauri 原生文件拖入互斥）=====
+// 手柄按下后经过其它行时本地 splice 实时预览；松手一次性持久化。
 const dragIndex = ref<number | null>(null);
 
-function onDragStart(i: number, e: DragEvent): void {
+function onSortPointerDown(i: number, event: PointerEvent): void {
+  if (event.button !== 0) return;
+  event.preventDefault();
   dragIndex.value = i;
   confirmDeleteId.value = null;
-  if (e.dataTransfer) {
-    e.dataTransfer.effectAllowed = "move";
-    // Safari/WebKit 需要 setData 才启动拖拽。
-    e.dataTransfer.setData("text/plain", String(i));
-  }
 }
 
-function onDragOverRow(i: number, e: DragEvent): void {
-  e.preventDefault();
-  if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+function onSortPointerEnter(i: number): void {
   const from = dragIndex.value;
   if (from === null || from === i) return;
   const moved = entries.value.splice(from, 1)[0];
@@ -576,7 +969,7 @@ function onDragOverRow(i: number, e: DragEvent): void {
   dragIndex.value = i;
 }
 
-async function onDragEnd(): Promise<void> {
+async function onSortPointerEnd(): Promise<void> {
   if (dragIndex.value === null) return;
   dragIndex.value = null;
   if (!selected.value) return;
@@ -594,8 +987,58 @@ async function onDragEnd(): Promise<void> {
 let unlistenUpdated: UnlistenFn | null = null;
 let unlistenGoto: UnlistenFn | null = null;
 let unlistenSettings: UnlistenFn | null = null;
+let unlistenFileDrop: UnlistenFn | null = null;
+let unlistenPreviewIndex: UnlistenFn | null = null;
+let unlistenPreviewClosed: UnlistenFn | null = null;
+const fileDropTarget = ref<string | null>(null);
+const todoPreviewContext = ref<{
+  todoId: string;
+  attachmentIds: string[];
+} | null>(null);
+const todoPreviewSelection = ref<{
+  todoId: string;
+  attachmentId: string;
+} | null>(null);
+
+function startTodoPreview(todoId: string, attachmentIds: string[]): void {
+  todoPreviewContext.value = { todoId, attachmentIds };
+  todoPreviewSelection.value = null;
+}
+
+function previewSelectedAttachmentId(todoId: string): string | null {
+  return todoPreviewSelection.value?.todoId === todoId
+    ? todoPreviewSelection.value.attachmentId
+    : null;
+}
+
+function fileDropTargetAt(x: number, y: number): string | null {
+  const dpr = window.devicePixelRatio || 1;
+  const candidates: [number, number][] = isWindows
+    ? [
+        [x / dpr, y / dpr],
+        [x, y],
+      ]
+    : [
+        [x, y],
+        [x / dpr, y / dpr],
+      ];
+  for (const [cx, cy] of candidates) {
+    const element = document.elementFromPoint(cx, cy);
+    const target = element
+      ?.closest<HTMLElement>("[data-todo-file-drop]")
+      ?.dataset.todoFileDrop;
+    if (target) return target;
+  }
+  return null;
+}
 
 onMounted(async () => {
+  window.addEventListener("pointerup", onSortPointerEnd);
+  window.addEventListener("pointercancel", onSortPointerEnd);
+  window.addEventListener("blur", onSortPointerEnd);
+  window.addEventListener("keydown", onTodoNavigation);
+  window.addEventListener("paste", onTodoPaste);
+  document.addEventListener("mouseleave", onSortPointerEnd);
   try {
     const init = await todosInit();
     applyTheme(init.theme);
@@ -625,12 +1068,47 @@ onMounted(async () => {
   unlistenGoto = await listen<string>("todos-goto-project", async (e) => {
     if (typeof e.payload === "string" && e.payload) {
       selected.value = e.payload;
+      selectedTodoId.value = null;
+      confirmAttachmentRemoval.value = null;
       confirmKind.value = null;
       confirmDeleteId.value = null;
       histOpen.value = false;
       clearAllPendingComplete();
       await reloadAll();
       await focusAddInput();
+    }
+  });
+  unlistenPreviewIndex = await listen<number>("preview-index", (event) => {
+    const context = todoPreviewContext.value;
+    if (!context) return;
+    const attachmentId = context.attachmentIds[event.payload];
+    if (!attachmentId) return;
+    todoPreviewSelection.value = { todoId: context.todoId, attachmentId };
+  });
+  unlistenPreviewClosed = await listen("preview-closed", () => {
+    todoPreviewContext.value = null;
+    todoPreviewSelection.value = null;
+  });
+  unlistenFileDrop = await getCurrentWebview().onDragDropEvent((event) => {
+    if (event.payload.type === "leave") {
+      fileDropTarget.value = null;
+      return;
+    }
+    const pos = event.payload.position;
+    const targetAtPoint = fileDropTargetAt(pos.x, pos.y);
+    if (event.payload.type === "enter" || event.payload.type === "over") {
+      fileDropTarget.value = targetAtPoint;
+      return;
+    }
+    const target = fileDropTarget.value ?? targetAtPoint;
+    fileDropTarget.value = null;
+    if (target === "new") {
+      appendNewPaths(event.payload.paths);
+      return;
+    }
+    const entry = entries.value.find((item) => item.id === target);
+    if (entry) {
+      void updateTodoAttachments(entry, event.payload.paths);
     }
   });
   await reloadAll();
@@ -641,9 +1119,18 @@ onBeforeUnmount(() => {
   if (newAutoHintTimer !== undefined) window.clearTimeout(newAutoHintTimer);
   if (copiedTimer !== undefined) window.clearTimeout(copiedTimer);
   clearAllPendingComplete();
+  window.removeEventListener("pointerup", onSortPointerEnd);
+  window.removeEventListener("pointercancel", onSortPointerEnd);
+  window.removeEventListener("blur", onSortPointerEnd);
+  window.removeEventListener("keydown", onTodoNavigation);
+  window.removeEventListener("paste", onTodoPaste);
+  document.removeEventListener("mouseleave", onSortPointerEnd);
   unlistenUpdated?.();
   unlistenGoto?.();
   unlistenSettings?.();
+  unlistenFileDrop?.();
+  unlistenPreviewIndex?.();
+  unlistenPreviewClosed?.();
 });
 </script>
 
@@ -708,9 +1195,21 @@ onBeforeUnmount(() => {
           v-for="(e, i) in entries"
           :key="e.id"
           class="td-row"
-          :class="{ dragging: dragIndex === i, completing: isCompleting(e.id) }"
-          @dragover="onDragOverRow(i, $event)"
-          @drop.prevent
+          :class="{
+            dragging: dragIndex === i,
+            completing: isCompleting(e.id),
+            selected: selectedTodoId === e.id,
+            'file-drop-target': fileDropTarget === e.id,
+            'attachment-busy': isAttachmentBusy(e.id),
+          }"
+          :data-todo-file-drop="e.id"
+          :data-todo-row-id="e.id"
+          tabindex="0"
+          :aria-label="e.text"
+          @click="selectTodo(e.id, true)"
+          @focus="selectTodo(e.id)"
+          @pointerdown.capture="selectTodo(e.id)"
+          @pointerenter="onSortPointerEnter(i)"
         >
           <!-- 手柄列始终占位，与历史行复选框对齐。 -->
           <span
@@ -720,10 +1219,8 @@ onBeforeUnmount(() => {
             <span
               v-if="entries.length > 1"
               class="td-handle"
-              draggable="true"
               :title="t('todosWin.dragHint')"
-              @dragstart="onDragStart(i, $event)"
-              @dragend="onDragEnd"
+              @pointerdown="onSortPointerDown(i, $event)"
             >
               <svg viewBox="0 0 10 14" aria-hidden="true">
                 <circle cx="3" cy="3" r="1.1" fill="currentColor" />
@@ -810,6 +1307,25 @@ onBeforeUnmount(() => {
                 </svg>
               </button>
             </div>
+            <TodoAttachmentList
+              :project="selected"
+              :todo-id="e.id"
+              :attachments="e.attachments ?? []"
+              removable
+              :busy="isAttachmentBusy(e.id)"
+              :confirm-remove-id="confirmedAttachmentId(e.id)"
+              :preview-selected-id="previewSelectedAttachmentId(e.id)"
+              @remove="removeTodoAttachment(e, $event)"
+              @cancel-remove="confirmAttachmentRemoval = null"
+              @preview-started="startTodoPreview(e.id, $event)"
+            />
+            <p
+              v-if="attachmentRowErrors[e.id]"
+              class="td-attachment-error td-row-attachment-error"
+              role="alert"
+            >
+              {{ attachmentRowErrors[e.id] }}
+            </p>
             <div class="td-meta">
               <span
                 class="td-time-anchor"
@@ -937,6 +1453,26 @@ onBeforeUnmount(() => {
                   />
                 </svg>
               </button>
+              <button
+                type="button"
+                class="td-edit-btn td-attach-btn"
+                :title="t('todosWin.addAttachment')"
+                :aria-label="t('todosWin.addAttachment')"
+                :disabled="isCompleting(e.id) || isAttachmentBusy(e.id)"
+                @click.stop="chooseTodoFiles(e)"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                </svg>
+              </button>
               <!-- 创建 Agent 任务（spec gui-agent-task-launch G12）：带该项目 + 该待办打开新建任务窗口。 -->
               <button
                 v-if="newTaskSupported"
@@ -958,6 +1494,17 @@ onBeforeUnmount(() => {
                 </svg>
               </button>
             </div>
+          </div>
+          <div
+            v-if="fileDropTarget === e.id"
+            class="td-file-drop-overlay"
+            aria-hidden="true"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path d="M12 16V5M8 9l4-4 4 4" />
+              <path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" />
+            </svg>
+            <span>{{ t("todosWin.dropOnTodo") }}</span>
           </div>
         </li>
       </ul>
@@ -1026,6 +1573,13 @@ onBeforeUnmount(() => {
               <div class="td-top">
                 <span class="td-text">{{ h.text }}</span>
               </div>
+              <TodoAttachmentList
+                :project="selected"
+                :todo-id="h.id"
+                :attachments="h.attachments ?? []"
+                :preview-selected-id="previewSelectedAttachmentId(h.id)"
+                @preview-started="startTodoPreview(h.id, $event)"
+              />
               <div class="td-meta">
                 <span
                   class="td-time-anchor"
@@ -1098,18 +1652,61 @@ onBeforeUnmount(() => {
       </template>
     </div>
 
-    <footer v-if="projects.length" class="td-footer">
-      <div class="td-add">
+    <footer
+      v-if="projects.length"
+      class="td-footer"
+      @pointerdown="selectedTodoId = null"
+    >
+      <div
+        class="td-add"
+        :class="{ 'file-drop-target': fileDropTarget === 'new' }"
+        data-todo-file-drop="new"
+      >
         <textarea
           ref="addInputRef"
           v-model="newText"
           class="td-input"
           rows="2"
           :placeholder="t('todosWin.addPlaceholder')"
+          @focus="selectedTodoId = null"
           @keydown="onNewKeydown"
           @input="onNewInput"
         />
+        <div
+          v-if="newComposerImages.length || newComposerFiles.length"
+          class="td-composer-attachments"
+        >
+          <ComposerAttachments
+            :images="newComposerImages"
+            :files="newComposerFiles"
+            @remove-image="removeNewComposerImage"
+            @remove-file="removeNewComposerFile"
+          />
+        </div>
+        <p v-if="attachmentError" class="td-attachment-error">{{ attachmentError }}</p>
+        <p v-if="operationError" class="td-attachment-error" role="alert">
+          {{ operationError }}
+        </p>
         <div class="td-add-actions">
+          <button
+            type="button"
+            class="td-btn td-attach-picker"
+            :title="t('todosWin.addAttachment')"
+            @click="chooseNewFiles"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+            </svg>
+            <span>{{ t("todosWin.attachment") }}</span>
+          </button>
           <div
             class="td-auto-hint-anchor"
             @mouseenter="newAutoHintHovered = true"
@@ -1152,18 +1749,33 @@ onBeforeUnmount(() => {
           <button
             type="button"
             class="td-btn td-btn-add"
-            :disabled="!newText.trim() || adding"
+            :disabled="!newText.trim() || adding || newAttachmentBusy"
             @click="addEntry"
           >
             {{ t("todosWin.add") }}
             <kbd class="sc">{{ submitKeyLabel }}</kbd>
           </button>
         </div>
+        <div
+          v-if="fileDropTarget === 'new'"
+          class="td-add-drop-overlay"
+          aria-hidden="true"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <path d="M12 16V5M8 9l4-4 4 4" />
+            <path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" />
+          </svg>
+          <span>{{ t("todosWin.dropOnNew") }}</span>
+        </div>
       </div>
     </footer>
 
     <!-- 清空确认（模态 alert）：清空不可恢复，强制光标移动后再确认。 -->
-    <div v-if="confirmKind" class="td-overlay" @click.self="confirmKind = null">
+    <div
+      v-if="confirmKind"
+      class="td-overlay"
+      @click.self="confirmKind = null; operationError = ''"
+    >
       <div class="td-dialog" role="alertdialog">
         <h3>
           {{ confirmKind === "todos" ? t("todosWin.clearTitle") : t("todosWin.clearHistTitle") }}
@@ -1175,8 +1787,15 @@ onBeforeUnmount(() => {
               : t("todosWin.clearHistDesc", { n: history.length })
           }}
         </p>
+        <p v-if="operationError" class="td-attachment-error" role="alert">
+          {{ operationError }}
+        </p>
         <div class="td-dialog-actions">
-          <button type="button" class="td-btn" @click="confirmKind = null">
+          <button
+            type="button"
+            class="td-btn"
+            @click="confirmKind = null; operationError = ''"
+          >
             {{ t("todosWin.confirmCancel") }}
           </button>
           <button type="button" class="td-btn td-btn-danger" @click="doConfirmedClear">
@@ -1273,6 +1892,7 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 .td-row {
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: 8px;
@@ -1280,6 +1900,22 @@ onBeforeUnmount(() => {
   border: 1px solid transparent;
   border-radius: var(--radius-sm, 8px);
   background: var(--bg-elevated);
+  transition: border-color 0.12s ease, background 0.12s ease, box-shadow 0.12s ease;
+}
+.td-row.file-drop-target {
+  border-color: color-mix(in srgb, #0a84ff 72%, transparent);
+  background: color-mix(in srgb, #0a84ff 7%, var(--bg-elevated));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, #0a84ff 22%, transparent);
+}
+.td-row.selected {
+  border-color: color-mix(in srgb, #0a84ff 48%, transparent);
+  background: color-mix(in srgb, #0a84ff 7%, var(--bg-elevated));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, #0a84ff 12%, transparent);
+  outline: none;
+}
+.td-row:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 .td-row.dragging {
   opacity: 0.55;
@@ -1314,11 +1950,14 @@ onBeforeUnmount(() => {
   color: var(--text-secondary);
   opacity: 0.55;
   cursor: grab;
+  touch-action: none;
+  user-select: none;
 }
 .td-handle:active {
   cursor: grabbing;
 }
-.td-row:hover .td-handle {
+.td-row:hover .td-handle,
+.td-row.selected .td-handle {
   opacity: 1;
 }
 .td-handle svg {
@@ -1447,7 +2086,8 @@ onBeforeUnmount(() => {
   opacity: 0;
   cursor: pointer;
 }
-.td-row:hover .td-edit-btn {
+.td-row:hover .td-edit-btn,
+.td-row.selected .td-edit-btn {
   opacity: 0.75;
 }
 .td-edit-btn:hover:not(:disabled),
@@ -1460,7 +2100,8 @@ onBeforeUnmount(() => {
   opacity: 0;
   cursor: default;
 }
-.td-row:hover .td-edit-btn:disabled {
+.td-row:hover .td-edit-btn:disabled,
+.td-row.selected .td-edit-btn:disabled {
   opacity: 0.3;
 }
 .td-edit-btn svg {
@@ -1483,7 +2124,8 @@ onBeforeUnmount(() => {
   opacity: 0;
   cursor: pointer;
 }
-.td-row:hover .td-newtask {
+.td-row:hover .td-newtask,
+.td-row.selected .td-newtask {
   opacity: 0.75;
 }
 .td-newtask:hover:not(:disabled),
@@ -1496,7 +2138,8 @@ onBeforeUnmount(() => {
   opacity: 0;
   cursor: default;
 }
-.td-row:hover .td-newtask:disabled {
+.td-row:hover .td-newtask:disabled,
+.td-row.selected .td-newtask:disabled {
   opacity: 0.3;
 }
 .td-newtask svg {
@@ -1591,7 +2234,8 @@ onBeforeUnmount(() => {
   opacity: 0;
   cursor: pointer;
 }
-.td-row:hover .td-auto {
+.td-row:hover .td-auto,
+.td-row.selected .td-auto {
   opacity: 0.75;
 }
 .td-auto.on {
@@ -1623,7 +2267,8 @@ onBeforeUnmount(() => {
   opacity: 0;
   cursor: pointer;
 }
-.td-row:hover .td-copy {
+.td-row:hover .td-copy,
+.td-row.selected .td-copy {
   opacity: 0.75;
 }
 .td-copy:hover {
@@ -1712,7 +2357,8 @@ onBeforeUnmount(() => {
   cursor: pointer;
   opacity: 0;
 }
-.td-row:hover .td-del {
+.td-row:hover .td-del,
+.td-row.selected .td-del {
   opacity: 1;
 }
 .td-del:hover {
@@ -1749,6 +2395,7 @@ onBeforeUnmount(() => {
   border-top: var(--hairline) solid var(--border);
 }
 .td-add {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -1909,6 +2556,73 @@ onBeforeUnmount(() => {
 }
 .td-hist-row .td-text {
   color: var(--text-secondary);
+}
+.td-file-drop-overlay,
+.td-add-drop-overlay {
+  position: absolute;
+  inset: 2px;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1.5px dashed color-mix(in srgb, #0a84ff 78%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-elevated) 80%, #0a84ff 20%);
+  color: #0a84ff;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  pointer-events: none;
+  box-shadow: 0 5px 18px color-mix(in srgb, #0a84ff 15%, transparent);
+}
+.td-file-drop-overlay svg,
+.td-add-drop-overlay svg {
+  width: 18px;
+  height: 18px;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.td-add-drop-overlay {
+  inset: -4px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--control-bg) 84%, #0a84ff 16%);
+}
+.td-row-attachment-error {
+  margin-top: 2px;
+}
+.td-composer-attachments {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  padding: 0 2px;
+}
+.td-composer-attachments :deep(.reply-files) {
+  margin-top: 0;
+}
+.td-attachment-error {
+  margin: 0;
+  color: #ff453a;
+  font-size: 11px;
+}
+.td-attach-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: auto;
+}
+.td-attach-picker svg {
+  width: 14px;
+  height: 14px;
+}
+.td-attach-btn {
+  width: auto;
+  min-width: 24px;
+  padding: 0 4px;
+  font-size: 12px;
 }
 /* ===== 清空确认模态（与历史窗口 .overlay/.dialog 同构） ===== */
 .td-overlay {

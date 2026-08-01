@@ -344,7 +344,8 @@ workspace 动态状态放 `agent-workspaces.json`，launch record 放短时私�
 - 不自动安装 lifecycle / permission hook 或 Agent 集成产物；readiness 只检查并引导去设置修复；
 - 首版不支持 iTerm2 / Ghostty / WezTerm / Kitty / 编辑器内置终端；
 - 首版不支持 Linux / Windows；
-- 首版 task 仅文本，不把 IM 附件映射到 Agent prompt；
+- 首版 task 仅文本，不把 IM 消息自身的附件映射到 Agent prompt；由其它入口创建的 Todo 附件随
+  `/new` 送达 Agent 属后续独立需求，见 `docs/specs/todo-attachments.md`；
 - 不保证自动 watch 一定成功；匹配失败按 D22 明确告警。
 
 ## 12. 风险与降级

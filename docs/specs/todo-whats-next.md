@@ -44,7 +44,9 @@ Interject 是「打断进行中」的纠偏语义，不适合），希望：
 
 - 归属：**项目级**（`project.rs` 的 git 根路径 key，回退 cwd）。同项目的新会话 / 新
   agent / 多 agent 共享一份队列；不随 session 结束清理，长期保留直到出队或删除。
-- 条目：`{ id: uuid, text: String, created_at_ms, auto: bool, agent_kind?: String }`。纯文本，首期不支持附件。
+- 条目：`{ id: uuid, text: String, created_at_ms, auto: bool, agent_kind?: String }`。当前已实现版本为
+  纯文本；图片 / 文件附件的后续扩展已定案，见 `docs/specs/todo-attachments.md`，在该需求实现前
+  本节以下仍描述现行无附件模型。
   `auto`＝**自动执行**标记（第 17 轮定案，见 D2；`false` 不落盘，旧文件兼容）；从历史
   恢复的条目恒为 `auto: false`。`agent_kind` 只在识别到 Agent 调用 CLI `todo add` 时记录
   家族（`claude / codex / cursor / grok`）；人工、GUI、IM 新增和旧数据均为空。

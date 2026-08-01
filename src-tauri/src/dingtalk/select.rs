@@ -84,7 +84,8 @@ fn option_md(opt: &SelectOption) -> String {
     if let Some(seq) = opt.seq {
         head.push_str(&format!("**[{}]** ", seq));
     }
-    head.push_str(&opt.primary);
+    let (primary, attachment_badge) = crate::todos::split_attachment_badge(&opt.primary);
+    head.push_str(primary);
     if let Some(badge) = &opt.badge {
         head.push(' ');
         head.push_str(badge);
@@ -95,6 +96,10 @@ fn option_md(opt: &SelectOption) -> String {
     }
     // 主行与次行同为 footnote 字号（用户定：agent 标题行缩到与下方描述一致，最紧凑）。
     line1.push_str(&font(&head, Some(SIZE_SMALL), None));
+    if let Some(attachment_badge) = attachment_badge {
+        line1.push(NBSP);
+        line1.push_str(&font(attachment_badge, Some(SIZE_SMALL), Some(COLOR_GREY)));
+    }
     match &opt.secondary {
         Some(sub) if !sub.is_empty() => {
             format!(
@@ -245,6 +250,29 @@ mod tests {
         // 空闲灰点。
         let md1 = parsed[1]["option_md"].as_str().unwrap();
         assert!(md1.contains("colorTokenV2=common_level3_base_color>●\u{a0}</font>"));
+    }
+
+    #[test]
+    fn todo_attachment_badge_uses_grey_rich_text() {
+        let view = build_view(
+            "选择任务来源".into(),
+            vec![opt(
+                "todo:1",
+                None,
+                1,
+                "执行待办：修复登录 【2 个附件】",
+                None,
+                "",
+            )],
+            SelectAction::TaskInputSource,
+            Lang::Zh,
+        );
+        let map = build_select_param_map(&view, Lang::Zh);
+        let parsed: Value =
+            serde_json::from_str(map["loop_object_list"].as_str().unwrap()).unwrap();
+        let markdown = parsed[0]["option_md"].as_str().unwrap();
+        assert!(markdown.contains("colorTokenV2=common_level3_base_color>【2 个附件】</font>"));
+        assert!(!markdown.contains("📎"));
     }
 
     #[test]

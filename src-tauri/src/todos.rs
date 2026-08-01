@@ -25,6 +25,9 @@ pub struct TodoEntry {
     /// 自动执行（第 17 轮定案）：whats-next 时不提问、直接把最靠前的自动待办作为下一个任务返回。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto: bool,
+    /// Files and images owned by or referenced from this todo.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::todo_attachments::TodoAttachment>,
 }
 
 /// 一条已执行的历史待办（第 16 轮定案：仅「执行出队」进历史，手动删除/清空不记）。
@@ -41,6 +44,8 @@ pub struct DoneTodoEntry {
     pub agent_kind: Option<String>,
     #[serde(default)]
     pub done_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::todo_attachments::TodoAttachment>,
 }
 
 /// 选项类展示点（whats-next 卡 / Stop 卡 / IM `/todo-rm` 删除卡）最多列出的待办条数
@@ -54,6 +59,47 @@ pub fn overflow_note(total: usize, lang: crate::i18n::Lang) -> Option<String> {
         crate::i18n::tr(lang, "todo.moreNote")
             .replace("{n}", &(total - MAX_OPTION_TODOS).to_string())
     })
+}
+
+pub fn attachment_badge(lang: crate::i18n::Lang, count: usize) -> String {
+    crate::i18n::tr(lang, "todo.attachmentBadge").replace("{n}", &count.to_string())
+}
+
+/// Split a generated attachment badge from a todo option label for rich channel rendering.
+/// Requiring the exact localized count shape avoids treating arbitrary bracket text as a badge.
+pub fn split_attachment_badge(text: &str) -> (&str, Option<&str>) {
+    let Some(badge_start) = text.rfind(" 【") else {
+        return (text, None);
+    };
+    let body = &text[..badge_start];
+    let badge = &text[badge_start + 1..];
+    let Some(inner) = badge
+        .strip_prefix('【')
+        .and_then(|value| value.strip_suffix('】'))
+    else {
+        return (text, None);
+    };
+    let count = inner
+        .strip_suffix(" 个附件")
+        .or_else(|| inner.strip_suffix(" attachments"));
+    if count.is_some_and(|value| value.parse::<usize>().is_ok()) {
+        (body, Some(badge))
+    } else {
+        (text, None)
+    }
+}
+
+pub fn option_label(lang: crate::i18n::Lang, entry: &TodoEntry) -> String {
+    let badge = if entry.attachments.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", attachment_badge(lang, entry.attachments.len()))
+    };
+    format!(
+        "{}{}{badge}",
+        crate::i18n::tr(lang, "whatsNext.todoPrefix"),
+        entry.text
+    )
 }
 
 /// On-disk shape: project key (git root path) → FIFO entries, plus per-project execution
@@ -164,13 +210,74 @@ pub fn all() -> HashMap<String, Vec<TodoEntry>> {
     load_at(&todos_file()).projects
 }
 
+pub fn cleanup_attachment_orphans() {
+    let data = load_at(&todos_file());
+    let mut referenced = std::collections::HashSet::new();
+    for attachment in data
+        .projects
+        .values()
+        .flatten()
+        .flat_map(|entry| entry.attachments.iter())
+        .chain(
+            data.history
+                .values()
+                .flatten()
+                .flat_map(|entry| entry.attachments.iter()),
+        )
+    {
+        referenced.insert(PathBuf::from(&attachment.path));
+        if let Some(thumbnail) = &attachment.thumbnail_path {
+            referenced.insert(PathBuf::from(thumbnail));
+        }
+    }
+    crate::todo_attachments::cleanup_orphans(&referenced);
+}
+
 /// Why [`add`] / [`add_auto`] / [`add_from_agent`] failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AddError {
     /// Project key or text empty after trim.
     EmptyInput,
     /// Could not persist `todos.json` (permissions, sandbox, disk full, …).
     Persist,
+    /// One or more attachment paths could not be prepared.
+    Attachment(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateError {
+    NotFound,
+    EmptyText,
+    Conflict,
+    UnknownAttachment,
+    Persist,
+    Attachment(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutationError {
+    Persist,
+}
+
+impl std::fmt::Display for MutationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Persist => write!(f, "failed to persist todos.json"),
+        }
+    }
+}
+
+impl std::fmt::Display for UpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "todo not found"),
+            Self::EmptyText => write!(f, "todo text must not be empty"),
+            Self::Conflict => write!(f, "todo changed while it was being edited"),
+            Self::UnknownAttachment => write!(f, "attachment does not belong to this todo"),
+            Self::Persist => write!(f, "failed to persist todos.json"),
+            Self::Attachment(message) => f.write_str(message),
+        }
+    }
 }
 
 /// Append one entry. Errors when input is empty or the write did not land on disk.
@@ -197,6 +304,98 @@ pub fn add_from_agent(
         text,
         auto,
         Some(agent.as_str()),
+    )
+}
+
+/// Append a GUI/CLI/MCP todo with files resolved relative to `cwd`.
+pub fn add_with_attachments(
+    project: &str,
+    text: &str,
+    auto: bool,
+    agent_kind: Option<crate::agents::AgentKind>,
+    raw_paths: &[String],
+    cwd: &Path,
+) -> Result<TodoEntry, AddError> {
+    add_impl_with_attachments(
+        &todos_file(),
+        &todos_lock(),
+        project,
+        text,
+        auto,
+        agent_kind.map(|agent| agent.as_str()),
+        raw_paths,
+        cwd,
+    )
+}
+
+/// Atomically save GUI text and attachment edits with optimistic concurrency checks.
+#[allow(clippy::too_many_arguments)]
+pub fn update_with_attachments(
+    project: &str,
+    id: &str,
+    expected_text: &str,
+    expected_attachment_ids: &[String],
+    text: &str,
+    keep_attachment_ids: &[String],
+    add_paths: &[String],
+    cwd: &Path,
+) -> Result<TodoEntry, UpdateError> {
+    update_with_attachments_at(
+        &todos_file(),
+        &todos_lock(),
+        project,
+        id,
+        expected_text,
+        expected_attachment_ids,
+        text,
+        keep_attachment_ids,
+        add_paths,
+        cwd,
+    )
+}
+
+/// Add/remove attachments by stable ids (MCP). Existing text and auto state are preserved.
+pub fn update_attachment_ids(
+    project: &str,
+    id: &str,
+    add_paths: &[String],
+    remove_attachment_ids: &[String],
+    cwd: &Path,
+) -> Result<TodoEntry, UpdateError> {
+    let current = list(project)
+        .into_iter()
+        .find(|entry| entry.id == id)
+        .ok_or(UpdateError::NotFound)?;
+    let remove: std::collections::HashSet<&str> =
+        remove_attachment_ids.iter().map(String::as_str).collect();
+    if remove.iter().any(|id| {
+        !current
+            .attachments
+            .iter()
+            .any(|attachment| attachment.id == *id)
+    }) {
+        return Err(UpdateError::UnknownAttachment);
+    }
+    let expected_ids: Vec<String> = current
+        .attachments
+        .iter()
+        .map(|attachment| attachment.id.clone())
+        .collect();
+    let keep_ids: Vec<String> = current
+        .attachments
+        .iter()
+        .filter(|attachment| !remove.contains(attachment.id.as_str()))
+        .map(|attachment| attachment.id.clone())
+        .collect();
+    update_with_attachments(
+        project,
+        id,
+        &current.text,
+        &expected_ids,
+        &current.text,
+        &keep_ids,
+        add_paths,
+        cwd,
     )
 }
 
@@ -227,9 +426,19 @@ pub fn remove(project: &str, id: &str) -> bool {
     remove_at(&todos_file(), &todos_lock(), project, id)
 }
 
+/// User-facing remove variant that distinguishes a missing entry from a failed disk commit.
+pub fn remove_checked(project: &str, id: &str) -> Result<bool, MutationError> {
+    remove_checked_at(&todos_file(), &todos_lock(), project, id)
+}
+
 /// Clear a project's queue; returns how many entries were removed.
 pub fn clear(project: &str) -> usize {
     clear_at(&todos_file(), &todos_lock(), project)
+}
+
+/// User-facing clear variant that never reports removed entries when the disk commit failed.
+pub fn clear_checked(project: &str) -> Result<usize, MutationError> {
+    clear_checked_at(&todos_file(), &todos_lock(), project)
 }
 
 /// Dequeue entries by id (best-effort: missing ids are skipped, spec D11). Returns the
@@ -258,6 +467,10 @@ pub fn restore(project: &str, id: &str) -> bool {
 /// of entries removed.
 pub fn clear_history(project: &str) -> usize {
     clear_history_at(&todos_file(), &todos_lock(), project)
+}
+
+pub fn clear_history_checked(project: &str) -> Result<usize, MutationError> {
+    clear_history_checked_at(&todos_file(), &todos_lock(), project)
 }
 
 /// Reorder a project's queue to match `ids` (GUI drag handle, round 14). Best-effort under
@@ -306,8 +519,155 @@ pub fn ids_to_dequeue(
                 ids.push(id.clone());
             }
         }
+        for selection in &answer.todo_selections {
+            if !ids.contains(&selection.id) {
+                ids.push(selection.id.clone());
+            }
+        }
     }
     ids
+}
+
+/// Resolve attachment snapshots selected by the winning answer into delivery paths before the
+/// corresponding todos are dequeued. Managed files are copied into the request's 24-hour temp
+/// area; references are passed through. Missing/removed attachments become explicit task warnings.
+pub fn apply_todo_deliveries(
+    request: &crate::models::AskRequest,
+    result: &mut crate::models::ChannelResult,
+    project: &str,
+) {
+    apply_todo_deliveries_with(request, result, |todo_id, expected| {
+        prepare_delivery_consistent(project, todo_id, expected, &request.id)
+    });
+}
+
+/// Prepare outside `todos.lock`, then briefly revalidate attachment membership under the lock.
+/// A mutation that commits first forces a retry; a mutation that acquires the lock after a
+/// successful revalidation cannot retract the already-created delivery copy.
+pub fn prepare_delivery_consistent(
+    project: &str,
+    todo_id: &str,
+    expected: &[crate::todo_attachments::TodoAttachmentSnapshot],
+    request_id: &str,
+) -> crate::todo_attachments::TodoDelivery {
+    const MAX_ATTEMPTS: usize = 3;
+
+    for _ in 0..MAX_ATTEMPTS {
+        let snapshot = list(project)
+            .into_iter()
+            .find(|entry| entry.id == todo_id)
+            .map(|entry| entry.attachments);
+        let delivery = crate::todo_attachments::prepare_delivery(
+            todo_id,
+            expected,
+            snapshot.as_deref(),
+            request_id,
+        );
+
+        let _guard = lock_at(&todos_lock());
+        let latest = load_at(&todos_file())
+            .projects
+            .get(project.trim())
+            .and_then(|entries| entries.iter().find(|entry| entry.id == todo_id))
+            .map(|entry| entry.attachments.clone());
+        if latest.as_ref() == snapshot.as_ref() {
+            return delivery;
+        }
+        drop(_guard);
+        crate::todo_attachments::cleanup_delivery(request_id);
+    }
+
+    crate::todo_attachments::TodoDelivery {
+        files: Vec::new(),
+        warnings: expected
+            .iter()
+            .map(|attachment| {
+                format!(
+                    "Todo attachment changed while delivery was being prepared: {} ({})",
+                    attachment.name, attachment.source_path
+                )
+            })
+            .collect(),
+    }
+}
+
+fn apply_todo_deliveries_with(
+    request: &crate::models::AskRequest,
+    result: &mut crate::models::ChannelResult,
+    mut prepare: impl FnMut(
+        &str,
+        &[crate::todo_attachments::TodoAttachmentSnapshot],
+    ) -> crate::todo_attachments::TodoDelivery,
+) {
+    if result.action != crate::models::ChannelAction::Send {
+        return;
+    }
+    for (question_index, answer) in result.answers.iter_mut().enumerate() {
+        let options = request
+            .questions
+            .get(question_index)
+            .map(|question| question.predefined_options.as_slice())
+            .unwrap_or(&[]);
+        let mut selections: Vec<(String, Vec<crate::todo_attachments::TodoAttachmentSnapshot>)> =
+            Vec::new();
+
+        for selected in &mut answer.selected_options {
+            let Some(option) = options.iter().find(|option| option.text == *selected) else {
+                continue;
+            };
+            let Some(todo_id) = &option.todo_id else {
+                continue;
+            };
+            selections.push((todo_id.clone(), option.todo_attachments.clone()));
+        }
+        for selection in &answer.todo_selections {
+            if let Some(existing) = selections.iter_mut().find(|item| item.0 == selection.id) {
+                if existing.1.is_empty() {
+                    existing.1 = selection.attachments.clone();
+                }
+            } else {
+                selections.push((selection.id.clone(), selection.attachments.clone()));
+            }
+        }
+
+        let mut warnings = Vec::new();
+        for (todo_id, expected) in selections {
+            let delivery = prepare(&todo_id, &expected);
+            for file in delivery.files {
+                if !answer.files.contains(&file) {
+                    answer.files.push(file);
+                }
+            }
+            warnings.extend(delivery.warnings);
+        }
+        if let Some(block) = crate::todo_attachments::warning_block(&warnings) {
+            let input = answer.user_input.get_or_insert_with(String::new);
+            if !input.trim().is_empty() {
+                input.push_str("\n\n");
+            }
+            input.push_str(&block);
+        }
+    }
+}
+
+#[cfg(test)]
+fn apply_todo_deliveries_from_entries(
+    request: &crate::models::AskRequest,
+    result: &mut crate::models::ChannelResult,
+    current: &[TodoEntry],
+) {
+    apply_todo_deliveries_with(request, result, |todo_id, expected| {
+        let current_attachments = current
+            .iter()
+            .find(|entry| entry.id == todo_id)
+            .map(|entry| entry.attachments.as_slice());
+        crate::todo_attachments::prepare_delivery(
+            todo_id,
+            expected,
+            current_attachments,
+            &request.id,
+        )
+    });
 }
 
 // ===== Path-parameterized implementations (unit-testable without touching the real home) =====
@@ -341,21 +701,44 @@ fn add_impl(
     auto: bool,
     agent_kind: Option<&str>,
 ) -> Result<TodoEntry, AddError> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    add_impl_with_attachments(path, lock, project, text, auto, agent_kind, &[], &cwd)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_impl_with_attachments(
+    path: &Path,
+    lock: &Path,
+    project: &str,
+    text: &str,
+    auto: bool,
+    agent_kind: Option<&str>,
+    raw_paths: &[String],
+    cwd: &Path,
+) -> Result<TodoEntry, AddError> {
     let (project, text) = normalized(project, text).ok_or(AddError::EmptyInput)?;
+    let id = uuid::Uuid::new_v4().to_string();
+    let mut staged = crate::todo_attachments::stage_attachments(&id, raw_paths, &[], cwd)
+        .map_err(|error| AddError::Attachment(error.to_string()))?;
     let _guard = lock_at(lock);
     let mut data = load_at(path);
     let entry = TodoEntry {
-        id: uuid::Uuid::new_v4().to_string(),
+        id,
         text,
         created_at_ms: now_ms(),
         agent_kind: agent_kind.map(str::to_string),
         auto,
+        attachments: staged.attachments.clone(),
     };
+    staged
+        .commit_files()
+        .map_err(|error| AddError::Attachment(error.to_string()))?;
     data.projects
         .entry(project.clone())
         .or_default()
         .push(entry.clone());
     if !store_at(path, data) {
+        staged.rollback_committed();
         return Err(AddError::Persist);
     }
     // Defense in depth: never claim success unless the entry is readable back.
@@ -363,6 +746,92 @@ fn add_impl(
         return Err(AddError::Persist);
     }
     Ok(entry)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_with_attachments_at(
+    path: &Path,
+    lock: &Path,
+    project: &str,
+    id: &str,
+    expected_text: &str,
+    expected_attachment_ids: &[String],
+    text: &str,
+    keep_attachment_ids: &[String],
+    add_paths: &[String],
+    cwd: &Path,
+) -> Result<TodoEntry, UpdateError> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err(UpdateError::EmptyText);
+    }
+
+    let snapshot = list_at(path, project)
+        .into_iter()
+        .find(|entry| entry.id == id)
+        .ok_or(UpdateError::NotFound)?;
+    let snapshot_ids: Vec<String> = snapshot
+        .attachments
+        .iter()
+        .map(|attachment| attachment.id.clone())
+        .collect();
+    if snapshot.text != expected_text || snapshot_ids != expected_attachment_ids {
+        return Err(UpdateError::Conflict);
+    }
+    let keep: std::collections::HashSet<&str> =
+        keep_attachment_ids.iter().map(String::as_str).collect();
+    if keep.iter().any(|id| {
+        !snapshot
+            .attachments
+            .iter()
+            .any(|attachment| attachment.id == *id)
+    }) {
+        return Err(UpdateError::UnknownAttachment);
+    }
+    let kept: Vec<crate::todo_attachments::TodoAttachment> = snapshot
+        .attachments
+        .iter()
+        .filter(|attachment| keep.contains(attachment.id.as_str()))
+        .cloned()
+        .collect();
+    let removed: Vec<crate::todo_attachments::TodoAttachment> = snapshot
+        .attachments
+        .iter()
+        .filter(|attachment| !keep.contains(attachment.id.as_str()))
+        .cloned()
+        .collect();
+    let mut staged = crate::todo_attachments::stage_attachments(id, add_paths, &kept, cwd)
+        .map_err(|error| UpdateError::Attachment(error.to_string()))?;
+
+    let _guard = lock_at(lock);
+    let mut data = load_at(path);
+    let entry = data
+        .projects
+        .get_mut(project.trim())
+        .and_then(|entries| entries.iter_mut().find(|entry| entry.id == id))
+        .ok_or(UpdateError::NotFound)?;
+    let current_ids: Vec<String> = entry
+        .attachments
+        .iter()
+        .map(|attachment| attachment.id.clone())
+        .collect();
+    if entry.text != expected_text || current_ids != expected_attachment_ids {
+        return Err(UpdateError::Conflict);
+    }
+
+    staged
+        .commit_files()
+        .map_err(|error| UpdateError::Attachment(error.to_string()))?;
+    entry.text = text;
+    entry.attachments = kept;
+    entry.attachments.extend(staged.attachments.clone());
+    let updated = entry.clone();
+    if !store_at(path, data) {
+        staged.rollback_committed();
+        return Err(UpdateError::Persist);
+    }
+    crate::todo_attachments::cleanup_attachments(&removed);
+    Ok(updated)
 }
 
 pub fn set_auto_at(path: &Path, lock: &Path, project: &str, id: &str, auto: bool) -> Option<bool> {
@@ -410,46 +879,80 @@ pub fn set_text_at(
 }
 
 pub fn remove_at(path: &Path, lock: &Path, project: &str, id: &str) -> bool {
+    remove_checked_at(path, lock, project, id).unwrap_or(false)
+}
+
+fn remove_checked_at(
+    path: &Path,
+    lock: &Path,
+    project: &str,
+    id: &str,
+) -> Result<bool, MutationError> {
     let _guard = lock_at(lock);
     let mut data = load_at(path);
     let Some(entries) = data.projects.get_mut(project.trim()) else {
-        return false;
+        return Ok(false);
     };
     let before = entries.len();
+    let removed_entries: Vec<TodoEntry> = entries.iter().filter(|e| e.id == id).cloned().collect();
     entries.retain(|e| e.id != id);
     let removed = entries.len() != before;
-    if removed {
-        store_at(path, data);
+    if !removed {
+        return Ok(false);
     }
-    removed
+    if !store_at(path, data) {
+        return Err(MutationError::Persist);
+    }
+    for entry in removed_entries {
+        crate::todo_attachments::cleanup_attachments(&entry.attachments);
+    }
+    Ok(true)
 }
 
 pub fn clear_at(path: &Path, lock: &Path, project: &str) -> usize {
+    clear_checked_at(path, lock, project).unwrap_or(0)
+}
+
+fn clear_checked_at(path: &Path, lock: &Path, project: &str) -> Result<usize, MutationError> {
     let _guard = lock_at(lock);
     let mut data = load_at(path);
-    let removed = data
-        .projects
-        .remove(project.trim())
-        .map(|e| e.len())
-        .unwrap_or(0);
-    if removed > 0 {
-        store_at(path, data);
+    let removed_entries = data.projects.remove(project.trim()).unwrap_or_default();
+    let removed = removed_entries.len();
+    if removed == 0 {
+        return Ok(0);
     }
-    removed
+    if !store_at(path, data) {
+        return Err(MutationError::Persist);
+    }
+    for entry in removed_entries {
+        crate::todo_attachments::cleanup_attachments(&entry.attachments);
+    }
+    Ok(removed)
 }
 
 pub fn clear_history_at(path: &Path, lock: &Path, project: &str) -> usize {
+    clear_history_checked_at(path, lock, project).unwrap_or(0)
+}
+
+fn clear_history_checked_at(
+    path: &Path,
+    lock: &Path,
+    project: &str,
+) -> Result<usize, MutationError> {
     let _guard = lock_at(lock);
     let mut data = load_at(path);
-    let removed = data
-        .history
-        .remove(project.trim())
-        .map(|e| e.len())
-        .unwrap_or(0);
-    if removed > 0 {
-        store_at(path, data);
+    let removed_entries = data.history.remove(project.trim()).unwrap_or_default();
+    let removed = removed_entries.len();
+    if removed == 0 {
+        return Ok(0);
     }
-    removed
+    if !store_at(path, data) {
+        return Err(MutationError::Persist);
+    }
+    for entry in removed_entries {
+        crate::todo_attachments::cleanup_attachments(&entry.attachments);
+    }
+    Ok(removed)
 }
 
 pub fn reorder_at(path: &Path, lock: &Path, project: &str, ids: &[String]) -> bool {
@@ -501,6 +1004,7 @@ pub fn take_at(
         }
     });
     if !taken.is_empty() {
+        let mut cleanup_after_store: Vec<crate::todo_attachments::TodoAttachment> = Vec::new();
         // Record execution history (chronological append; trim oldest beyond the cap).
         if history_limit > 0 {
             let done_at = now_ms();
@@ -512,14 +1016,23 @@ pub fn take_at(
                     created_at_ms: e.created_at_ms,
                     agent_kind: e.agent_kind.clone(),
                     done_at_ms: done_at,
+                    attachments: e.attachments.clone(),
                 });
             }
             if hist.len() > history_limit {
                 let overflow = hist.len() - history_limit;
-                hist.drain(..overflow);
+                for entry in hist.drain(..overflow) {
+                    cleanup_after_store.extend(entry.attachments);
+                }
+            }
+        } else {
+            for entry in &taken {
+                cleanup_after_store.extend(entry.attachments.clone());
             }
         }
-        store_at(path, data);
+        if store_at(path, data) {
+            crate::todo_attachments::cleanup_attachments(&cleanup_after_store);
+        }
     }
     taken
 }
@@ -554,6 +1067,7 @@ pub fn restore_at(path: &Path, lock: &Path, project: &str, id: &str) -> bool {
             agent_kind: done.agent_kind,
             // 恢复为普通待办：带 auto 恢复会立刻重新触发自动链，违背「找回来看看」的意图。
             auto: false,
+            attachments: done.attachments,
         });
     store_at(path, data);
     true
@@ -585,6 +1099,45 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn option_attachment_badge_uses_brackets_without_emoji() {
+        let entry = TodoEntry {
+            id: "todo-1".into(),
+            text: "review".into(),
+            created_at_ms: 1,
+            agent_kind: None,
+            auto: false,
+            attachments: vec![crate::todo_attachments::TodoAttachment {
+                id: "attachment-1".into(),
+                name: "brief.md".into(),
+                size: 1,
+                is_image: false,
+                source_path: "/tmp/brief.md".into(),
+                path: "/tmp/brief.md".into(),
+                storage: crate::todo_attachments::TodoAttachmentStorage::Reference,
+                thumbnail_path: None,
+                source_modified_ms: None,
+            }],
+        };
+        assert_eq!(
+            option_label(crate::i18n::Lang::Zh, &entry),
+            "执行待办：review 【1 个附件】"
+        );
+        assert_eq!(
+            option_label(crate::i18n::Lang::En, &entry),
+            "Run todo: review 【1 attachments】"
+        );
+        assert!(!option_label(crate::i18n::Lang::Zh, &entry).contains('📎'));
+        assert_eq!(
+            split_attachment_badge("review 【1 个附件】"),
+            ("review", Some("【1 个附件】"))
+        );
+        assert_eq!(
+            split_attachment_badge("review 【user text】"),
+            ("review 【user text】", None)
+        );
     }
 
     #[test]
@@ -759,6 +1312,37 @@ mod tests {
     }
 
     #[test]
+    fn attachments_round_trip_through_history_and_restore() {
+        let t = TempStore::new();
+        let mut entry = add_at(&t.file(), &t.lock(), "/p", "with file").unwrap();
+        entry
+            .attachments
+            .push(crate::todo_attachments::TodoAttachment {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "brief.md".into(),
+                size: 10,
+                is_image: false,
+                source_path: "/external/brief.md".into(),
+                path: "/external/brief.md".into(),
+                storage: crate::todo_attachments::TodoAttachmentStorage::Reference,
+                thumbnail_path: None,
+                source_modified_ms: None,
+            });
+        let mut data = load_at(&t.file());
+        data.projects.get_mut("/p").unwrap()[0] = entry.clone();
+        assert!(store_at(&t.file(), data));
+
+        let taken = take_at(&t.file(), &t.lock(), "/p", &[entry.id.clone()], 20);
+        assert_eq!(taken[0].attachments, entry.attachments);
+        assert_eq!(
+            history_at(&t.file(), "/p")[0].attachments,
+            entry.attachments
+        );
+        assert!(restore_at(&t.file(), &t.lock(), "/p", &entry.id));
+        assert_eq!(list_at(&t.file(), "/p")[0].attachments, entry.attachments);
+    }
+
+    #[test]
     fn history_caps_at_limit_and_zero_disables_recording() {
         let t = TempStore::new();
         for i in 0..4 {
@@ -805,6 +1389,7 @@ mod tests {
                 images: Vec::new(),
                 files: Vec::new(),
                 todo_ids: vec!["id-1".into(), "id-3".into()],
+                todo_selections: Vec::new(),
             }],
             source_channel_id: "popup".into(),
         };
@@ -821,6 +1406,73 @@ mod tests {
             source_channel_id: "popup".into(),
         };
         assert!(ids_to_dequeue(&request, &plain).is_empty());
+    }
+
+    #[test]
+    fn selected_todo_delivers_snapshot_files_and_missing_warnings() {
+        use crate::models::{
+            AskRequest, ChannelAction, ChannelResult, MessagePrompt, OptionItem, Question,
+            QuestionAnswer,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("brief.md");
+        std::fs::write(&file, b"brief").unwrap();
+        let attachment = crate::todo_attachments::TodoAttachment {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "brief.md".into(),
+            size: 5,
+            is_image: false,
+            source_path: file.to_string_lossy().into_owned(),
+            path: file.to_string_lossy().into_owned(),
+            storage: crate::todo_attachments::TodoAttachmentStorage::Reference,
+            thumbnail_path: None,
+            source_modified_ms: None,
+        };
+        let entry = TodoEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            text: "review brief".into(),
+            created_at_ms: 1,
+            agent_kind: None,
+            auto: false,
+            attachments: vec![attachment],
+        };
+        let label = option_label(crate::i18n::Lang::En, &entry);
+        let request = AskRequest::new(
+            MessagePrompt::default(),
+            vec![Question::new(
+                "next?".into(),
+                vec![OptionItem::with_todo_entry(label.clone(), &entry)],
+            )],
+            true,
+        );
+        let mut result = ChannelResult {
+            action: ChannelAction::Send,
+            answers: vec![QuestionAnswer {
+                selected_options: vec![label.clone()],
+                ..Default::default()
+            }],
+            source_channel_id: "popup".into(),
+        };
+        apply_todo_deliveries_from_entries(&request, &mut result, std::slice::from_ref(&entry));
+        assert_eq!(result.answers[0].selected_options, vec![label]);
+        assert_eq!(result.answers[0].files, vec![file.to_string_lossy()]);
+        assert!(result.answers[0].user_input.is_none());
+
+        let mut missing = ChannelResult {
+            action: ChannelAction::Send,
+            answers: vec![QuestionAnswer {
+                selected_options: result.answers[0].selected_options.clone(),
+                ..Default::default()
+            }],
+            source_channel_id: "popup".into(),
+        };
+        apply_todo_deliveries_from_entries(&request, &mut missing, &[]);
+        assert!(missing.answers[0].files.is_empty());
+        assert!(missing.answers[0]
+            .user_input
+            .as_deref()
+            .unwrap_or_default()
+            .contains("unavailable"));
     }
 
     #[test]

@@ -44,6 +44,7 @@ import type {
   ThemeMode,
   DiffFileView,
   DiffStatPage,
+  ImageAttachment,
   TodoDoneEntry,
   TodoEntry,
   TodoProjectInfo,
@@ -428,8 +429,69 @@ export const popupUpdateState = () =>
 export const todosList = (project: string) =>
   invoke<TodoEntry[]>("todos_list", { project });
 
-export const todosAdd = (project: string, text: string, auto = false) =>
-  invoke<TodoEntry | null>("todos_add", { project, text, auto });
+export const todosAdd = (
+  project: string,
+  text: string,
+  auto = false,
+  filePaths: string[] = [],
+  pastedImages: ImageAttachment[] = []
+) =>
+  invoke<TodoEntry>("todos_add", {
+    project,
+    text,
+    auto,
+    filePaths,
+    pastedImages,
+  });
+
+export const todosUpdate = (
+  project: string,
+  id: string,
+  expectedText: string,
+  expectedAttachmentIds: string[],
+  text: string,
+  keepAttachmentIds: string[],
+  addPaths: string[]
+) =>
+  invoke<TodoEntry>("todos_update", {
+    project,
+    id,
+    expectedText,
+    expectedAttachmentIds,
+    text,
+    keepAttachmentIds,
+    addPaths,
+  });
+
+export const todosUpdateAttachments = (
+  project: string,
+  id: string,
+  addPaths: string[] = [],
+  removeAttachmentIds: string[] = []
+) =>
+  invoke<TodoEntry>("todos_update_attachments", {
+    project,
+    id,
+    addPaths,
+    removeAttachmentIds,
+  });
+
+export const todosAttachPastedImages = (
+  project: string,
+  id: string,
+  images: ImageAttachment[]
+) => invoke<TodoEntry>("todos_attach_pasted_images", { project, id, images });
+
+export const todoAttachmentThumbnail = (
+  project: string,
+  todoId: string,
+  attachmentId: string
+) =>
+  invoke<string | null>("todo_attachment_thumbnail", {
+    project,
+    todoId,
+    attachmentId,
+  });
 
 /** 切换自动执行标记；返回新状态（条目不存在返回 null）。 */
 export const todosSetAuto = (project: string, id: string, auto: boolean) =>
@@ -509,6 +571,7 @@ export const newTaskLaunch = (payload: {
   task: string;
   todoProject?: string | null;
   todoId?: string | null;
+  todoAttachments?: import("./types").TodoAttachmentSnapshot[];
 }) =>
   invoke<void>("new_task_launch", {
     workspace: payload.workspace,
@@ -517,4 +580,5 @@ export const newTaskLaunch = (payload: {
     task: payload.task,
     todoProject: payload.todoProject ?? null,
     todoId: payload.todoId ?? null,
+    todoAttachments: payload.todoAttachments ?? [],
   });

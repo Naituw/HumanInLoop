@@ -93,7 +93,12 @@ function onToggleOpen() {
         <span v-if="todoChipsEnabled" class="check">{{
           todoChosenIds.includes(td.id) ? "✓" : ""
         }}</span>
-        <span class="label">{{ td.text }}</span>
+        <span class="label">
+          {{ td.text }}
+          <span v-if="td.attachments?.length" class="todo-file-count">
+            {{ t("common.attachmentBadge", { n: td.attachments.length }) }}
+          </span>
+        </span>
         <button
           v-if="confirmDeleteId === td.id"
           class="todo-del-confirm"
@@ -120,3 +125,12 @@ function onToggleOpen() {
     </div>
   </div>
 </template>
+
+<style scoped>
+.todo-file-count {
+  margin-left: 6px;
+  color: var(--text-secondary);
+  font-size: inherit;
+  white-space: nowrap;
+}
+</style>

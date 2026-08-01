@@ -550,11 +550,20 @@ const TASK_MANUAL_ACTION_ID: &str = "start";
 const TASK_TODO_ACTION_PREFIX: &str = "todo:";
 
 fn task_todo_label(todo: &crate::todos::TodoEntry, lang: Lang) -> String {
+    let attachment_badge = if todo.attachments.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " {}",
+            crate::todos::attachment_badge(lang, todo.attachments.len())
+        )
+    };
     format!(
-        "{}{}{}",
+        "{}{}{}{}",
         crate::i18n::tr(lang, "whatsNext.todoPrefix"),
         if todo.auto { "⚡ " } else { "" },
-        todo.text
+        todo.text,
+        attachment_badge,
     )
 }
 
@@ -893,6 +902,7 @@ async fn serve(_lock: LockGuard) -> i32 {
     tokio::spawn(async move {
         loop {
             cleanup_temp_dirs();
+            crate::todos::cleanup_attachment_orphans();
             lifecycle::rotate_log_if_needed();
             tokio::time::sleep(Duration::from_secs(3600)).await;
         }

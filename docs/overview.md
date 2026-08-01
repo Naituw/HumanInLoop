@@ -80,7 +80,7 @@ AskHuman/
         agents_cmd.rs        agents 模式、状态与 capability 子命令
         doctor.rs            daemon、渠道和 Agent 集成体检
         debug_cmd.rs         不进入 help 的调试子命令
-        todo_cmd.rs          todo add/list/rm/clear 子命令
+        todo_cmd.rs          todo add/list/attach/detach/rm/clear 子命令
         file_attachment.rs   -f 路径解析与校验
         output.rs            文本/JSON 结果格式化
         image_writer.rs      回复图片落盘
@@ -95,12 +95,13 @@ AskHuman/
       show_last.rs           按 Agent session/MCP instance 恢复最近完成问答
       context_binding.rs     MCP 会话的一次性 token 与 Grok 安全旁路绑定
       todos.rs               项目级待办队列（todos.json 直读直写 + 文件锁）
+      todo_attachments.rs    Todo 附件托管、缩略图、生命周期与执行交付副本
       autochannel.rs         IM 命令分类、活跃槽与共享文案
       perf.rs                跨进程性能埋点
       prompts.rs             CLI/MCP Agent 参考提示词
       mcp/
         mod.rs               STDIO MCP server 运行时
-        ask.rs               ask / whats_next / show_last / todo_add 工具
+        ask.rs               ask / whats_next / show_last / todo_add / todo_list / todo_update 工具
       hooks.rs               用户级 hooks
       watch.rs               四渠道 /watch 共用状态与文案
       select.rs              跨渠道单选卡模型
@@ -326,11 +327,11 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 
 ## 项目待办 + whats-next
 
-> 规格 `docs/specs/todo-whats-next.md`。
+> 规格 `docs/specs/todo-whats-next.md`、`docs/specs/todo-attachments.md`。
 
-- 待办按项目（git 根）归属，`~/.askhuman/state/todos.json` 是唯一数据源：所有进程直读直写 + 文件锁串行化，不依赖 daemon 存活，跨平台。CLI / MCP `todo_add` 在落盘失败时必须报错（禁止假成功 `#0`）。
+- 待办按项目（git 根）归属，`~/.askhuman/state/todos.json` 是唯一数据源：所有进程直读直写 + 文件锁串行化，不依赖 daemon 存活，跨平台。GUI / CLI / MCP 可在创建时或对已有 Todo 独立管理附件；GUI 默认折叠附件摘要，支持新增区 / 每条 Pending Todo 拖入、新增输入框粘贴图片，以及选中行后粘贴剪贴板图片。单文件 ≤10 MiB 由 AskHuman 托管，>10 MiB 保留绝对路径引用（无稳定源路径的剪贴板图片超过阈值则拒绝），每条最多 20 个，并生成最长边 128 px 的图片缓存缩略图。用户可见写操作在落盘失败时必须报错。
 - Agent 完成任务后必须调 `AskHuman --whats-next`（MCP 为 `whats_next` 工具）：固定提问 + 可选的 Agent 建议任务 + 待办 chip + 恒有「结束本轮」；顺序固定为建议任务、待办、结束，总选项最多 10 条。建议任务仅在确有建议时通过 `-o`/`-o!`（MCP `options`）传入，选择结果保持普通 Ask 的 `[selected_options]` 语义；待办派活为 `[user_input]`，准许结束为 `[selected_options]`，取消为 `[status]`。选中的待办按 id best-effort 出队（Coordinator 汇聚点统一处理）。标记为「自动执行」（⚡）的待办优先级不变：whats-next 时不发卡、直接按队列顺序派发最靠前一条。
-- 送达面：whats-next / 普通提问 Popup 折叠待办区 / Stop 确认卡（兜底）都以选项形式呈现待办；输入面：CLI `todo` 子命令、Popup 内新增、GUI 待办窗口（托盘/AgentsView 入口）、IM `/todo`。
+- 送达面：whats-next / 普通提问 Popup 折叠待办区 / Stop 确认卡（兜底）都以选项形式呈现待办；GUI / IM 新建 Agent 任务也可直接执行待办。所有出口在执行前按卡片附件快照与最新 Todo 求交集，托管文件建立请求级交付副本，失效项转为 warning，选项只显示 `【N 个附件】`（支持富文本颜色时为灰色）而不向 IM 上传本地文件。输入面：CLI `todo` 子命令、Popup 内新增、GUI 待办窗口（托盘/AgentsView 入口）、IM `/todo`；IM 创建/管理首版仍只支持文字。
 - IM `/todo`（管理卡：飞书代码卡自带输入表单，钉钉复用提问卡模板 `allow_input`，TG/Slack 文本 + 命令提示）、`/todo-rm`（复用单选卡逐条删除、就地刷新）与 `/todo-auto`（切换自动执行标记）仅 Unix，实现在 `daemon/unix_impl/todo.rs`。
 - macOS 上待办窗口每条待办另有「创建任务」按钮：预选项目与该待办打开新建任务窗口，Terminal 启动成功后按快照出队（spec `docs/specs/gui-agent-task-launch.md`）。
 
@@ -363,7 +364,7 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 
 > 需求 `docs/specs/mcp.md`，计划 `docs/plans/mcp.md`。
 
-- `AskHuman mcp` 暴露 `ask`、`whats_next`、`show_last`、`todo_add`：`ask`/`whats_next` 每次调用 spawn 现有 CLI 流程，复用 Popup、IM、抢答、历史和 drain；`show_last` 只读恢复最近精确问答，`todo_add` 在 MCP 进程内直写 `todos.json`。
+- `AskHuman mcp` 暴露 `ask`、`whats_next`、`show_last`、`todo_add`、`todo_list`、`todo_update`：`ask`/`whats_next` 每次调用 spawn 现有 CLI 流程，复用 Popup、IM、抢答、历史和 drain；`show_last` 只读恢复最近精确问答，三个 Todo 工具按当前项目直接读写 `todos.json`，其中 list/update 使用稳定 Todo 与附件 ID。
 - `ask` 入参为 message/questions/files；输出为 CLI 同款结果区块文本（原样透传，无 output schema / structuredContent）加图片 ImageContent。MCP 取消会终止子 CLI，并通过 socket EOF 取消 Daemon 请求。
 - Agent 自动集成是 None/CLI/MCP 互斥；Grok 仅 None/MCP，其 MCP 产物是 skill + config。
 - Codex、Grok、Claude 分别写适配自身的长超时配置；Cursor MCP 超时不可配置，推荐 CLI 模式。

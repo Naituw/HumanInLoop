@@ -66,6 +66,7 @@ mod sound;
 mod speech;
 mod telegram;
 mod textnorm;
+mod todo_attachments;
 mod todos;
 mod uistate;
 mod update;

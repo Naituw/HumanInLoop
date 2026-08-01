@@ -334,23 +334,315 @@ pub fn popup_agent_resolved() -> PushedAgent {
 
 // ===== 项目级待办队列（spec todo-whats-next D7/D9）：直读直写 todos.json，无 daemon 依赖 =====
 
-#[tauri::command]
-pub fn todos_list(project: String) -> Vec<crate::todos::TodoEntry> {
-    crate::todos::list(&project)
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoAttachmentView {
+    id: String,
+    name: String,
+    size: u64,
+    is_image: bool,
+    source_path: String,
+    path: String,
+    storage: crate::todo_attachments::TodoAttachmentStorage,
+    available: bool,
+}
+
+impl From<&crate::todo_attachments::TodoAttachment> for TodoAttachmentView {
+    fn from(attachment: &crate::todo_attachments::TodoAttachment) -> Self {
+        Self {
+            id: attachment.id.clone(),
+            name: attachment.name.clone(),
+            size: attachment.size,
+            is_image: attachment.is_image,
+            source_path: attachment.source_path.clone(),
+            path: attachment.path.clone(),
+            storage: attachment.storage,
+            available: attachment.available(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoEntryView {
+    id: String,
+    text: String,
+    created_at_ms: u64,
+    agent_kind: Option<String>,
+    auto: bool,
+    attachments: Vec<TodoAttachmentView>,
+}
+
+impl From<crate::todos::TodoEntry> for TodoEntryView {
+    fn from(entry: crate::todos::TodoEntry) -> Self {
+        Self {
+            id: entry.id,
+            text: entry.text,
+            created_at_ms: entry.created_at_ms,
+            agent_kind: entry.agent_kind,
+            auto: entry.auto,
+            attachments: entry
+                .attachments
+                .iter()
+                .map(TodoAttachmentView::from)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoneTodoEntryView {
+    id: String,
+    text: String,
+    created_at_ms: u64,
+    agent_kind: Option<String>,
+    done_at_ms: u64,
+    attachments: Vec<TodoAttachmentView>,
+}
+
+impl From<crate::todos::DoneTodoEntry> for DoneTodoEntryView {
+    fn from(entry: crate::todos::DoneTodoEntry) -> Self {
+        Self {
+            id: entry.id,
+            text: entry.text,
+            created_at_ms: entry.created_at_ms,
+            agent_kind: entry.agent_kind,
+            done_at_ms: entry.done_at_ms,
+            attachments: entry
+                .attachments
+                .iter()
+                .map(TodoAttachmentView::from)
+                .collect(),
+        }
+    }
 }
 
 #[tauri::command]
-pub fn todos_add(
+pub fn todos_list(project: String) -> Vec<TodoEntryView> {
+    crate::todos::list(&project)
+        .into_iter()
+        .map(TodoEntryView::from)
+        .collect()
+}
+
+#[tauri::command]
+pub async fn todos_add(
     project: String,
     text: String,
     auto: Option<bool>,
-) -> Option<crate::todos::TodoEntry> {
-    let result = if auto.unwrap_or(false) {
-        crate::todos::add_auto(&project, &text)
-    } else {
-        crate::todos::add(&project, &text)
-    };
-    result.ok()
+    file_paths: Option<Vec<String>>,
+    pasted_images: Option<Vec<crate::models::ImageAttachment>>,
+) -> Result<TodoEntryView, String> {
+    let mut file_paths = file_paths.unwrap_or_default();
+    let pasted_images = pasted_images.unwrap_or_default();
+    validate_pasted_images(&pasted_images)?;
+    if file_paths.len().saturating_add(pasted_images.len())
+        > crate::todo_attachments::MAX_ATTACHMENTS_PER_TODO
+    {
+        return Err(format!(
+            "a todo can have at most {} attachments",
+            crate::todo_attachments::MAX_ATTACHMENTS_PER_TODO
+        ));
+    }
+    let pasted_images = normalize_pasted_image_filenames(pasted_images);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    tauri::async_runtime::spawn_blocking(move || {
+        let paste_id = format!("todo-paste-{}", uuid::Uuid::new_v4());
+        let paste_root = crate::paths::request_temp_dir(&paste_id);
+        let result = (|| {
+            file_paths.extend(save_pasted_images(&pasted_images, &paste_id)?);
+            crate::todos::add_with_attachments(
+                &project,
+                &text,
+                auto.unwrap_or(false),
+                None,
+                &file_paths,
+                &cwd,
+            )
+            .map(TodoEntryView::from)
+            .map_err(|error| match error {
+                crate::todos::AddError::EmptyInput => "todo text must not be empty".to_string(),
+                crate::todos::AddError::Persist => "failed to save todo".to_string(),
+                crate::todos::AddError::Attachment(message) => message,
+            })
+        })();
+        let _ = std::fs::remove_dir_all(paste_root);
+        result
+    })
+    .await
+    .map_err(|error| format!("todo add task failed: {error}"))?
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn todos_update(
+    project: String,
+    id: String,
+    expected_text: String,
+    expected_attachment_ids: Vec<String>,
+    text: String,
+    keep_attachment_ids: Vec<String>,
+    add_paths: Vec<String>,
+) -> Result<TodoEntryView, String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::todos::update_with_attachments(
+            &project,
+            &id,
+            &expected_text,
+            &expected_attachment_ids,
+            &text,
+            &keep_attachment_ids,
+            &add_paths,
+            &cwd,
+        )
+        .map(TodoEntryView::from)
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("todo update task failed: {error}"))?
+}
+
+/// Add or remove attachments without entering text-edit mode.
+#[tauri::command]
+pub async fn todos_update_attachments(
+    project: String,
+    id: String,
+    add_paths: Vec<String>,
+    remove_attachment_ids: Vec<String>,
+) -> Result<TodoEntryView, String> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::todos::update_attachment_ids(&project, &id, &add_paths, &remove_attachment_ids, &cwd)
+            .map(TodoEntryView::from)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("todo attachment update task failed: {error}"))?
+}
+
+/// Give clipboard images stable unique names before writing them into one temporary directory.
+fn normalize_pasted_image_filenames(
+    images: Vec<crate::models::ImageAttachment>,
+) -> Vec<crate::models::ImageAttachment> {
+    images
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut image)| {
+            image.filename = image.filename.as_deref().and_then(|name| {
+                let basename = name.rsplit(['/', '\\']).next()?.trim();
+                (!basename.is_empty()).then(|| format!("{}-{basename}", index + 1))
+            });
+            image
+        })
+        .collect()
+}
+
+fn validate_pasted_images(images: &[crate::models::ImageAttachment]) -> Result<(), String> {
+    const DATA_URL_OVERHEAD_BYTES: usize = 1024;
+    const MAX_ENCODED_IMAGE_BYTES: usize =
+        (crate::todo_attachments::MANAGED_MAX_BYTES as usize).div_ceil(3) * 4
+            + DATA_URL_OVERHEAD_BYTES;
+
+    if images.len() > crate::todo_attachments::MAX_ATTACHMENTS_PER_TODO {
+        return Err(format!(
+            "a todo can have at most {} attachments",
+            crate::todo_attachments::MAX_ATTACHMENTS_PER_TODO
+        ));
+    }
+    if images.iter().any(|image| {
+        !image.media_type.starts_with("image/") || image.data.len() > MAX_ENCODED_IMAGE_BYTES
+    }) {
+        return Err(format!(
+            "a pasted image must be at most {} bytes",
+            crate::todo_attachments::MANAGED_MAX_BYTES
+        ));
+    }
+    Ok(())
+}
+
+fn save_pasted_images(
+    images: &[crate::models::ImageAttachment],
+    paste_id: &str,
+) -> Result<Vec<String>, String> {
+    let paths = crate::cli::image_writer::save(images, paste_id, 0, crate::i18n::Lang::current())
+        .map_err(|error| error.to_string())?;
+    for path in &paths {
+        let size = std::fs::metadata(path)
+            .map_err(|error| format!("failed to inspect pasted image: {error}"))?
+            .len();
+        if size > crate::todo_attachments::MANAGED_MAX_BYTES {
+            return Err(format!(
+                "a pasted image must be at most {} bytes",
+                crate::todo_attachments::MANAGED_MAX_BYTES
+            ));
+        }
+    }
+    Ok(paths)
+}
+
+/// Persist clipboard images into the selected todo. Clipboard blobs have no stable source path,
+/// so they must fit the managed-file limit rather than degrading to a temporary path reference.
+#[tauri::command]
+pub async fn todos_attach_pasted_images(
+    project: String,
+    id: String,
+    images: Vec<crate::models::ImageAttachment>,
+) -> Result<TodoEntryView, String> {
+    if images.is_empty() {
+        return Err("no clipboard images supplied".to_string());
+    }
+    validate_pasted_images(&images)?;
+    let images = normalize_pasted_image_filenames(images);
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let paste_id = format!("todo-paste-{}", uuid::Uuid::new_v4());
+        let paste_root = crate::paths::request_temp_dir(&paste_id);
+        let result = (|| {
+            let paths = save_pasted_images(&images, &paste_id)?;
+            crate::todos::update_attachment_ids(
+                &project,
+                &id,
+                &paths,
+                &[],
+                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            )
+            .map(TodoEntryView::from)
+            .map_err(|error| error.to_string())
+        })();
+        let _ = std::fs::remove_dir_all(paste_root);
+        result
+    })
+    .await
+    .map_err(|error| format!("todo clipboard image task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn todo_attachment_thumbnail(
+    project: String,
+    todo_id: String,
+    attachment_id: String,
+) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let pending = crate::todos::list(&project)
+            .into_iter()
+            .find(|entry| entry.id == todo_id)
+            .map(|entry| entry.attachments);
+        let attachments = pending.or_else(|| {
+            crate::todos::history(&project)
+                .into_iter()
+                .find(|entry| entry.id == todo_id)
+                .map(|entry| entry.attachments)
+        })?;
+        let attachment = attachments
+            .iter()
+            .find(|attachment| attachment.id == attachment_id)?;
+        crate::todo_attachments::read_thumbnail_data_url(&todo_id, attachment)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// 切换自动执行标记（第 17 轮定案）；返回新状态，条目不存在返回 None。
@@ -366,8 +658,8 @@ pub fn todos_set_text(project: String, id: String, text: String) -> Option<Strin
 }
 
 #[tauri::command]
-pub fn todos_remove(project: String, id: String) -> bool {
-    crate::todos::remove(&project, &id)
+pub fn todos_remove(project: String, id: String) -> Result<bool, String> {
+    crate::todos::remove_checked(&project, &id).map_err(|error| error.to_string())
 }
 
 /// GUI checkbox complete: dequeue into execution history (same path as whats-next `take`).
@@ -378,8 +670,8 @@ pub fn todos_complete(project: String, id: String) -> bool {
 }
 
 #[tauri::command]
-pub fn todos_clear(project: String) -> usize {
-    crate::todos::clear(&project)
+pub fn todos_clear(project: String) -> Result<usize, String> {
+    crate::todos::clear_checked(&project).map_err(|error| error.to_string())
 }
 
 /// 拖拽排序（GUI 待办窗口，第 14 轮定案）：按给定 id 顺序重排；并发增删 best-effort。
@@ -390,8 +682,11 @@ pub fn todos_reorder(project: String, ids: Vec<String>) -> bool {
 
 /// 执行历史（第 16 轮定案）：最新在前。
 #[tauri::command]
-pub fn todos_history(project: String) -> Vec<crate::todos::DoneTodoEntry> {
+pub fn todos_history(project: String) -> Vec<DoneTodoEntryView> {
     crate::todos::history(&project)
+        .into_iter()
+        .map(DoneTodoEntryView::from)
+        .collect()
 }
 
 /// 从历史一键恢复回待办队列末尾。
@@ -402,8 +697,8 @@ pub fn todos_restore(project: String, id: String) -> bool {
 
 /// 清空本项目的执行历史（第 18 轮定案）。
 #[tauri::command]
-pub fn todos_history_clear(project: String) -> usize {
-    crate::todos::clear_history(&project)
+pub fn todos_history_clear(project: String) -> Result<usize, String> {
+    crate::todos::clear_history_checked(&project).map_err(|error| error.to_string())
 }
 
 /// 待办窗口初始化负载：主题 + 语言（与 `agents_init` 同模式）。
@@ -1666,6 +1961,7 @@ pub async fn new_task_launch(
     task: String,
     todo_project: Option<String>,
     todo_id: Option<String>,
+    todo_attachments: Option<Vec<crate::todo_attachments::TodoAttachmentSnapshot>>,
 ) -> Result<(), String> {
     let kind = crate::agents::AgentKind::parse(&kind).ok_or("unknown agent kind")?;
     let permission = match permission.as_str() {
@@ -1678,19 +1974,41 @@ pub async fn new_task_launch(
     }
     // create_record 内部含 login-shell readiness 复检（≤2s 阻塞探测），放 blocking 线程。
     tokio::task::spawn_blocking(move || {
+        let delivery_request_id = uuid::Uuid::new_v4().to_string();
+        let delivery =
+            if let (Some(project), Some(id)) = (todo_project.as_deref(), todo_id.as_deref()) {
+                crate::todos::prepare_delivery_consistent(
+                    project,
+                    id,
+                    &todo_attachments.unwrap_or_default(),
+                    &delivery_request_id,
+                )
+            } else {
+                crate::todo_attachments::TodoDelivery::default()
+            };
         let source = crate::integrations::agent_launch::LaunchSource {
             channel: "gui".to_string(),
             target: String::new(),
         };
-        let record = crate::integrations::agent_launch::create_record(
+        let record = match crate::integrations::agent_launch::create_record_with_files(
             source,
             std::path::Path::new(&workspace),
             kind,
             permission,
             &task,
-        )
-        .map_err(|e| format!("{e:#}"))?;
-        crate::integrations::agent_launch::open_terminal(&record).map_err(|e| format!("{e:#}"))?;
+            &delivery.files,
+            &delivery.warnings,
+        ) {
+            Ok(record) => record,
+            Err(error) => {
+                crate::todo_attachments::cleanup_delivery(&delivery_request_id);
+                return Err(format!("{error:#}"));
+            }
+        };
+        if let Err(error) = crate::integrations::agent_launch::open_terminal(&record) {
+            crate::todo_attachments::cleanup_delivery(&delivery_request_id);
+            return Err(format!("{error:#}"));
+        }
         // 成功后才出队（G7）；并发删除不报错（take 为 best-effort）。
         if let (Some(project), Some(id)) = (todo_project.as_deref(), todo_id.as_deref()) {
             if !project.is_empty() && !id.is_empty() {
@@ -3441,6 +3759,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pasted_image_names_are_unique_and_strip_path_components() {
+        let image = |filename: Option<&str>| crate::models::ImageAttachment {
+            data: "data:image/png;base64,aGVsbG8=".to_string(),
+            media_type: "image/png".to_string(),
+            filename: filename.map(str::to_string),
+        };
+        let images = normalize_pasted_image_filenames(vec![
+            image(Some("/tmp/capture.png")),
+            image(Some("capture.png")),
+            image(Some("  ")),
+            image(None),
+        ]);
+        assert_eq!(images[0].filename.as_deref(), Some("1-capture.png"));
+        assert_eq!(images[1].filename.as_deref(), Some("2-capture.png"));
+        assert_eq!(images[2].filename, None);
+        assert_eq!(images[3].filename, None);
+    }
+
+    #[test]
+    fn pasted_image_validation_allows_empty_drafts_and_rejects_invalid_payloads() {
+        let image = crate::models::ImageAttachment {
+            data: "data:image/png;base64,aGVsbG8=".to_string(),
+            media_type: "image/png".to_string(),
+            filename: Some("capture.png".to_string()),
+        };
+        assert!(validate_pasted_images(&[]).is_ok());
+        let at_limit = vec![image.clone(); crate::todo_attachments::MAX_ATTACHMENTS_PER_TODO];
+        assert!(validate_pasted_images(&at_limit).is_ok());
+        let over_limit = vec![image.clone(); crate::todo_attachments::MAX_ATTACHMENTS_PER_TODO + 1];
+        assert!(validate_pasted_images(&over_limit).is_err());
+
+        let mut invalid_media = image;
+        invalid_media.media_type = "application/octet-stream".to_string();
+        assert!(validate_pasted_images(&[invalid_media]).is_err());
+    }
+
     /// spec gui-agent-task-launch §4：workspace 顺序保持索引序在前，待办独有项目排后；
     /// 按路径去重；hidden 与不存在目录被过滤。
     #[test]
@@ -3484,6 +3839,7 @@ mod tests {
                 kind.to_string(),
                 permission.to_string(),
                 task.to_string(),
+                None,
                 None,
                 None,
             )

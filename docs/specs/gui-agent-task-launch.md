@@ -4,7 +4,8 @@
 > 关联计划：`docs/plans/gui-agent-task-launch.md`
 > 依赖 / 复用：`docs/specs/im-agent-task-launch.md`（LaunchRecord + Terminal.app 启动链路、
 > Agent readiness 判定、workspace 索引）、`docs/specs/todo-whats-next.md`（项目待办）、
-> `docs/specs/menu-bar-tray.md`（GUI Host 统一窗口）。
+> `docs/specs/menu-bar-tray.md`（GUI Host 统一窗口）。Todo 附件随任务启动的后续扩展见
+> `docs/specs/todo-attachments.md`。
 > 平台：仅 macOS（与 IM 版首版一致，依赖 Terminal.app）。
 
 ## 1. 背景与目标

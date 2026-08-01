@@ -279,10 +279,9 @@ fn build_task(
     // Options: todo chips first (spec D5), then the two original actions. Index math in
     // `parse_ask_decision` relies on this order. Labels carry the "Run todo: " display prefix
     // (same as whats-next); the continuation text comes from the raw entry via index, not the label.
-    let prefix = crate::i18n::tr(lang, "whatsNext.todoPrefix");
     let mut options: Vec<OptionItem> = todos
         .iter()
-        .map(|entry| OptionItem::with_todo(format!("{}{}", prefix, entry.text), entry.id.clone()))
+        .map(|entry| OptionItem::with_todo_entry(crate::todos::option_label(lang, entry), entry))
         .collect();
     options.push(OptionItem::new(continue_label, true));
     options.push(OptionItem::new(end_label, false));
@@ -352,6 +351,14 @@ fn parse_ask_decision(stdout: &str, todos: &[crate::todos::TodoEntry]) -> StopDe
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .map(|text| truncate_preserving_layout(text, MAX_INSTRUCTION_CHARS));
+    let files: Vec<String> = answer
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect();
     if let Some(todo) = indices
         .iter()
         .filter_map(Value::as_u64)
@@ -364,7 +371,9 @@ fn parse_ask_decision(stdout: &str, todos: &[crate::todos::TodoEntry]) -> StopDe
             Some(extra) => format!("{}\n\n{}", todo.text, extra),
             None => todo.text.clone(),
         };
-        return StopDecision::Continue(Some(prompt));
+        return StopDecision::Continue(Some(
+            crate::integrations::agent_launch::task_with_attachments(&prompt, &files, &[]),
+        ));
     }
     if indices
         .iter()
@@ -513,6 +522,7 @@ mod tests {
                 created_at_ms: 1,
                 agent_kind: None,
                 auto: false,
+                attachments: Vec::new(),
             },
             crate::todos::TodoEntry {
                 id: "id-2".into(),
@@ -520,6 +530,7 @@ mod tests {
                 created_at_ms: 2,
                 agent_kind: None,
                 auto: false,
+                attachments: Vec::new(),
             },
         ]
     }
@@ -719,6 +730,7 @@ mod tests {
                 created_at_ms: i as u64,
                 agent_kind: None,
                 auto: false,
+                attachments: Vec::new(),
             })
             .collect();
         let task = build_task(

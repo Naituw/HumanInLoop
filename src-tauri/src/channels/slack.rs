@@ -374,6 +374,7 @@ impl MessagingChannel for SlackSession {
                         images,
                         files,
                         todo_ids: Vec::new(),
+                        todo_selections: Vec::new(),
                     });
                 }
                 SlInbound::Message(event) => {
@@ -659,6 +660,7 @@ async fn message_to_answer(
         images,
         files,
         todo_ids: Vec::new(),
+        todo_selections: Vec::new(),
     })
 }
 

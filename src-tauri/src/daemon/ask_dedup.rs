@@ -211,6 +211,8 @@ mod tests {
                     text: "yes".into(),
                     recommended: true,
                     todo_id: None,
+                    todo_text: None,
+                    todo_attachments: Vec::new(),
                 }],
             }],
             is_markdown: true,

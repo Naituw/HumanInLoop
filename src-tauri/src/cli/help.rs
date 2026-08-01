@@ -55,8 +55,8 @@ pub fn help_text(lang: Lang) -> String {
             "  --show-last             Print the full latest completed AskHuman exchange for this Agent session".to_string(),
             "  --todos                 Open the project todos window (preselects current project)".to_string(),
             "  daemon <sub>            Manage the background daemon: status/stop/restart/start/logs (stop/restart drain active requests; add --force to terminate now)".to_string(),
-            "  mcp                     Run as an MCP server over STDIO, exposing 'ask', 'whats_next', 'show_last', and 'todo_add' (for MCP clients)".to_string(),
-            "  todo <sub>              Project todo queue: add [--auto] <text> / list / rm <n> / clear (todos surface as --whats-next choices; --auto ones auto-dispatch)".to_string(),
+            "  mcp                     Run as an MCP server over STDIO, exposing ask, whats_next, show_last, todo_add, todo_list, and todo_update".to_string(),
+            "  todo <sub>              Project todos: add [--auto] [-f path] <text> / list / attach / detach / rm / clear".to_string(),
             "  channel <sub>           Configure IM channels without a GUI (list/set/enable/disable/test/detect; see 'channel help')".to_string(),
             "  agents <sub>            Agent status & integrations (monitor/show/install/uninstall/update; see 'agents help')".to_string(),
             "  config <sub>            Generic config key/value fallback (show/get/set/unset/path; see 'config help')".to_string(),
@@ -92,8 +92,8 @@ pub fn help_text(lang: Lang) -> String {
             "  --show-last             输出当前 Agent 会话最近一次完整 AskHuman 已完成问答".to_string(),
             "  --todos                 启动项目待办窗口（预选当前项目）".to_string(),
             "  daemon <子命令>          管理后台 daemon：status/stop/restart/start/logs（stop/restart 默认等在途请求完结；--force 立即终止）".to_string(),
-            "  mcp                     以 MCP server（STDIO）运行，暴露 'ask'、'whats_next'、'show_last' 与 'todo_add'（面向 MCP 客户端）".to_string(),
-            "  todo <子命令>            项目级待办队列：add [--auto] <text> / list / rm <n> / clear（待办会作为 --whats-next 的选项出现；--auto 的直接自动派发）".to_string(),
+            "  mcp                     以 MCP server（STDIO）运行，暴露 ask、whats_next、show_last、todo_add、todo_list 与 todo_update".to_string(),
+            "  todo <子命令>            项目待办：add [--auto] [-f 路径] <文本> / list / attach / detach / rm / clear".to_string(),
             "  channel <子命令>         无 GUI 配置 IM 渠道（list/set/enable/disable/test/detect；见 'channel help'）".to_string(),
             "  agents <子命令>          Agent 状态与集成（monitor/show/install/uninstall/update；见 'agents help'）".to_string(),
             "  config <子命令>          通用配置键值兜底（show/get/set/unset/path；见 'config help'）".to_string(),
@@ -231,6 +231,9 @@ pub fn agent_help_text(lang: Lang) -> String {
             out.push(format!(
                 "  Add when the user asks or defers a concrete task: {prog} todo add \"<task>\""
             ));
+            out.push(format!(
+                "  Attach files only when explicitly requested: {prog} todo add -f <path> -- \"<task>\"; use todo attach/detach for existing entries."
+            ));
             out.push(String::new());
             out.push("End-of-task handoff (--whats-next):".to_string());
             out.push(format!(
@@ -296,6 +299,9 @@ pub fn agent_help_text(lang: Lang) -> String {
             out.push("  建议写成一个可执行的句子，尽量不超过 100 个字符。".to_string());
             out.push(format!(
                 "  用户要求添加或明确延后具体任务时使用：{prog} todo add \"<任务>\""
+            ));
+            out.push(format!(
+                "  仅在用户明确要求时添加文件：{prog} todo add -f <路径> -- \"<任务>\"；已有条目用 todo attach/detach。"
             ));
             out.push(String::new());
             out.push("任务完成后的交接（--whats-next）:".to_string());

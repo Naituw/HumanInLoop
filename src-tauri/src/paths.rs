@@ -50,6 +50,21 @@ pub fn request_temp_dir(request_id: &str) -> PathBuf {
     std::env::temp_dir().join("askhuman").join(request_id)
 }
 
+/// Managed original files and thumbnail caches owned by project todos.
+pub fn todo_attachments_dir() -> PathBuf {
+    state_dir().join("todo-attachments")
+}
+
+/// Managed files for one todo. Callers must validate `todo_id` as a UUID first.
+pub fn todo_attachment_dir(todo_id: &str) -> PathBuf {
+    todo_attachments_dir().join(todo_id)
+}
+
+/// Request-scoped copies delivered to an Agent. The existing daemon temp GC removes the parent.
+pub fn todo_delivery_dir(request_id: &str) -> PathBuf {
+    request_temp_dir(request_id).join("todo-files")
+}
+
 /// 回复历史文件 `~/.askhuman/history.jsonl`（每行一条 JSON）。
 pub fn history_file() -> PathBuf {
     config_dir().join("history.jsonl")

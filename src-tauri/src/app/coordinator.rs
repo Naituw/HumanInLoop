@@ -241,10 +241,12 @@ impl Coordinator {
     }
 
     /// 投递终态结果：仅首个生效；随后取消其余 Channel 并启动收尾窗口，到时输出并退出。
-    pub fn submit(self: &Arc<Self>, result: ChannelResult) {
+    pub fn submit(self: &Arc<Self>, mut result: ChannelResult) {
         if !self.terminal.try_set(()) {
             return;
         }
+        let request = { self.inner.lock().unwrap().request.clone() };
+        crate::todos::apply_todo_deliveries(&request, &mut result, &self.project);
         let (exiter, pending_count, dequeue_ids) = {
             let inner = self.inner.lock().unwrap();
             // 进入收尾：此后 GUI 拦下关窗退出，独占由协调器主动 `app.exit`。
@@ -527,6 +529,7 @@ mod tests {
                 images: Vec::new(),
                 files: vec!["/tmp/file.txt".into()],
                 todo_ids: Vec::new(),
+                todo_selections: Vec::new(),
             }],
             source_channel_id: "popup".into(),
         };

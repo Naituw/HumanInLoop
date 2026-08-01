@@ -143,6 +143,12 @@ pub struct OptionItem {
     /// 普通选项恒 None（序列化省略，旧端零感知）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub todo_id: Option<String>,
+    /// Raw task text used for Agent output; option labels may contain prefixes/count badges.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo_text: Option<String>,
+    /// Attachment snapshot captured when the todo option was rendered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub todo_attachments: Vec<crate::todo_attachments::TodoAttachmentSnapshot>,
 }
 
 impl OptionItem {
@@ -151,6 +157,8 @@ impl OptionItem {
             text: text.into(),
             recommended,
             todo_id: None,
+            todo_text: None,
+            todo_attachments: Vec::new(),
         }
     }
 
@@ -160,6 +168,18 @@ impl OptionItem {
             text: text.into(),
             recommended: false,
             todo_id: Some(todo_id.into()),
+            todo_text: None,
+            todo_attachments: Vec::new(),
+        }
+    }
+
+    pub fn with_todo_entry(text: impl Into<String>, entry: &crate::todos::TodoEntry) -> Self {
+        Self {
+            text: text.into(),
+            recommended: false,
+            todo_id: Some(entry.id.clone()),
+            todo_text: Some(entry.text.clone()),
+            todo_attachments: entry.attachments.iter().map(|a| a.snapshot()).collect(),
         }
     }
 }
@@ -177,6 +197,10 @@ impl<'de> Deserialize<'de> for OptionItem {
                 recommended: bool,
                 #[serde(default, rename = "todoId")]
                 todo_id: Option<String>,
+                #[serde(default, rename = "todoText")]
+                todo_text: Option<String>,
+                #[serde(default, rename = "todoAttachments")]
+                todo_attachments: Vec<crate::todo_attachments::TodoAttachmentSnapshot>,
             },
         }
         Ok(match Raw::deserialize(deserializer)? {
@@ -184,15 +208,21 @@ impl<'de> Deserialize<'de> for OptionItem {
                 text,
                 recommended: false,
                 todo_id: None,
+                todo_text: None,
+                todo_attachments: Vec::new(),
             },
             Raw::Object {
                 text,
                 recommended,
                 todo_id,
+                todo_text,
+                todo_attachments,
             } => OptionItem {
                 text,
                 recommended,
                 todo_id,
+                todo_text,
+                todo_attachments,
             },
         })
     }
@@ -243,6 +273,17 @@ pub struct QuestionAnswer {
     /// `user_input` 送达；此字段只供 Coordinator 在终态汇聚点按 id 出队。恒为空时序列化省略。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub todo_ids: Vec<String>,
+    /// Popup todo selections with the attachment snapshot visible when the user selected them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub todo_selections: Vec<TodoSelection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TodoSelection {
+    pub id: String,
+    #[serde(default)]
+    pub attachments: Vec<crate::todo_attachments::TodoAttachmentSnapshot>,
 }
 
 impl QuestionAnswer {

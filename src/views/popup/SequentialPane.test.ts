@@ -8,9 +8,26 @@ import { PopupCtxKey, type PopupContext } from "./context";
 function mountPane(whatsNext: boolean) {
   const options = [
     {
-      text: "Run todo: ship the fix",
+      text: "Run todo: ship the fix 【2 attachments】",
       recommended: false,
       todoId: "todo-1",
+      todoText: "ship the fix",
+      todoAttachments: [
+        {
+          id: "attachment-1",
+          name: "one.txt",
+          path: "/tmp/one.txt",
+          sourcePath: "/tmp/one.txt",
+          storage: "reference",
+        },
+        {
+          id: "attachment-2",
+          name: "two.txt",
+          path: "/tmp/two.txt",
+          sourcePath: "/tmp/two.txt",
+          storage: "reference",
+        },
+      ],
     },
     { text: "Review logs", recommended: true },
   ];
@@ -49,6 +66,9 @@ describe("SequentialPane todo badge", () => {
     const rows = wrapper.findAll(".option");
     expect(rows[0].get(".todo-option-badge").text()).toBe("TODO");
     expect(rows[0].text()).toContain("ship the fix");
+    expect(rows[0].get(".todo-attachment-badge").text()).toBe(
+      "【2 attachments】",
+    );
     expect(rows[0].text()).not.toContain("Run todo:");
     expect(rows[1].find(".todo-option-badge").exists()).toBe(false);
   });

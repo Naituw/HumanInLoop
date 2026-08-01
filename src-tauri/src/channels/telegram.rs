@@ -337,6 +337,7 @@ async fn ask_question(
                 images: Vec::new(),
                 files: Vec::new(),
                 todo_ids: Vec::new(),
+                todo_selections: Vec::new(),
             });
         }
     }

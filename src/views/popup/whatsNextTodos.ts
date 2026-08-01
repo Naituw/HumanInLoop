@@ -15,6 +15,7 @@ export function refreshWhatsNextTodos(
   latestTodos: TodoEntry[],
   selectedOptions: string[],
   todoPrefix: string,
+  attachmentBadge: (count: number) => string,
 ): RefreshedWhatsNextTodos {
   const endOption = staticOptions[staticOptions.length - 1];
   if (!endOption) {
@@ -25,11 +26,29 @@ export function refreshWhatsNextTodos(
   const suggestions = staticOptions.slice(0, -1).slice(0, taskSlots);
   const todoSlots = taskSlots - suggestions.length;
   const visibleTodos = latestTodos.slice(0, todoSlots);
-  const todoOptions: OptionItem[] = visibleTodos.map((todo) => ({
-    text: `${todoPrefix}${todo.text}`,
-    recommended: false,
-    todoId: todo.id,
-  }));
+  const todoOptions: OptionItem[] = visibleTodos.map((todo) => {
+    const frozen = currentOptions.find(
+      (option) => option.todoId === todo.id && selectedOptions.includes(option.text),
+    );
+    if (frozen) return frozen;
+    return {
+      text: `${todoPrefix}${todo.text}${
+        todo.attachments?.length
+          ? ` ${attachmentBadge(todo.attachments.length)}`
+          : ""
+      }`,
+      recommended: false,
+      todoId: todo.id,
+      todoText: todo.text,
+      todoAttachments: (todo.attachments ?? []).map((attachment) => ({
+        id: attachment.id,
+        name: attachment.name,
+        path: attachment.path,
+        sourcePath: attachment.sourcePath,
+        storage: attachment.storage,
+      })),
+    };
+  });
   const options = [...suggestions, ...todoOptions, endOption];
 
   const selectedTodoIds = new Set(
@@ -64,6 +83,7 @@ export interface SelectedWhatsNextTodo {
   id: string;
   text: string;
   optionText: string;
+  attachments: NonNullable<OptionItem["todoAttachments"]>;
 }
 
 /** Resolve a locally refreshed TODO selection without relying on the daemon's request snapshot. */
@@ -83,7 +103,15 @@ export function selectedWhatsNextTodo(
     : option.text;
   return {
     id: option.todoId,
-    text: latest?.text ?? fallbackText,
+    text: option.todoText ?? latest?.text ?? fallbackText,
     optionText: option.text,
+    attachments:
+      option.todoAttachments ?? latest?.attachments?.map((attachment) => ({
+        id: attachment.id,
+        name: attachment.name,
+        path: attachment.path,
+        sourcePath: attachment.sourcePath,
+        storage: attachment.storage,
+      })) ?? [],
   };
 }

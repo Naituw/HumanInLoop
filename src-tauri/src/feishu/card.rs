@@ -300,7 +300,14 @@ fn checker_element(
 ) -> Value {
     let display = if opt.todo_id.is_some() {
         let text = opt.text.strip_prefix(todo_text_prefix).unwrap_or(&opt.text);
-        format!("{}{}", todo_badge_prefix, text)
+        let (body, attachment_badge) = crate::todos::split_attachment_badge(text);
+        match attachment_badge {
+            Some(badge) => format!(
+                "{}{} <font color='grey'>{}</font>",
+                todo_badge_prefix, body, badge
+            ),
+            None => format!("{}{}", todo_badge_prefix, body),
+        }
     } else if opt.recommended {
         format!("{}{}", recommended_prefix, opt.text)
     } else {
@@ -742,7 +749,8 @@ fn select_option_markdown(opt: &crate::select::SelectOption) -> String {
     if let Some(seq) = opt.seq {
         line1.push_str(&format!("**[{}]** ", seq));
     }
-    line1.push_str(&opt.primary);
+    let (primary, attachment_badge) = crate::todos::split_attachment_badge(&opt.primary);
+    line1.push_str(primary);
     if let Some(badge) = &opt.badge {
         line1.push(' ');
         line1.push_str(badge);
@@ -750,6 +758,11 @@ fn select_option_markdown(opt: &crate::select::SelectOption) -> String {
     if let Some(elapsed) = &opt.elapsed {
         line1.push(' ');
         line1.push_str(elapsed);
+    }
+    if let Some(attachment_badge) = attachment_badge {
+        line1.push_str(" <font color='grey'>");
+        line1.push_str(attachment_badge);
+        line1.push_str("</font>");
     }
     match &opt.secondary {
         Some(sec) => format!("{}\n<font color='grey'>{}</font>", line1, sec),
@@ -1354,6 +1367,45 @@ mod tests {
     }
 
     #[test]
+    fn todo_attachment_badge_uses_grey_rich_text() {
+        let mut option = OptionItem::with_todo("执行待办：修复登录 【1 个附件】", "todo-1");
+        option.todo_attachments = vec![crate::todo_attachments::TodoAttachmentSnapshot {
+            id: "attachment-1".into(),
+            name: "brief.md".into(),
+            path: "/tmp/brief.md".into(),
+            source_path: "/tmp/brief.md".into(),
+            storage: crate::todo_attachments::TodoAttachmentStorage::Reference,
+        }];
+        let card = build_question_card_with_todo(
+            "T",
+            "Q",
+            &[option],
+            true,
+            false,
+            false,
+            &[],
+            "ph",
+            "提交",
+            "<font color='green'>【👍推荐】</font> ",
+            "执行待办：",
+            "<font color='orange'>【TODO】</font> ",
+        );
+        let form = form_of(&card);
+        let content = form["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|element| element["tag"] == "checker")
+            .unwrap()["text"]["content"]
+            .as_str()
+            .unwrap();
+        assert_eq!(
+            content,
+            "<font color='orange'>【TODO】</font> 修复登录 <font color='grey'>【1 个附件】</font>"
+        );
+    }
+
+    #[test]
     fn parse_toggle_reads_index() {
         let event = json!({
             "operator": { "open_id": "ou_1" },
@@ -1796,6 +1848,35 @@ mod tests {
             .unwrap();
         assert!(md1.contains("<font color='grey'>●</font>"));
         assert!(!md1.contains("关注中"));
+    }
+
+    #[test]
+    fn select_card_renders_todo_attachment_badge_in_grey() {
+        let view = crate::select::SelectView {
+            title: "选择任务来源".into(),
+            options: vec![crate::select::SelectOption {
+                id: "todo:1".into(),
+                dot: None,
+                seq: Some(1),
+                primary: "执行待办：修复登录 【2 个附件】".into(),
+                badge: None,
+                elapsed: None,
+                secondary: None,
+            }],
+            truncated_note: None,
+            action: crate::select::SelectAction::TaskInputSource,
+        };
+        let card = build_select_card(&view);
+        let row = card["body"]["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|element| element["tag"] == "column_set")
+            .unwrap();
+        let markdown = row["columns"][0]["elements"][0]["content"]
+            .as_str()
+            .unwrap();
+        assert!(markdown.contains("执行待办：修复登录 <font color='grey'>【2 个附件】</font>"));
     }
 
     #[test]

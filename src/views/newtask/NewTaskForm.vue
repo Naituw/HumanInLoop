@@ -97,6 +97,7 @@ const selectedTodo = ref<{
   text: string;
   auto: boolean;
   project: string;
+  attachments: NonNullable<TodoEntry["attachments"]>;
 } | null>(null);
 /** 选中的待办已被别处删除（仍可按快照启动，仅提示）。 */
 const todoMissing = ref(false);
@@ -136,6 +137,7 @@ function selectTodo(entry: TodoEntry): void {
     text: entry.text,
     auto: entry.auto ?? false,
     project: projectKey.value,
+    attachments: (entry.attachments ?? []).map((attachment) => ({ ...attachment })),
   };
   todoMissing.value = false;
 }
@@ -236,6 +238,14 @@ async function launch(): Promise<void> {
       task: finalTask.value,
       todoProject: selectedTodo.value?.project ?? null,
       todoId: selectedTodo.value?.id ?? null,
+      todoAttachments:
+        selectedTodo.value?.attachments.map((attachment) => ({
+          id: attachment.id,
+          name: attachment.name,
+          path: attachment.path,
+          sourcePath: attachment.sourcePath,
+          storage: attachment.storage,
+        })) ?? [],
     });
   } catch (err) {
     launchError.value = t("newTask.launchFailed", { e: String(err) });
@@ -439,6 +449,9 @@ onBeforeUnmount(() => {
                 <!-- 待办前缀：与飞书/钉钉任务卡的琥珀色【TODO】标记同语义（IM D29）。 -->
                 <span class="nt-todo-tag">{{ t("newTask.todoTag") }}</span
                 ><span v-if="e.auto" class="nt-auto">⚡</span>{{ e.text }}
+                <span v-if="e.attachments?.length" class="nt-file-count">
+                  {{ t("common.attachmentBadge", { n: e.attachments.length }) }}
+                </span>
               </span>
             </button>
             <!-- 快照兜底：选中的待办已被删除（不再出现在列表）仍显示为选中项。 -->
@@ -452,8 +465,27 @@ onBeforeUnmount(() => {
                 <span class="nt-todo-tag">{{ t("newTask.todoTag") }}</span
                 ><span v-if="selectedTodo.auto" class="nt-auto">⚡</span
                 >{{ selectedTodo.text }}
+                <span
+                  v-if="selectedTodo.attachments?.length"
+                  class="nt-file-count"
+                >
+                  {{ t("common.attachmentBadge", { n: selectedTodo.attachments.length }) }}
+                </span>
               </span>
             </button>
+          </div>
+          <div
+            v-if="selectedTodo?.attachments.length"
+            class="nt-selected-files"
+          >
+            <span
+              v-for="attachment in selectedTodo.attachments"
+              :key="attachment.id"
+              class="nt-selected-file"
+              :title="attachment.sourcePath"
+            >
+              📎 {{ attachment.name }}
+            </span>
           </div>
           <p v-if="todoMissing" class="nt-note">{{ t("newTask.todoMissing") }}</p>
           <label class="nt-sublabel" for="nt-input">
@@ -769,6 +801,29 @@ onBeforeUnmount(() => {
   color: #ff9f0a;
   font-weight: 600;
   margin-right: 2px;
+}
+.nt-file-count {
+  margin-left: 6px;
+  color: var(--text-secondary);
+  font-size: inherit;
+  white-space: nowrap;
+}
+.nt-selected-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+.nt-selected-file {
+  max-width: 220px;
+  overflow: hidden;
+  padding: 3px 7px;
+  border: var(--hairline) solid var(--border);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .nt-input {
   display: block;

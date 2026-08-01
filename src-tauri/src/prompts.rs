@@ -351,6 +351,8 @@ mod tests {
         assert!(cli.contains("defer a concrete task or suggestion until later"));
         assert!(cli.contains("todo add \"<concise task>\""));
         assert!(cli.contains("own work plan or an unaccepted suggestion"));
+        assert!(!cli.contains("todo attach"));
+        assert!(!cli.contains("todo detach"));
 
         for prompt in [mcp_reference(), grok_skill_body()] {
             assert!(prompt.contains("defer a concrete task or suggestion until later"));
@@ -358,6 +360,9 @@ mod tests {
             assert!(prompt.contains("own work plan or an unaccepted suggestion"));
             // MCP path must not direct agents to shell todo add.
             assert!(!prompt.contains("AskHuman todo add"));
+            assert!(!prompt.contains("todo_list"));
+            assert!(!prompt.contains("todo_update"));
+            assert!(!prompt.contains("pass `files` when adding"));
         }
     }
 

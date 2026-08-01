@@ -52,6 +52,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 notify = "8"
 # 从窗口向系统发起原生文件拖拽（-f 附件胶囊可拖到其它应用打开）。
 tauri-plugin-drag = "2"
+# Todo 编辑器使用系统文件选择器选择附件。
+tauri-plugin-dialog = "2"
 # macOS 26+ Liquid Glass 整窗背景（NSGlassEffectView）；旧系统自动回退到 NSVisualEffectView；
 # 非 macOS 为安全空操作。
 tauri-plugin-liquid-glass = "0.1"

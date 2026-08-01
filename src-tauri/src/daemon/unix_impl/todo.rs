@@ -1760,6 +1760,7 @@ mod tests {
                 created_at_ms: 1,
                 agent_kind: None,
                 auto: false,
+                attachments: Vec::new(),
             }],
         )]);
 

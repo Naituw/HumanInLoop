@@ -351,6 +351,7 @@ impl MessagingChannel for DingTalkSession {
                                 images,
                                 files,
                                 todo_ids: Vec::new(),
+                                todo_selections: Vec::new(),
                             });
                         }
                         // 非本卡片（理论上不会路由到此）：回空包让 Router 别空等，继续。
@@ -649,6 +650,7 @@ async fn message_to_answer(
                 images: Vec::new(),
                 files: Vec::new(),
                 todo_ids: Vec::new(),
+                todo_selections: Vec::new(),
             })
         }
         // 严格模式禁附件：图片/文件回复忽略（继续等待编号选择）。
@@ -665,6 +667,7 @@ async fn message_to_answer(
                     images: vec![img],
                     files: Vec::new(),
                     todo_ids: Vec::new(),
+                    todo_selections: Vec::new(),
                 }),
                 Err(e) => {
                     let lang = Lang::current();
@@ -694,6 +697,7 @@ async fn message_to_answer(
                     images: Vec::new(),
                     files: vec![path],
                     todo_ids: Vec::new(),
+                    todo_selections: Vec::new(),
                 }),
                 Err(e) => {
                     let lang = Lang::current();

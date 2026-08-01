@@ -188,6 +188,31 @@ export interface OptionItem {
   recommended: boolean;
   /** whats-next / Stop 卡待办 chip 对应的待办条目 id（spec todo-whats-next D2/D5）。 */
   todoId?: string | null;
+  todoText?: string | null;
+  todoAttachments?: TodoAttachmentSnapshot[];
+}
+
+export type TodoAttachmentStorage = "managed" | "reference";
+
+/** One attachment owned by or referenced from a project todo. */
+export interface TodoAttachmentView {
+  id: string;
+  name: string;
+  size: number;
+  isImage: boolean;
+  sourcePath: string;
+  /** Effective path opened or delivered to an Agent. */
+  path: string;
+  storage: TodoAttachmentStorage;
+  available: boolean;
+}
+
+export interface TodoAttachmentSnapshot {
+  id: string;
+  name: string;
+  path: string;
+  sourcePath: string;
+  storage: TodoAttachmentStorage;
 }
 
 /** 项目级待办条目（spec todo-whats-next D1）。 */
@@ -199,6 +224,7 @@ export interface TodoEntry {
   agentKind?: string | null;
   /** 自动执行：whats-next 时不提问直接派发（后端 auto=false 时省略该字段）。 */
   auto?: boolean;
+  attachments?: TodoAttachmentView[];
 }
 
 /** 已执行的历史待办（仅执行出队进历史）。 */
@@ -209,6 +235,7 @@ export interface TodoDoneEntry {
   /** Preserved Agent origin from the pending todo. */
   agentKind?: string | null;
   doneAtMs: number;
+  attachments?: TodoAttachmentView[];
 }
 
 /** 待办窗口项目选择器候选（spec todo-whats-next D9）。 */
@@ -328,6 +355,10 @@ export interface QuestionAnswer {
   files: string[];
   /** 折叠待办区选中的待办条目 id（spec todo-whats-next D7）：文本已并入 userInput，id 供后端出队。 */
   todoIds?: string[];
+  todoSelections?: Array<{
+    id: string;
+    attachments: TodoAttachmentSnapshot[];
+  }>;
 }
 
 export interface PopupSubmission {

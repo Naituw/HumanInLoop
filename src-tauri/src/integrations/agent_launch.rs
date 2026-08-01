@@ -57,6 +57,12 @@ pub struct LaunchRecord {
     pub source: LaunchSource,
     pub task: String,
     pub task_sha256: String,
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub payload_sha256: String,
     pub cwd: String,
     pub kind: AgentKind,
     pub permission: LaunchPermission,
@@ -202,12 +208,36 @@ pub fn create_record(
     permission: LaunchPermission,
     task: &str,
 ) -> Result<LaunchRecord> {
+    create_record_with_files(source, cwd, kind, permission, task, &[], &[])
+}
+
+pub fn create_record_with_files(
+    source: LaunchSource,
+    cwd: &Path,
+    kind: AgentKind,
+    permission: LaunchPermission,
+    task: &str,
+    files: &[String],
+    warnings: &[String],
+) -> Result<LaunchRecord> {
     let task = task.trim();
     if task.is_empty() {
         return Err(anyhow!("task must not be empty"));
     }
     if task.chars().count() > MAX_TASK_CHARS {
         return Err(anyhow!("task exceeds {MAX_TASK_CHARS} characters"));
+    }
+    if files.len() > crate::todo_attachments::MAX_ATTACHMENTS_PER_TODO {
+        return Err(anyhow!("too many task attachments"));
+    }
+    if files
+        .iter()
+        .chain(warnings.iter())
+        .any(|value| value.contains(['\0', '\r']))
+    {
+        return Err(anyhow!(
+            "attachment payload contains unsupported control characters"
+        ));
     }
     let cwd = fs::canonicalize(cwd).context("failed to resolve workspace")?;
     if !cwd.is_dir() {
@@ -232,6 +262,9 @@ pub fn create_record(
         source,
         task: task.to_string(),
         task_sha256: sha256(task.as_bytes()),
+        files: files.to_vec(),
+        warnings: warnings.to_vec(),
+        payload_sha256: payload_sha256(task, files, warnings),
         cwd: cwd.to_string_lossy().to_string(),
         kind,
         permission,
@@ -288,7 +321,11 @@ pub fn run_helper(args: &[String]) -> Result<()> {
     if record.permission == LaunchPermission::Yolo {
         command.arg(yolo_flag(record.kind));
     }
-    command.arg(&record.task);
+    command.arg(task_with_attachments(
+        &record.task,
+        &record.files,
+        &record.warnings,
+    ));
     use std::os::unix::process::CommandExt;
     Err(command.exec()).context("failed to start Agent")
 }
@@ -322,6 +359,11 @@ fn validate_claim(record: &LaunchRecord, token: &str) -> Result<()> {
     if sha256(record.task.as_bytes()) != record.task_sha256 {
         return Err(anyhow!("launch record task hash mismatch"));
     }
+    if !record.payload_sha256.is_empty()
+        && payload_sha256(&record.task, &record.files, &record.warnings) != record.payload_sha256
+    {
+        return Err(anyhow!("launch record attachment payload hash mismatch"));
+    }
     let cwd = fs::canonicalize(&record.cwd).context("workspace is no longer available")?;
     if cwd.to_string_lossy() != record.cwd {
         return Err(anyhow!("workspace path changed after launch was requested"));
@@ -340,6 +382,40 @@ fn validate_claim(record: &LaunchRecord, token: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn payload_sha256(task: &str, files: &[String], warnings: &[String]) -> String {
+    let payload = serde_json::to_vec(&(task, files, warnings)).unwrap_or_default();
+    sha256(&payload)
+}
+
+pub fn task_with_attachments(task: &str, files: &[String], warnings: &[String]) -> String {
+    let mut output = task.to_string();
+    let available: Vec<&String> = files
+        .iter()
+        .filter(|path| Path::new(path.as_str()).is_file())
+        .collect();
+    let mut runtime_warnings = warnings.to_vec();
+    for path in files {
+        if !Path::new(path).is_file() {
+            runtime_warnings.push(format!("Attachment became unavailable: {path}"));
+        }
+    }
+    if !available.is_empty() {
+        output.push_str("\n\nAttachments (local file paths):\n");
+        for path in available {
+            let quoted = serde_json::to_string(path).unwrap_or_else(|_| format!("\"{path}\""));
+            output.push_str("- ");
+            output.push_str(&quoted);
+            output.push('\n');
+        }
+        output.push_str("Open and use these files as inputs for this task.");
+    }
+    if let Some(block) = crate::todo_attachments::warning_block(&runtime_warnings) {
+        output.push_str("\n\n");
+        output.push_str(&block);
+    }
+    output
 }
 
 fn resolve_login_shell_executable(name: &str) -> Option<String> {
@@ -533,6 +609,26 @@ mod tests {
             sha256(b"hello"),
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
+    }
+
+    #[test]
+    fn attachment_prompt_quotes_paths_and_reports_files_that_disappear() {
+        let temp = tempfile::tempdir().unwrap();
+        let existing = temp.path().join("a file.md");
+        fs::write(&existing, b"x").unwrap();
+        let missing = temp.path().join("gone.md");
+        let prompt = task_with_attachments(
+            "review",
+            &[
+                existing.to_string_lossy().into_owned(),
+                missing.to_string_lossy().into_owned(),
+            ],
+            &["Earlier warning".into()],
+        );
+        assert!(prompt.contains("Attachments (local file paths):"));
+        assert!(prompt.contains(&serde_json::to_string(&existing).unwrap()));
+        assert!(prompt.contains("Earlier warning"));
+        assert!(prompt.contains("Attachment became unavailable"));
     }
 
     #[test]

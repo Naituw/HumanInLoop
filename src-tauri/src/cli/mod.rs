@@ -495,11 +495,20 @@ fn try_whats_next_auto(project: &str, message: &crate::models::MessagePrompt, la
     let Some(entry) = crate::todos::first_auto(project) else {
         return false;
     };
+    let delivery_request_id = uuid::Uuid::new_v4().to_string();
+    let expected: Vec<_> = entry.attachments.iter().map(|a| a.snapshot()).collect();
+    let delivery = crate::todos::prepare_delivery_consistent(
+        project,
+        &entry.id,
+        &expected,
+        &delivery_request_id,
+    );
     // 出队即历史记录点（take 落待办执行历史）；被并发拿走 → 回落正常提问。
     let Some(entry) = crate::todos::take(project, std::slice::from_ref(&entry.id))
         .into_iter()
         .next()
     else {
+        crate::todo_attachments::cleanup_delivery(&delivery_request_id);
         return false;
     };
     let limit = crate::config::AppConfig::load_without_secrets()
@@ -533,16 +542,20 @@ fn try_whats_next_auto(project: &str, message: &crate::models::MessagePrompt, la
                     selected_options: vec![format!("{}{}", prefix, entry.text)],
                     user_input: None,
                     images: Vec::new(),
-                    files: Vec::new(),
+                    files: delivery.files.clone(),
                 }],
             },
             limit,
         );
     }
     // 与人工路径同构（第 19 轮定案：复用 Ask 标准区块）：派活 → `[user_input]` + 任务文本。
+    let task = match crate::todo_attachments::warning_block(&delivery.warnings) {
+        Some(warning) => format!("{}\n\n{warning}", entry.text),
+        None => entry.text.clone(),
+    };
     print_line(&crate::cli::output::whats_next_output(
-        &crate::cli::output::WhatsNextReply::Task(entry.text.clone()),
-        &[],
+        &crate::cli::output::WhatsNextReply::Task(task),
+        &delivery.files,
         lang,
     ));
     true
@@ -640,7 +653,6 @@ fn whats_next_question_from_entries(
     entries: Vec<crate::todos::TodoEntry>,
     lang: Lang,
 ) -> crate::models::Question {
-    let prefix = i18n::tr(lang, "whatsNext.todoPrefix");
     let total = entries.len();
     let task_slots = WHATS_NEXT_MAX_OPTIONS - 1;
     let mut options: Vec<crate::models::OptionItem> = suggestions
@@ -652,7 +664,7 @@ fn whats_next_question_from_entries(
     let todo_slots = task_slots - options.len();
     let shown_todos = total.min(todo_slots);
     options.extend(entries.into_iter().take(todo_slots).map(|entry| {
-        crate::models::OptionItem::with_todo(format!("{}{}", prefix, entry.text), entry.id)
+        crate::models::OptionItem::with_todo_entry(crate::todos::option_label(lang, &entry), &entry)
     }));
     options.push(crate::models::OptionItem::new(
         i18n::tr(lang, "whatsNext.endOption"),
@@ -784,6 +796,7 @@ mod tests {
             created_at_ms: index as u64,
             agent_kind: None,
             auto: false,
+            attachments: Vec::new(),
         }
     }
 
