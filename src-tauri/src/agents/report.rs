@@ -95,10 +95,10 @@ pub fn run(args: &[String]) {
         interject_poll,
     };
     if interject_poll {
-        if let crate::client::InterjectPollOutcome::Deny(text) =
+        if let crate::client::InterjectPollOutcome::Deny { text, attachments } =
             crate::client::report_agent_event_with_poll(msg)
         {
-            print_deny_json(intended, &text);
+            print_deny_json(intended, &text, &attachments);
         }
     } else {
         crate::client::report_agent_event(msg);
@@ -149,8 +149,8 @@ fn initial_prompt(value: Option<&Value>) -> Option<&str> {
 
 /// 输出各家 PreToolUse 的 deny JSON（stdout，随后调用方 exit 0；spec agent-interject D3）。
 /// 消息经 `prompts::interject_deny_reason` 包装（`[USER INTERJECTION]` 协议文案）。
-fn print_deny_json(kind: AgentKind, message: &str) {
-    let json = deny_json(kind, message);
+fn print_deny_json(kind: AgentKind, message: &str, attachments: &[crate::models::FileAttachment]) {
+    let json = deny_json(kind, message, attachments);
     println!("{json}");
 }
 
@@ -160,8 +160,12 @@ fn print_deny_json(kind: AgentKind, message: &str) {
 /// 取自 `user_message`**（`agent_message` 仅透传 protobuf、未见进模型的消费点，与官方文档
 /// 「fed back to the agent」不符）；两字段都放完整协议文本，兼容未来 Cursor 按文档语义改用
 /// `agent_message`。代价：UI 拦截提示显示整段协议文本（内含用户原话），可接受。
-fn deny_json(kind: AgentKind, message: &str) -> Value {
-    let reason = crate::prompts::interject_deny_reason(message);
+fn deny_json(
+    kind: AgentKind,
+    message: &str,
+    attachments: &[crate::models::FileAttachment],
+) -> Value {
+    let reason = crate::prompts::interject_deny_reason(message, attachments);
     match kind {
         AgentKind::Cursor => serde_json::json!({
             "permission": "deny",
@@ -647,7 +651,7 @@ mod tests {
     #[test]
     fn deny_json_claude_codex_shape() {
         for kind in [AgentKind::Claude, AgentKind::Codex] {
-            let v = deny_json(kind, "改用方案 B");
+            let v = deny_json(kind, "改用方案 B", &[]);
             let out = &v["hookSpecificOutput"];
             assert_eq!(out["hookEventName"], "PreToolUse");
             assert_eq!(out["permissionDecision"], "deny");
@@ -660,7 +664,7 @@ mod tests {
 
     #[test]
     fn deny_json_cursor_shape() {
-        let v = deny_json(AgentKind::Cursor, "停一下");
+        let v = deny_json(AgentKind::Cursor, "停一下", &[]);
         assert_eq!(v["permission"], "deny");
         // live 实测：Cursor 喂回模型的拒绝理由取自 user_message（agent_message 未见消费）——
         // 两字段须同为完整协议文本，缺一即丢话。

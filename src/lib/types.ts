@@ -601,6 +601,18 @@ export interface InterjectInit {
   text: string;
   /** 待送达条数。 */
   entries: number;
+  /** Flattened pending attachment references. */
+  attachments: InterjectAttachment[];
+}
+
+export interface InterjectAttachment extends FileAttachment {
+  available: boolean;
+}
+
+export interface InterjectPending {
+  text: string;
+  entries: number;
+  attachments: InterjectAttachment[];
 }
 
 export type UiLanguage = "auto" | "en" | "zh";

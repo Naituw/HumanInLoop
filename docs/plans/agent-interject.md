@@ -8,18 +8,22 @@
 **目标**：hook 三态协议端到端可用（无 UI，可用临时 CLI/单测驱动）。
 
 1. **`src-tauri/src/agents/interject.rs`（新）**：`InterjectStore`
-   - `HashMap<session_id, InterjectEntry { entries: Vec<String>, composer: Option<ComposerHandle>, waiters: Vec<oneshot::Sender<WaitOutcome>> }>`；
-   - 操作：`replace(session, text)`（弹窗提交，整体覆盖）/ `append(session, text)`（IM）/
-     `clear(session)`（撤回）/ `take(session) -> Option<String>`（原子出队：entries 按空行拼接后清空，
+   - `HashMap<session_id, Entry { entries: Vec<InterjectEntry { text, attachments }>, composer_open, waiters }>`；
+   - 操作：`submit(session, text, attachments)`（弹窗提交，整体覆盖）/
+     `append(session, text, attachments)`（控制台/IM）/ `clear(session)`（撤回）/
+     `poll(session) -> PollOutcome`（原子出队：非空文本按空行拼接、附件路径展平，
      并发 waiter 只有一个拿到）/ `composer_open/close(session)` / `full_text(session)`（预填）；
-   - 提交时唤醒该 session 全部 waiter：一个 `Message(text)`、其余 `Release`；取消/关闭唤醒全部 `Release`；
-   - 持久化 `~/.askhuman/state/interject.json`（`paths.rs` 加 `interject_file()`）：只存 entries，
+   - 提交时唤醒该 session 全部 waiter：一个 `Message(delivery)`、其余 `Release`；取消/关闭唤醒全部
+     `Release`；socket 写失败用原始 delivery 回队，保留条目边界与附件；
+   - 持久化 `~/.askhuman/state/interject.json`（`paths.rs` 加 `interject_file()`）：只存 entries；旧版
+     `sessions: HashMap<session_id, Vec<String>>` 保留，新增按条目对齐的可选附件 map，
      **仅在变更时**原子写（复用 watch.rs 的写法），daemon 启动 `load()` 一次；会话 ended 时清理（D8）。
 2. **IPC（`src-tauri/src/ipc/mod.rs`）**：
    - `ClientMsg::AgentEvent` 增 `#[serde(default)] interject_poll: bool`；
-   - `ClientMsg` 新增：`InterjectComposer { session_id, open: bool }`（宿主 composer 窗口连接发送；
-     连接断开视为 close）/ `InterjectSubmit { session_id, text }` / `InterjectClear { session_id }`；
-   - `ServerMsg` 新增：`InterjectDecision { decision: "none"|"message"|"hold"|"release", text }`
+   - `ClientMsg` 新增：`InterjectComposer { session_id }`（宿主 composer 窗口连接发送；连接断开视为
+     close）/ `InterjectSubmit { session_id, text, attachments }` /
+     `InterjectAppend { session_id, text, attachments }` / `InterjectClear { session_id }`；
+   - `ServerMsg` 新增：`InterjectDecision { action: "none"|"message"|"hold"|"release", text, attachments }`
      （首帧 none/message/hold；hold 后二帧 message/release）；
    - `AgentsState` 快照每条记录注入 `pendingInterject: bool`（AgentsView 徽标用）。
 3. **daemon（`daemon/mod.rs`）**：
@@ -39,7 +43,7 @@
    stdin 判定为 **pre**（复用 `extract_tool` 的 pre/post 判定）时，`AgentEvent.interject_poll=true`；
    发送后读首帧（**300ms 超时**，超时/断连/旧 daemon 无回包 → 直接退出＝allow，D4）：
    - `none` → 退出（无输出）；
-   - `message` → 按家族输出 deny JSON（格式与 `[USER INTERJECTION]` 包装文案见 spec D3，
+   - `message` → 按家族输出 deny JSON（格式与 `[USER INTERJECTION]` 文本及附件路径块见 spec D3，
      `prompts.rs` 单一来源；Cursor 另带本地化 `user_message`）后 exit 0；
    - `hold` → 无限期读二帧（受 hook 自身 timeout=86400 兜底）：`message` → deny JSON；`release` → 退出。
    - 注意：现有 `report_agent_event` 即发即走，需为 poll 场景改为「发送 + 读回」的变体，仍在
@@ -73,9 +77,11 @@
      `full_text`）+「发送 / 取消」+ 待送达提示；挂载即经 IPC 向 daemon 登记 composer_open、
      卸载/取消登记 close；⌘↵ 提交、Esc 取消；
    - `commands.rs` + `lib/ipc.ts`：`interject_init(session)`（预填文本 + agent 摘要 + 主题/语言）、
-     `interject_submit(session, text)`、`interject_cancel(session)`、`interject_clear(session)`、
+     `interject_submit(session, text, file_paths, pasted_images)`、`interject_cancel(session)`、`interject_clear(session)`、
      `open_interject(session)`（AgentsView 按钮 → host_open 路由）。命令内部经 daemon 连接实现，
      该连接生命周期与窗口一致（断开＝composer 关闭，D7）。
+   - composer 与 Agent 控制台支持选择/拖入源文件、粘贴图片和仅附件发送；源文件只记录绝对路径，
+     剪贴板图片写到问答弹窗共用的 24 小时请求临时目录，不建立长期托管目录。IM 入口保持纯文本。
 4. **AgentsView**：非 grok、非 ended 卡片加「发送消息」按钮（`open_interject`）；
    `pendingInterject` 徽标（「待送达」）+ 撤回按钮（行内二次确认，`interject_clear`）。
 5. **i18n**：zh/en 全量新键（按钮、窗口标题、占位、徽标、撤回确认、托盘项）。

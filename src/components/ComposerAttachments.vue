@@ -11,6 +11,7 @@ defineProps<{
     key?: string | number;
     path: string;
     name: string;
+    available?: boolean;
   }>;
 }>();
 
@@ -53,9 +54,16 @@ function setImageContainerRef(element: unknown): void {
         v-for="(file, index) in files"
         :key="file.key ?? file.path"
         class="reply-file"
-        :title="file.path"
+        :class="{ unavailable: file.available === false }"
+        :title="file.available === false ? `${file.path} · ${t('interject.attachmentUnavailable')}` : file.path"
       >
-        <span class="rf-icon" aria-hidden="true">📄</span>
+        <span v-if="file.available === false" class="rf-warning" aria-hidden="true">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor">
+            <path d="M8 2.2 14 13H2L8 2.2Z" />
+            <path d="M8 5.7v3.5M8 11.5h.01" />
+          </svg>
+        </span>
+        <span v-else class="rf-icon" aria-hidden="true">📄</span>
         <span class="rf-name">{{ file.name }}</span>
         <button
           class="rf-remove"

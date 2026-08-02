@@ -1,9 +1,13 @@
 <script setup lang="ts">
 // 交互区插槽（spec gui-agent-console R1/C3/C9）：按优先级切换——插话输入（工作中且非 Grok）/
 // Grok 提示 / 空闲提示（+ 新建任务快捷入口）/ 已结束提示。未来「提问卡」为最高优先级内容。
-import { ref, watch } from "vue";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { AgentRecord } from "../../lib/types";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import type { UnlistenFn } from "@tauri-apps/api/event";
+import type { AgentRecord, ImageAttachment } from "../../lib/types";
+import ComposerAttachments from "../../components/ComposerAttachments.vue";
+import { useInterjectAttachments } from "../interject/useInterjectAttachments";
 
 const { t } = useI18n();
 
@@ -14,22 +18,26 @@ const props = defineProps<{
   /** 待送达全文（interject_peek；空=无待送达）。 */
   pendingText: string;
   pendingCount: number;
+  pendingAttachmentCount: number;
   newTaskSupported: boolean;
 }>();
 
 const emit = defineEmits<{
-  send: [text: string];
+  send: [text: string, filePaths: string[], pastedImages: ImageAttachment[]];
   revoke: [];
   newTask: [projectPath: string];
 }>();
 
 const draft = ref("");
+const attachments = useInterjectAttachments();
+let unlistenDrop: UnlistenFn | null = null;
 
 // 切换会话时清空草稿（简单直接；控制台一次只对一个会话说话）。
 watch(
   () => props.record.sessionId,
   () => {
     draft.value = "";
+    attachments.reset();
   }
 );
 
@@ -39,9 +47,10 @@ function canSend(): boolean {
 
 function send(): void {
   const text = draft.value.trim();
-  if (!text || !canSend()) return;
-  emit("send", text);
+  if ((!text && !attachments.hasAttachments.value) || !canSend()) return;
+  emit("send", text, attachments.filePaths.value, attachments.pastedImages.value);
   draft.value = "";
+  attachments.reset();
 }
 
 function onKeydown(e: KeyboardEvent): void {
@@ -58,6 +67,31 @@ function onKeydown(e: KeyboardEvent): void {
     send();
   }
 }
+
+function isComposerDrop(x: number, y: number): boolean {
+  const dpr = window.devicePixelRatio || 1;
+  for (const [cx, cy] of [
+    [x, y],
+    [x / dpr, y / dpr],
+  ]) {
+    if (document.elementFromPoint(cx, cy)?.closest("[data-interject-drop]")) return true;
+  }
+  return false;
+}
+
+onMounted(async () => {
+  unlistenDrop = await getCurrentWebview().onDragDropEvent((event) => {
+    if (
+      event.payload.type === "drop" &&
+      canSend() &&
+      isComposerDrop(event.payload.position.x, event.payload.position.y)
+    ) {
+      attachments.appendPaths(event.payload.paths);
+    }
+  });
+});
+
+onBeforeUnmount(() => unlistenDrop?.());
 </script>
 
 <template>
@@ -65,20 +99,65 @@ function onKeydown(e: KeyboardEvent): void {
     <template v-if="canSend()">
       <div v-if="pendingCount > 0" class="ij-pending">
         <span class="pending-badge">{{ t("console.pendingCount", { n: pendingCount }) }}</span>
+        <span v-if="pendingAttachmentCount" class="pending-attachments">
+          {{ t("console.pendingAttachments", { n: pendingAttachmentCount }) }}
+        </span>
         <span class="pending-text" :title="pendingText">{{ pendingText }}</span>
         <button class="pending-revoke" @click="emit('revoke')">{{ t("console.revoke") }}</button>
       </div>
-      <div class="composer">
-        <textarea
-          v-model="draft"
-          class="composer-input"
-          rows="2"
-          :placeholder="t('console.composerPlaceholder')"
-          @keydown="onKeydown"
-        />
-        <button class="btn primary send" :disabled="!draft.trim()" @click="send">
-          {{ t("console.send") }} <span class="kbd">{{ submitBareEnter ? "↵" : "⌘↵" }}</span>
-        </button>
+      <div class="composer-stack" data-interject-drop @paste="attachments.onPaste">
+        <div class="answer-composer message-composer">
+          <div class="input-wrap">
+            <textarea
+              v-model="draft"
+              class="textarea"
+              rows="2"
+              :placeholder="t('console.composerPlaceholder')"
+              @keydown="onKeydown"
+            />
+            <button
+              class="img-btn"
+              type="button"
+              :title="t('interject.addAttachment')"
+              :aria-label="t('interject.addAttachment')"
+              :disabled="attachments.busy.value"
+              @mousedown.prevent
+              @click="attachments.chooseFiles"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.7"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <circle cx="8.5" cy="8.5" r="1.6" />
+                <path d="M21 15l-5-5L5 21" />
+              </svg>
+            </button>
+          </div>
+          <ComposerAttachments
+            :images="attachments.composerImages.value"
+            :files="attachments.composerFiles.value"
+            @remove-image="attachments.removeComposerImage"
+            @remove-file="attachments.removeComposerFile"
+          />
+          <div class="composer-actions">
+            <button
+              class="btn primary send"
+              :disabled="(!draft.trim() && !attachments.hasAttachments.value) || attachments.busy.value"
+              @click="send"
+            >
+              {{ t("console.send") }} <span class="kbd">{{ submitBareEnter ? "↵" : "⌘↵" }}</span>
+            </button>
+          </div>
+        </div>
+        <p v-if="attachments.error.value" class="attachment-error" role="alert">
+          {{ attachments.error.value }}
+        </p>
       </div>
     </template>
     <p v-else-if="record.state === 'working' && record.kind === 'grok'" class="interact-hint">
@@ -129,6 +208,12 @@ function onKeydown(e: KeyboardEvent): void {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.pending-attachments {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  white-space: nowrap;
+}
 .pending-revoke {
   flex: 0 0 auto;
   border: none;
@@ -144,26 +229,32 @@ function onKeydown(e: KeyboardEvent): void {
   background: color-mix(in srgb, var(--text-primary) 10%, transparent);
   color: var(--text-primary);
 }
-.composer {
+.composer-stack {
   display: flex;
-  align-items: flex-end;
-  gap: 8px;
+  flex-direction: column;
+  gap: 7px;
 }
-.composer-input {
+.composer-stack :deep(.reply-files) {
+  margin-top: 0;
+}
+.message-composer {
+  gap: 12px;
+}
+.message-composer .input-wrap {
   flex: 1 1 auto;
-  resize: none;
-  border: var(--hairline) solid var(--control-border);
-  border-radius: 9px;
-  background: var(--control-bg);
-  box-shadow: var(--clickable-shadow);
-  color: var(--text-primary);
-  font-family: var(--font-sans);
-  font-size: 13px;
-  line-height: 1.45;
-  padding: 7px 10px;
 }
-.composer-input:focus-visible {
-  box-shadow: var(--clickable-shadow), var(--focus-ring);
+.message-composer .textarea {
+  min-height: 64px;
+  max-height: 120px;
+}
+.composer-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.attachment-error {
+  margin: 0;
+  color: var(--danger, #d70015);
+  font-size: 11px;
 }
 .btn {
   appearance: none;

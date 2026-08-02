@@ -25,6 +25,7 @@ import { isFocusableTerminal } from "../lib/terminals";
 import type {
   AgentDetailFrame,
   AgentRecord,
+  ImageAttachment,
   ThemeMode,
 } from "../lib/types";
 import Sidebar from "./console/Sidebar.vue";
@@ -267,19 +268,22 @@ async function onGoAnswer(a: AgentRecord): Promise<void> {
 // ===== 插话（C3 追加语义）=====
 const pendingText = ref("");
 const pendingCount = ref(0);
+const pendingAttachmentCount = ref(0);
 
 async function refreshPending(): Promise<void> {
   const id = selectedId.value;
   if (!id) {
     pendingText.value = "";
     pendingCount.value = 0;
+    pendingAttachmentCount.value = 0;
     return;
   }
   try {
-    const [text, entries] = await interjectPeek(id);
+    const pending = await interjectPeek(id);
     if (selectedId.value === id) {
-      pendingText.value = text;
-      pendingCount.value = entries;
+      pendingText.value = pending.text;
+      pendingCount.value = pending.entries;
+      pendingAttachmentCount.value = pending.attachments.length;
     }
   } catch {
     /* daemon 不可达：保持现状 */
@@ -294,11 +298,15 @@ watch(
   }
 );
 
-async function onSend(text: string): Promise<void> {
+async function onSend(
+  text: string,
+  filePaths: string[],
+  pastedImages: ImageAttachment[],
+): Promise<void> {
   const a = sel.value;
   if (!a) return;
   try {
-    await interjectAppend(a.sessionId, text);
+    await interjectAppend(a.sessionId, text, filePaths, pastedImages);
   } catch (err) {
     console.warn("interject append failed", err);
   }
@@ -592,6 +600,7 @@ onBeforeUnmount(() => {
             :submit-bare-enter="submitBareEnter"
             :pending-text="pendingText"
             :pending-count="pendingCount"
+            :pending-attachment-count="pendingAttachmentCount"
             :new-task-supported="newTaskSupported"
             @send="onSend"
             @revoke="onRevoke"

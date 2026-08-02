@@ -448,7 +448,7 @@ pub(super) fn deliver_msg(
 ) -> String {
     let n = state
         .interject
-        .append(session_id, content, Some(channel_id));
+        .append(session_id, content, Vec::new(), Some(channel_id));
     state.interject.persist();
     broadcast_agents_state(state);
     if n == 0 {

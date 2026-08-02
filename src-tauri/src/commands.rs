@@ -2718,7 +2718,7 @@ pub fn open_interject(
     }
 }
 
-/// 插话窗口初始化负载：主题 + 语言 + 待送达预填全文与条数。
+/// 插话窗口初始化负载：主题 + 语言 + 待送达预填全文、条数与附件。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InterjectInit {
@@ -2728,6 +2728,68 @@ pub struct InterjectInit {
     text: String,
     /// 待送达条数。
     entries: usize,
+    /// Flattened pending attachments. Source files are referenced; clipboard images live in the
+    /// same 24-hour request-temp area used by popup answers.
+    attachments: Vec<InterjectAttachmentView>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InterjectAttachmentView {
+    path: String,
+    name: String,
+    size: u64,
+    is_image: bool,
+    available: bool,
+}
+
+impl From<crate::models::FileAttachment> for InterjectAttachmentView {
+    fn from(attachment: crate::models::FileAttachment) -> Self {
+        let available = std::path::Path::new(&attachment.path).is_file();
+        Self {
+            path: attachment.path,
+            name: attachment.name,
+            size: attachment.size,
+            is_image: attachment.is_image,
+            available,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InterjectPendingView {
+    text: String,
+    entries: usize,
+    attachments: Vec<InterjectAttachmentView>,
+}
+
+async fn prepare_interject_attachments(
+    file_paths: Vec<String>,
+    pasted_images: Vec<crate::models::ImageAttachment>,
+) -> Result<Vec<crate::models::FileAttachment>, String> {
+    if pasted_images
+        .iter()
+        .any(|image| !image.media_type.starts_with("image/"))
+    {
+        return Err("an interjection clipboard attachment must be an image".to_string());
+    }
+    let pasted_images = normalize_pasted_image_filenames(pasted_images);
+    let lang = crate::i18n::Lang::current();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut attachments = crate::cli::file_attachment::resolve(&file_paths, lang)?;
+        if !pasted_images.is_empty() {
+            let temp_id = format!("interject-{}", uuid::Uuid::new_v4());
+            let paths = crate::cli::image_writer::save(&pasted_images, &temp_id, 0, lang)
+                .map_err(|error| error.to_string())?;
+            attachments.extend(crate::cli::file_attachment::resolve(&paths, lang)?);
+        }
+        let mut seen = std::collections::HashSet::new();
+        attachments.retain(|attachment| seen.insert(attachment.path.clone()));
+        Ok(attachments)
+    })
+    .await
+    .map_err(|error| format!("interjection attachment task failed: {error}"))?
 }
 
 /// 插话窗口挂载时调用：打开到 daemon 的 composer 专属连接（登记「composer 打开中」，
@@ -2741,17 +2803,21 @@ pub async fn interject_init(session_id: String) -> Result<InterjectInit, String>
         .code()
         .to_string();
     #[cfg(unix)]
-    let (text, entries) = crate::client::composer::open(&session_id).await;
+    let (text, entries, attachments) = crate::client::composer::open(&session_id).await;
     #[cfg(not(unix))]
-    let (text, entries) = {
+    let (text, entries, attachments) = {
         let _ = &session_id;
-        (String::new(), 0usize)
+        (String::new(), 0usize, Vec::new())
     };
     Ok(InterjectInit {
         theme,
         lang,
         text,
         entries,
+        attachments: attachments
+            .into_iter()
+            .map(InterjectAttachmentView::from)
+            .collect(),
     })
 }
 
@@ -2762,15 +2828,22 @@ pub async fn interject_submit(
     app: AppHandle,
     session_id: String,
     text: String,
+    file_paths: Option<Vec<String>>,
+    pasted_images: Option<Vec<crate::models::ImageAttachment>>,
 ) -> Result<(), String> {
     #[cfg(unix)]
     {
-        crate::client::composer::submit(&session_id, &text).await;
+        let attachments = prepare_interject_attachments(
+            file_paths.unwrap_or_default(),
+            pasted_images.unwrap_or_default(),
+        )
+        .await?;
+        crate::client::composer::submit(&session_id, &text, attachments).await;
         crate::client::composer::close(&session_id);
         close_interject_window(&app, &session_id);
     }
     #[cfg(not(unix))]
-    let _ = (app, session_id, text);
+    let _ = (app, session_id, text, file_paths, pasted_images);
     Ok(())
 }
 
@@ -2819,24 +2892,53 @@ pub fn focus_request(request_id: String) {
 
 /// 控制台输入框发消息（C3 追加语义，同 IM `/msg`）：不覆盖既有待送达队列，即发即走。
 #[tauri::command]
-pub fn interject_append(session_id: String, text: String) {
-    #[cfg(unix)]
-    crate::client::report_agent_event(crate::ipc::ClientMsg::InterjectAppend { session_id, text });
-    #[cfg(not(unix))]
-    let _ = (session_id, text);
-}
-
-/// 待送达气泡内容查询（C3）：返回 `(全文, 条数)`；daemon 未运行 → `("", 0)`。
-#[tauri::command]
-pub async fn interject_peek(session_id: String) -> Result<(String, usize), String> {
+pub async fn interject_append(
+    session_id: String,
+    text: String,
+    file_paths: Option<Vec<String>>,
+    pasted_images: Option<Vec<crate::models::ImageAttachment>>,
+) -> Result<(), String> {
     #[cfg(unix)]
     {
-        Ok(crate::client::interject_peek(session_id).await)
+        let attachments = prepare_interject_attachments(
+            file_paths.unwrap_or_default(),
+            pasted_images.unwrap_or_default(),
+        )
+        .await?;
+        crate::client::report_agent_event(crate::ipc::ClientMsg::InterjectAppend {
+            session_id,
+            text,
+            attachments,
+        });
+    }
+    #[cfg(not(unix))]
+    let _ = (session_id, text, file_paths, pasted_images);
+    Ok(())
+}
+
+/// 待送达气泡内容查询（C3）：返回全文、条数与附件；daemon 未运行 → 空状态。
+#[tauri::command]
+pub async fn interject_peek(session_id: String) -> Result<InterjectPendingView, String> {
+    #[cfg(unix)]
+    {
+        let (text, entries, attachments) = crate::client::interject_peek(session_id).await;
+        Ok(InterjectPendingView {
+            text,
+            entries,
+            attachments: attachments
+                .into_iter()
+                .map(InterjectAttachmentView::from)
+                .collect(),
+        })
     }
     #[cfg(not(unix))]
     {
         let _ = session_id;
-        Ok((String::new(), 0))
+        Ok(InterjectPendingView {
+            text: String::new(),
+            entries: 0,
+            attachments: Vec::new(),
+        })
     }
 }
 
@@ -3794,6 +3896,54 @@ mod tests {
         let mut invalid_media = image;
         invalid_media.media_type = "application/octet-stream".to_string();
         assert!(validate_pasted_images(&[invalid_media]).is_err());
+    }
+
+    #[tokio::test]
+    async fn interject_attachments_reference_files_and_materialize_clipboard_images_temporarily() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let source = source_dir.path().join("notes.txt");
+        std::fs::write(&source, b"hello").unwrap();
+        let image = crate::models::ImageAttachment {
+            data: "data:image/png;base64,aGVsbG8=".to_string(),
+            media_type: "image/png".to_string(),
+            filename: Some("capture.png".to_string()),
+        };
+
+        let attachments =
+            prepare_interject_attachments(vec![source.to_string_lossy().into_owned()], vec![image])
+                .await
+                .unwrap();
+
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(
+            attachments[0].path,
+            std::fs::canonicalize(&source).unwrap().to_string_lossy()
+        );
+        assert!(std::path::Path::new(&attachments[1].path).is_file());
+        assert!(attachments[1].is_image);
+        let request_dir = std::path::Path::new(&attachments[1].path)
+            .parent()
+            .and_then(std::path::Path::parent)
+            .unwrap();
+        assert!(request_dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("interject-"));
+        let _ = std::fs::remove_dir_all(request_dir);
+    }
+
+    #[tokio::test]
+    async fn interject_attachments_reject_non_image_clipboard_payloads() {
+        let payload = crate::models::ImageAttachment {
+            data: "aGVsbG8=".to_string(),
+            media_type: "application/octet-stream".to_string(),
+            filename: Some("payload.bin".to_string()),
+        };
+        let error = prepare_interject_attachments(Vec::new(), vec![payload])
+            .await
+            .unwrap_err();
+        assert!(error.contains("must be an image"));
     }
 
     /// spec gui-agent-task-launch §4：workspace 顺序保持索引序在前，待办独有项目排后；

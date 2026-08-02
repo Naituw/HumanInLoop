@@ -27,4 +27,27 @@ describe("ComposerAttachments", () => {
     expect(wrapper.emitted("removeImage")).toEqual([[0]]);
     expect(wrapper.emitted("removeFile")).toEqual([[0]]);
   });
+
+  it("marks a missing source-file reference as unavailable", () => {
+    const wrapper = mount(ComposerAttachments, {
+      props: {
+        images: [],
+        files: [
+          {
+            key: "missing",
+            path: "/tmp/missing.pdf",
+            name: "missing.pdf",
+            available: false,
+          },
+        ],
+      },
+      global: { plugins: [i18n] },
+    });
+
+    const chip = wrapper.get(".reply-file");
+    expect(chip.classes()).toContain("unavailable");
+    expect(chip.attributes("title")).toContain("/tmp/missing.pdf");
+    expect(chip.get(".rf-warning svg").element.tagName.toLowerCase()).toBe("svg");
+    expect(chip.text()).not.toContain("⚠️");
+  });
 });

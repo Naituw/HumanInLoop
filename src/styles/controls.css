@@ -271,12 +271,28 @@
   font-size: 13px;
   line-height: 1;
 }
+.reply-file .rf-warning {
+  flex: 0 0 auto;
+  display: inline-flex;
+  color: var(--text-tertiary);
+}
+.reply-file .rf-warning svg {
+  width: 13px;
+  height: 13px;
+  stroke-width: 1.35;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 .reply-file .rf-name {
   flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-primary);
+}
+.reply-file.unavailable .rf-name {
+  color: var(--text-tertiary);
+  text-decoration: line-through;
 }
 .reply-file .rf-remove {
   flex: 0 0 auto;

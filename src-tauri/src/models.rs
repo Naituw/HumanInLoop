@@ -229,7 +229,7 @@ impl<'de> Deserialize<'de> for OptionItem {
 }
 
 /// 提问附带的文件附件（展示用）。`path` 为绝对路径。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileAttachment {
     pub path: String,

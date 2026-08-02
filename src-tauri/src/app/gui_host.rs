@@ -1105,6 +1105,7 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
                     &ClientMsg::InterjectAppend {
                         session_id,
                         text: QUICK_ASK_INTERJECT.to_string(),
+                        attachments: Vec::new(),
                     },
                 )
                 .await;

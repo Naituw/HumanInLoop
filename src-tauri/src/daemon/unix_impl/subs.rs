@@ -236,15 +236,25 @@ pub(super) async fn handle_tray_sub(
 }
 
 /// 插话提交的统一处理：覆盖队列（有等待 hook 时立即交付）→ 落盘 → 刷新徽标。
-pub(super) fn interject_submit(state: &Arc<ServerState>, session_id: &str, text: &str) {
-    state.interject.submit(session_id, text);
+pub(super) fn interject_submit(
+    state: &Arc<ServerState>,
+    session_id: &str,
+    text: &str,
+    attachments: Vec<crate::models::FileAttachment>,
+) {
+    state.interject.submit(session_id, text, attachments);
     state.interject.persist();
     broadcast_agents_state(state);
 }
 
 /// 插话追加的统一处理：保留既有队列，追加一条消息；若有等待 hook 则立即交付。
-pub(super) fn interject_append(state: &Arc<ServerState>, session_id: &str, text: &str) {
-    state.interject.append(session_id, text, None);
+pub(super) fn interject_append(
+    state: &Arc<ServerState>,
+    session_id: &str,
+    text: &str,
+    attachments: Vec<crate::models::FileAttachment>,
+) {
+    state.interject.append(session_id, text, attachments, None);
     state.interject.persist();
     broadcast_agents_state(state);
 }
@@ -267,8 +277,9 @@ pub(super) async fn handle_interject_composer(
             Ok(Some(ClientMsg::InterjectSubmit {
                 session_id: sid,
                 text,
+                attachments,
             })) => {
-                interject_submit(state, &sid, &text);
+                interject_submit(state, &sid, &text, attachments);
             }
             Ok(Some(ClientMsg::InterjectClear { session_id: sid })) => {
                 if state.interject.clear(&sid) {
@@ -282,6 +293,7 @@ pub(super) async fn handle_interject_composer(
                     &ServerMsg::InterjectState {
                         text: state.interject.full_text(&sid),
                         entries: state.interject.pending_count(&sid),
+                        attachments: state.interject.attachments(&sid),
                     },
                 )
                 .await;
@@ -313,22 +325,29 @@ pub(super) async fn handle_interject_hold(
     state.active.fetch_sub(1, Ordering::SeqCst);
     tokio::select! {
         outcome = rx => {
-            let (action, text) = match outcome {
-                Ok(WaitOutcome::Message(text)) => (InterjectAction::Message, text),
+            let (action, delivery) = match outcome {
+                Ok(WaitOutcome::Message(delivery)) => (InterjectAction::Message, Some(delivery)),
                 // Release / 发送端消失（会话清理）→ 放行。
-                _ => (InterjectAction::Release, String::new()),
+                _ => (InterjectAction::Release, None),
             };
+            let text = delivery.as_ref().map(|value| value.text.clone()).unwrap_or_default();
+            let attachments = delivery
+                .as_ref()
+                .map(|value| value.attachments.clone())
+                .unwrap_or_default();
             let delivered = ipc::write_msg(
                 &mut w,
-                &ServerMsg::InterjectDecision { action, text: text.clone() },
+                &ServerMsg::InterjectDecision { action, text, attachments },
             )
             .await
             .is_ok();
-            if action == InterjectAction::Message && !delivered {
+            if !delivered {
+                if let Some(delivery) = delivery {
                 // 极端竞态：交付瞬间 hook 恰好断开 → 消息回队，等下一次工具调用送达。
-                state.interject.submit(&session_id, &text);
-                state.interject.persist();
-                broadcast_agents_state(state);
+                    state.interject.requeue_front(&session_id, delivery, Vec::new());
+                    state.interject.persist();
+                    broadcast_agents_state(state);
+                }
             }
         }
         _ = wait_cli_eof(&mut reader) => {

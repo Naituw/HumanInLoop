@@ -12,8 +12,8 @@ pub use codec::{read_msg, write_msg};
 
 use crate::daemon::lifecycle::Fingerprint;
 use crate::models::{
-    ChannelAction, ConfirmFallbackReason, ConfirmResult, ConfirmSpec, InteractionRequest,
-    MessagePrompt, OutputFormat, Question, QuestionAnswer,
+    ChannelAction, ConfirmFallbackReason, ConfirmResult, ConfirmSpec, FileAttachment,
+    InteractionRequest, MessagePrompt, OutputFormat, Question, QuestionAnswer,
 };
 use serde::{Deserialize, Serialize};
 
@@ -532,9 +532,19 @@ pub enum ClientMsg {
     InterjectComposer { session_id: String },
     /// 插话提交（整体覆盖该 session 的待送达队列，D2）：空文本＝清空。有等待中的 hook 时立即交付。
     /// 可在 composer 连接上发，也可独立连接即发即走。
-    InterjectSubmit { session_id: String, text: String },
+    InterjectSubmit {
+        session_id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<FileAttachment>,
+    },
     /// 插话追加：不覆盖已有待送达条目；有等待中的 hook 时立即交付。用于一键快捷插话。
-    InterjectAppend { session_id: String, text: String },
+    InterjectAppend {
+        session_id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<FileAttachment>,
+    },
     /// 撤回：清空该 session 的待送达队列（AgentsView 撤回按钮 / IM `/msg-clear`）。即发即走。
     InterjectClear { session_id: String },
     /// 查询该 session 的待送达全文（composer 预填 / IM 回显）。回一帧 `InterjectState`。
@@ -713,6 +723,8 @@ pub enum ServerMsg {
         action: InterjectAction,
         #[serde(default)]
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<FileAttachment>,
     },
     /// Unique Grok side-channel claim. None means unavailable or ambiguous.
     GrokBindingClaim {
@@ -724,6 +736,8 @@ pub enum ServerMsg {
     InterjectState {
         text: String,
         entries: usize,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<FileAttachment>,
     },
     /// 权限授权管理面板回帧（D→设置进程，§6.3）。
     PermissionRules {
@@ -1170,6 +1184,7 @@ mod tests {
         let json = serde_json::to_string(&ServerMsg::InterjectDecision {
             action: InterjectAction::Hold,
             text: String::new(),
+            attachments: Vec::new(),
         })
         .unwrap();
         assert!(json.contains(r#""action":"hold""#));
@@ -1178,7 +1193,7 @@ mod tests {
             serde_json::from_str(r#"{"type":"interjectDecision","action":"message","text":"停"}"#)
                 .unwrap();
         match back {
-            ServerMsg::InterjectDecision { action, text } => {
+            ServerMsg::InterjectDecision { action, text, .. } => {
                 assert_eq!(action, InterjectAction::Message);
                 assert_eq!(text, "停");
             }
@@ -1205,10 +1220,12 @@ mod tests {
             ClientMsg::InterjectSubmit {
                 session_id: "s1".into(),
                 text: "调整方向".into(),
+                attachments: Vec::new(),
             },
             ClientMsg::InterjectAppend {
                 session_id: "s1".into(),
                 text: "马上提问".into(),
+                attachments: Vec::new(),
             },
             ClientMsg::InterjectClear {
                 session_id: "s1".into(),

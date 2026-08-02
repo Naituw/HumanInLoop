@@ -1327,22 +1327,35 @@ async fn control_loop(
                                     &ServerMsg::InterjectDecision {
                                         action: InterjectAction::None,
                                         text: String::new(),
+                                        attachments: Vec::new(),
                                     },
                                 )
                                 .await;
                             }
                             PollOutcome::Message {
-                                text,
+                                delivery,
                                 receipt_channels,
                             } => {
-                                let _ = ipc::write_msg(
+                                let delivered = ipc::write_msg(
                                     w,
                                     &ServerMsg::InterjectDecision {
                                         action: InterjectAction::Message,
-                                        text,
+                                        text: delivery.text.clone(),
+                                        attachments: delivery.attachments.clone(),
                                     },
                                 )
-                                .await;
+                                .await
+                                .is_ok();
+                                if !delivered {
+                                    state.interject.requeue_front(
+                                        &session_id,
+                                        delivery,
+                                        receipt_channels,
+                                    );
+                                    state.interject.persist();
+                                    broadcast_agents_state(state);
+                                    return Control::Closed;
+                                }
                                 state.interject.persist();
                                 broadcast_agents_state(state);
                                 spawn_read_receipts(state, &session_id, receipt_channels);
@@ -1353,6 +1366,7 @@ async fn control_loop(
                                     &ServerMsg::InterjectDecision {
                                         action: InterjectAction::Hold,
                                         text: String::new(),
+                                        attachments: Vec::new(),
                                     },
                                 )
                                 .await;
@@ -1423,6 +1437,7 @@ async fn control_loop(
                         &ServerMsg::InterjectDecision {
                             action: crate::ipc::InterjectAction::None,
                             text: String::new(),
+                            attachments: Vec::new(),
                         },
                     )
                     .await;
@@ -1501,12 +1516,20 @@ async fn control_loop(
                 return Control::InterjectComposer { session_id };
             }
             // 插话提交（独立连接形态；composer 连接上的提交在 handle_interject_composer 处理）。
-            ClientMsg::InterjectSubmit { session_id, text } => {
-                interject_submit(state, &session_id, &text);
+            ClientMsg::InterjectSubmit {
+                session_id,
+                text,
+                attachments,
+            } => {
+                interject_submit(state, &session_id, &text, attachments);
             }
             // 插话追加（不覆盖既有待送达；快捷固定插话用）。
-            ClientMsg::InterjectAppend { session_id, text } => {
-                interject_append(state, &session_id, &text);
+            ClientMsg::InterjectAppend {
+                session_id,
+                text,
+                attachments,
+            } => {
+                interject_append(state, &session_id, &text, attachments);
             }
             // 撤回待送达。
             ClientMsg::InterjectClear { session_id } => {
@@ -1522,6 +1545,7 @@ async fn control_loop(
                     &ServerMsg::InterjectState {
                         text: state.interject.full_text(&session_id),
                         entries: state.interject.pending_count(&session_id),
+                        attachments: state.interject.attachments(&session_id),
                     },
                 )
                 .await;

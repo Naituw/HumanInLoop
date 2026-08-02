@@ -352,7 +352,10 @@ pub enum InterjectPollOutcome {
     /// 放行（无消息 / composer 取消 / daemon 不可达 / 旧 daemon 无回帧 / 任何失败）。
     Allow,
     /// deny + 用户插话消息（hook 侧按家族输出 deny JSON）。
-    Deny(String),
+    Deny {
+        text: String,
+        attachments: Vec<crate::models::FileAttachment>,
+    },
 }
 
 /// 首帧读取超时：旧 daemon 不认识 `interject_poll`、不会回帧，超时即放行（fail-open），
@@ -393,9 +396,13 @@ where
         Err(_) => return InterjectPollOutcome::Allow, // 超时：旧 daemon / 慢回帧 → 放行
     };
     match first {
-        Some((InterjectAction::Message, text)) => InterjectPollOutcome::Deny(text),
-        Some((InterjectAction::Hold, _)) => match read_interject_decision(reader).await {
-            Some((InterjectAction::Message, text)) => InterjectPollOutcome::Deny(text),
+        Some((InterjectAction::Message, text, attachments)) => {
+            InterjectPollOutcome::Deny { text, attachments }
+        }
+        Some((InterjectAction::Hold, _, _)) => match read_interject_decision(reader).await {
+            Some((InterjectAction::Message, text, attachments)) => {
+                InterjectPollOutcome::Deny { text, attachments }
+            }
             _ => InterjectPollOutcome::Allow, // release / EOF（daemon 退出等）→ 放行
         },
         _ => InterjectPollOutcome::Allow, // none / release / EOF / 意外帧
@@ -403,13 +410,23 @@ where
 }
 
 /// 读到下一帧 `InterjectDecision`（跳过其它服务端消息）；EOF/错误返回 None。
-async fn read_interject_decision<R>(reader: &mut R) -> Option<(crate::ipc::InterjectAction, String)>
+async fn read_interject_decision<R>(
+    reader: &mut R,
+) -> Option<(
+    crate::ipc::InterjectAction,
+    String,
+    Vec<crate::models::FileAttachment>,
+)>
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
     loop {
         match ipc::read_msg::<_, ServerMsg>(reader).await {
-            Ok(Some(ServerMsg::InterjectDecision { action, text })) => return Some((action, text)),
+            Ok(Some(ServerMsg::InterjectDecision {
+                action,
+                text,
+                attachments,
+            })) => return Some((action, text, attachments)),
             Ok(Some(_)) => continue,
             Ok(None) | Err(_) => return None,
         }
@@ -421,9 +438,11 @@ pub fn force_agent_idle(session_id: String) {
     report_agent_event(ClientMsg::AgentForceIdle { session_id });
 }
 
-/// 查询某 session 的待送达插话全文（控制台气泡，spec gui-agent-console C3）：一问一答。
-/// daemon 未运行时**不拉起**（无 daemon 即无待送达），连不上 / 超时 → `("", 0)`。
-pub async fn interject_peek(session_id: String) -> (String, usize) {
+/// 查询某 session 的待送达插话全文、条目数与附件（控制台气泡，spec gui-agent-console C3）：
+/// 一问一答。daemon 未运行时**不拉起**（无 daemon 即无待送达），连不上 / 超时 → 空状态。
+pub async fn interject_peek(
+    session_id: String,
+) -> (String, usize, Vec<crate::models::FileAttachment>) {
     let query = async {
         let (mut reader, mut writer) = connect_split().await.ok()?;
         ipc::write_msg(&mut writer, &ClientMsg::InterjectQuery { session_id })
@@ -431,9 +450,11 @@ pub async fn interject_peek(session_id: String) -> (String, usize) {
             .ok()?;
         loop {
             match ipc::read_msg::<_, ServerMsg>(&mut reader).await {
-                Ok(Some(ServerMsg::InterjectState { text, entries })) => {
-                    return Some((text, entries))
-                }
+                Ok(Some(ServerMsg::InterjectState {
+                    text,
+                    entries,
+                    attachments,
+                })) => return Some((text, entries, attachments)),
                 Ok(Some(_)) => continue,
                 _ => return None,
             }
@@ -443,7 +464,7 @@ pub async fn interject_peek(session_id: String) -> (String, usize) {
         .await
         .ok()
         .flatten()
-        .unwrap_or((String::new(), 0))
+        .unwrap_or((String::new(), 0, Vec::new()))
 }
 
 /// 打开一条到 daemon 的连接（订阅状态窗口用，spec D20）：确保在跑后连接并拆分读写半。
@@ -745,6 +766,7 @@ mod tests {
             vec![ServerMsg::InterjectDecision {
                 action: InterjectAction::None,
                 text: String::new(),
+                attachments: Vec::new(),
             }],
             true,
             Duration::from_millis(300),
@@ -755,16 +777,29 @@ mod tests {
 
     #[tokio::test]
     async fn first_frame_message_denies() {
+        let attachment = crate::models::FileAttachment {
+            path: "/tmp/screenshot.png".into(),
+            name: "screenshot.png".into(),
+            size: 42,
+            is_image: true,
+        };
         let out = run_frames(
             vec![ServerMsg::InterjectDecision {
                 action: InterjectAction::Message,
                 text: "改用方案 B".into(),
+                attachments: vec![attachment.clone()],
             }],
             true,
             Duration::from_millis(300),
         )
         .await;
-        assert_eq!(out, InterjectPollOutcome::Deny("改用方案 B".into()));
+        assert_eq!(
+            out,
+            InterjectPollOutcome::Deny {
+                text: "改用方案 B".into(),
+                attachments: vec![attachment],
+            }
+        );
     }
 
     #[tokio::test]
@@ -774,17 +809,25 @@ mod tests {
                 ServerMsg::InterjectDecision {
                     action: InterjectAction::Hold,
                     text: String::new(),
+                    attachments: Vec::new(),
                 },
                 ServerMsg::InterjectDecision {
                     action: InterjectAction::Message,
                     text: "停一下".into(),
+                    attachments: Vec::new(),
                 },
             ],
             true,
             Duration::from_millis(300),
         )
         .await;
-        assert_eq!(out, InterjectPollOutcome::Deny("停一下".into()));
+        assert_eq!(
+            out,
+            InterjectPollOutcome::Deny {
+                text: "停一下".into(),
+                attachments: Vec::new(),
+            }
+        );
     }
 
     #[tokio::test]
@@ -794,10 +837,12 @@ mod tests {
                 ServerMsg::InterjectDecision {
                     action: InterjectAction::Hold,
                     text: String::new(),
+                    attachments: Vec::new(),
                 },
                 ServerMsg::InterjectDecision {
                     action: InterjectAction::Release,
                     text: String::new(),
+                    attachments: Vec::new(),
                 },
             ],
             true,
@@ -814,6 +859,7 @@ mod tests {
             vec![ServerMsg::InterjectDecision {
                 action: InterjectAction::Hold,
                 text: String::new(),
+                attachments: Vec::new(),
             }],
             true,
             Duration::from_millis(300),
@@ -849,6 +895,7 @@ mod tests {
                 ServerMsg::InterjectDecision {
                     action: InterjectAction::Hold,
                     text: String::new(),
+                    attachments: Vec::new(),
                 },
                 ServerMsg::Warn {
                     text: "noise2".into(),
@@ -856,12 +903,19 @@ mod tests {
                 ServerMsg::InterjectDecision {
                     action: InterjectAction::Message,
                     text: "msg".into(),
+                    attachments: Vec::new(),
                 },
             ],
             true,
             Duration::from_millis(300),
         )
         .await;
-        assert_eq!(out, InterjectPollOutcome::Deny("msg".into()));
+        assert_eq!(
+            out,
+            InterjectPollOutcome::Deny {
+                text: "msg".into(),
+                attachments: Vec::new(),
+            }
+        );
     }
 }

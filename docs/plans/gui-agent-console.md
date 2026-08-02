@@ -45,10 +45,12 @@ GUI Host 进程直调本地模块（不经 daemon）。
 
 ### 1.3 插话（C3/C9）
 
-- `ipc/mod.rs` 已有 `InterjectAppend`（独立连接即发即走）——控制台输入框直接用，无协议改动。
+- `ipc/mod.rs` 的 `InterjectAppend` 携带文本与可选附件（独立连接即发即走）——控制台输入框直接用；
+  文本与附件均为空不发送，附件-only 合法。
 - 待送达气泡文本：`ipc/mod.rs` 新增一问一答 `InterjectPeek { session_id }` →
-  `ServerMsg::InterjectState`（复用现有结构；dispatch 中独立连接处理，回完即断）。
-  快照的 `pendingInterject` 驱动显隐，气泡文本经 Peek 按需取（选中会话变化/快照变化时）。
+  `ServerMsg::InterjectState`（复用现有结构；dispatch 中独立连接处理，回完即断），返回文本、条目数与
+  展平后的附件引用。快照的 `pendingInterject` 驱动显隐，气泡内容经 Peek 按需取（选中会话变化/
+  快照变化时）。
 
 ### 1.4 `open_agents` 可寻址（C10/R4）
 
@@ -99,7 +101,7 @@ GUI Host 进程直调本地模块（不经 daemon）。
 ### 2.4 其它
 
 - `focus_request(request_id)`：发 `ClientMsg::FocusRequest`（「去回答」，托盘同款链路）。
-- `interject_append(session_id, text)` / `interject_peek(session_id)`：对应 §1.3。
+- `interject_append(session_id, text, file_paths, pasted_images)` / `interject_peek(session_id)`：对应 §1.3。
 - `agents_focus(session_id: Option<String>)`：经 GUI Host 的 agents 订阅连接发送
   `AgentsFocus`（订阅连接句柄在 `app/mod.rs` 的订阅任务持有，经 channel 传入待发队列）。
 

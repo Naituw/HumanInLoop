@@ -2,10 +2,13 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { applyTheme } from "../lib/theme";
 import { applyLanguage } from "../i18n";
 import { interjectCancel, interjectInit, interjectSubmit } from "../lib/ipc";
 import type { AgentKind, ThemeMode } from "../lib/types";
+import ComposerAttachments from "../components/ComposerAttachments.vue";
+import { useInterjectAttachments } from "./interject/useInterjectAttachments";
 
 const { t } = useI18n();
 
@@ -21,6 +24,7 @@ const pendingEntries = ref(0);
 const loaded = ref(false);
 const sending = ref(false);
 const textarea = ref<HTMLTextAreaElement | null>(null);
+const attachments = useInterjectAttachments();
 
 function kindLabel(k: string): string {
   const known: AgentKind[] = ["claude", "codex", "cursor", "grok"];
@@ -29,14 +33,22 @@ function kindLabel(k: string): string {
 
 // 可提交：有内容，或「清空已有待送达」（预填被删空也算一次有效提交 = 撤回）。
 const canSend = computed(
-  () => !sending.value && (text.value.trim().length > 0 || pendingEntries.value > 0),
+  () =>
+    !sending.value &&
+    !attachments.busy.value &&
+    (text.value.trim().length > 0 || attachments.hasAttachments.value || pendingEntries.value > 0),
 );
 
 async function send(): Promise<void> {
   if (!canSend.value) return;
   sending.value = true;
   try {
-    await interjectSubmit(session, text.value.trim());
+    await interjectSubmit(
+      session,
+      text.value.trim(),
+      attachments.filePaths.value,
+      attachments.pastedImages.value,
+    );
     // 后端提交后即关窗；此处无需善后。
   } catch (err) {
     console.warn("interject submit failed", err);
@@ -56,13 +68,14 @@ function onKeydown(e: KeyboardEvent): void {
   if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
     e.preventDefault();
     void send();
-  } else if (e.key === "Escape") {
+  } else if (e.key === "Escape" || (e.metaKey && e.key.toLowerCase() === "w")) {
     e.preventDefault();
     void cancel();
   }
 }
 
 let unlistenSettings: UnlistenFn | null = null;
+let unlistenDragDrop: UnlistenFn | null = null;
 
 onMounted(async () => {
   try {
@@ -71,6 +84,7 @@ onMounted(async () => {
     applyLanguage(init.lang);
     text.value = init.text;
     pendingEntries.value = init.entries;
+    attachments.reset(init.attachments);
   } catch {
     /* daemon 不可达：保持空预填，提交时后端兜底重试 */
   }
@@ -82,6 +96,9 @@ onMounted(async () => {
       if (typeof e.payload.language === "string") applyLanguage(e.payload.language);
     }
   );
+  unlistenDragDrop = await getCurrentWebview().onDragDropEvent((event) => {
+    if (event.payload.type === "drop") attachments.appendPaths(event.payload.paths);
+  });
   loaded.value = true;
   // 聚焦输入框、光标移到末尾（预填内容之后继续输入）。
   requestAnimationFrame(() => {
@@ -95,11 +112,12 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   unlistenSettings?.();
+  unlistenDragDrop?.();
 });
 </script>
 
 <template>
-  <div class="interject" @keydown="onKeydown">
+  <div class="interject" @keydown="onKeydown" @paste="attachments.onPaste">
     <header class="ij-header" data-tauri-drag-region>
       <span class="ij-title" data-tauri-drag-region>{{ t("interject.title") }}</span>
       <span v-if="kind" class="kind-badge">{{ kindLabel(kind) }}</span>
@@ -108,28 +126,63 @@ onBeforeUnmount(() => {
 
     <div class="ij-body">
       <p class="ij-hint">{{ t("interject.hint") }}</p>
-      <textarea
-        ref="textarea"
-        v-model="text"
-        class="ij-input"
-        :placeholder="t('interject.placeholder')"
-        :disabled="!loaded || sending"
-        spellcheck="false"
-      />
+      <div class="answer-composer ij-composer">
+        <div class="input-wrap">
+          <textarea
+            ref="textarea"
+            v-model="text"
+            class="textarea"
+            :placeholder="t('interject.placeholder')"
+            :disabled="!loaded || sending"
+            spellcheck="false"
+          />
+          <button
+            class="img-btn"
+            type="button"
+            :title="t('interject.addAttachment')"
+            :aria-label="t('interject.addAttachment')"
+            :disabled="sending || attachments.busy.value"
+            @mousedown.prevent
+            @click="attachments.chooseFiles"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.7"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <circle cx="8.5" cy="8.5" r="1.6" />
+              <path d="M21 15l-5-5L5 21" />
+            </svg>
+          </button>
+        </div>
+        <ComposerAttachments
+          :images="attachments.composerImages.value"
+          :files="attachments.composerFiles.value"
+          @remove-image="attachments.removeComposerImage"
+          @remove-file="attachments.removeComposerFile"
+        />
+        <p v-if="attachments.error.value" class="ij-error" role="alert">
+          {{ attachments.error.value }}
+        </p>
+      </div>
     </div>
 
-    <footer class="ij-footer">
+    <footer class="footer ij-footer" data-tauri-drag-region>
+      <button type="button" class="btn" :disabled="sending" @click="cancel">
+        {{ t("common.cancel") }} <kbd class="sc">⌘W</kbd>
+      </button>
       <span v-if="pendingEntries > 0" class="ij-pending">
         {{ t("interject.overwriteNote", { n: pendingEntries }) }}
       </span>
-      <span class="ij-actions">
-        <button type="button" class="btn" @click="cancel">
-          {{ t("interject.cancel") }}
-        </button>
-        <button type="button" class="btn primary" :disabled="!canSend" @click="send">
-          {{ t("interject.send") }}
-        </button>
-      </span>
+      <span class="spacer" />
+      <button type="button" class="btn btn-primary" :disabled="!canSend" @click="send">
+        {{ t("popup.send") }} <kbd class="sc">⌘↵</kbd>
+      </button>
     </footer>
   </div>
 </template>
@@ -183,7 +236,28 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 12px 14px 0;
+  padding: 12px 14px 5px;
+  overflow-y: auto;
+}
+.ij-body :deep(.reply-files) {
+  margin-top: 0;
+}
+.ij-composer {
+  flex: 1 1 auto;
+}
+.ij-composer .input-wrap {
+  flex: 1 1 auto;
+  min-height: 96px;
+}
+.ij-composer .textarea {
+  flex: 1 1 auto;
+  min-height: 96px;
+  max-height: none;
+}
+.ij-error {
+  margin: 0;
+  color: var(--danger, #d70015);
+  font-size: 11px;
 }
 .ij-hint {
   flex: 0 0 auto;
@@ -191,33 +265,9 @@ onBeforeUnmount(() => {
   font-size: 11px;
   color: var(--text-secondary);
 }
-.ij-input {
-  flex: 1 1 auto;
-  min-height: 0;
-  resize: none;
-  padding: 8px 10px;
-  border: var(--hairline) solid var(--control-border);
-  border-radius: var(--radius-sm, 8px);
-  background: var(--control-bg);
-  color: var(--text-primary);
-  font-size: 13px;
-  line-height: 1.5;
-  font-family: inherit;
-  outline: none;
-  box-shadow: var(--clickable-shadow);
-}
-.ij-input:focus,
-.ij-input:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring), var(--clickable-shadow);
-}
 .ij-footer {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  padding: 10px 14px 12px;
+  min-width: 0;
+  border-top: none;
 }
 .ij-pending {
   flex: 1 1 auto;
@@ -227,37 +277,5 @@ onBeforeUnmount(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.ij-actions {
-  flex: 0 0 auto;
-  display: inline-flex;
-  gap: 8px;
-}
-.btn {
-  appearance: none;
-  border: var(--hairline) solid var(--control-border);
-  background: var(--control-bg);
-  color: var(--text-primary);
-  font-size: 12px;
-  font-weight: 600;
-  padding: 5px 14px;
-  border-radius: 7px;
-  cursor: pointer;
-  box-shadow: var(--clickable-shadow);
-}
-.btn:hover {
-  background: var(--control-hover-bg);
-}
-.btn.primary {
-  border-color: transparent;
-  background: var(--accent, #0a84ff);
-  color: #fff;
-}
-.btn.primary:hover {
-  background: color-mix(in srgb, var(--accent, #0a84ff) 88%, #000);
-}
-.btn:disabled {
-  opacity: 0.45;
-  cursor: default;
 }
 </style>

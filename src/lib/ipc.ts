@@ -22,6 +22,7 @@ import type {
   HistorySessionTitleResult,
   HookStatus,
   InterjectInit,
+  InterjectPending,
   LifecycleStatus,
   NewTaskInit,
   NewTaskProject,
@@ -186,12 +187,16 @@ export const focusRequest = (requestId: string) =>
   invoke<void>("focus_request", { requestId });
 
 /** 控制台输入框发消息（C3 追加语义，同 IM /msg）。 */
-export const interjectAppend = (sessionId: string, text: string) =>
-  invoke<void>("interject_append", { sessionId, text });
+export const interjectAppend = (
+  sessionId: string,
+  text: string,
+  filePaths: string[] = [],
+  pastedImages: ImageAttachment[] = [],
+) => invoke<void>("interject_append", { sessionId, text, filePaths, pastedImages });
 
-/** 待送达气泡内容查询：返回 [全文, 条数]；daemon 未运行 → ["", 0]。 */
+/** 待送达气泡内容查询；daemon 未运行时返回空状态。 */
 export const interjectPeek = (sessionId: string) =>
-  invoke<[string, number]>("interject_peek", { sessionId });
+  invoke<InterjectPending>("interject_peek", { sessionId });
 
 /** 完整会话分页（C14）：`before` 为事件绝对下标游标（null＝末尾），每页默认 200 条。 */
 export const consoleTranscript = (
@@ -353,8 +358,12 @@ export const interjectInit = (sessionId: string) =>
   invoke<InterjectInit>("interject_init", { sessionId });
 
 /** 提交插话（整体覆盖待送达队列；空文本＝清空），随后后端关连接、关窗口。 */
-export const interjectSubmit = (sessionId: string, text: string) =>
-  invoke<void>("interject_submit", { sessionId, text });
+export const interjectSubmit = (
+  sessionId: string,
+  text: string,
+  filePaths: string[] = [],
+  pastedImages: ImageAttachment[] = [],
+) => invoke<void>("interject_submit", { sessionId, text, filePaths, pastedImages });
 
 /** 取消插话（队列不动），后端关连接、关窗口。 */
 export const interjectCancel = (sessionId: string) =>
