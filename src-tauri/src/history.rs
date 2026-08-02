@@ -104,17 +104,54 @@ pub fn load(project: Option<&str>, all: bool) -> Vec<HistoryEntry> {
 
 /// Latest completed exchange for one exact native Agent session.
 pub fn latest_send_for_session(agent_kind: &str, session_id: &str) -> Option<HistoryEntry> {
-    latest_send_for_session_at(&paths::history_file(), agent_kind, session_id)
+    recent_sends_for_session(agent_kind, session_id, 1)
+        .entries
+        .into_iter()
+        .next()
 }
 
 /// Latest completed exchange in one MCP-process/project fallback partition.
 pub fn latest_send_for_mcp_instance(mcp_instance_id: &str, project: &str) -> Option<HistoryEntry> {
-    latest_send_for_mcp_instance_at(&paths::history_file(), mcp_instance_id, project)
+    recent_sends_for_mcp_instance(mcp_instance_id, project, 1)
+        .entries
+        .into_iter()
+        .next()
 }
 
 /// Latest completed exchange for a project, used only by an ordinary non-Agent CLI call.
 pub fn latest_send_for_project(project: &str) -> Option<HistoryEntry> {
-    latest_send_for_project_at(&paths::history_file(), project)
+    recent_sends_for_project(project, 1)
+        .entries
+        .into_iter()
+        .next()
+}
+
+/// Recent completed Send entries for a scope: newest-first slice of length ≤ `n`, plus total.
+#[derive(Debug, Clone)]
+pub struct RecentSends {
+    /// Newest first; length ≤ requested `n`.
+    pub entries: Vec<HistoryEntry>,
+    /// Total matching Send entries in the store for this partition.
+    pub total: usize,
+}
+
+/// Most recent completed exchanges for one exact native Agent session.
+pub fn recent_sends_for_session(agent_kind: &str, session_id: &str, n: usize) -> RecentSends {
+    recent_sends_for_session_at(&paths::history_file(), agent_kind, session_id, n)
+}
+
+/// Most recent completed exchanges in one MCP-process/project fallback partition.
+pub fn recent_sends_for_mcp_instance(
+    mcp_instance_id: &str,
+    project: &str,
+    n: usize,
+) -> RecentSends {
+    recent_sends_for_mcp_instance_at(&paths::history_file(), mcp_instance_id, project, n)
+}
+
+/// Most recent completed exchanges for a project (non-Agent CLI fallback).
+pub fn recent_sends_for_project(project: &str, n: usize) -> RecentSends {
+    recent_sends_for_project_at(&paths::history_file(), project, n)
 }
 
 /// Distinct projects present in history, most recently active first.
@@ -176,11 +213,55 @@ fn load_at(path: &Path, project: Option<&str>, all: bool) -> Vec<HistoryEntry> {
     entries
 }
 
-fn latest_send_at(path: &Path, predicate: impl Fn(&HistoryEntry) -> bool) -> Option<HistoryEntry> {
-    read_all_at(path)
+fn recent_sends_at(
+    path: &Path,
+    n: usize,
+    predicate: impl Fn(&HistoryEntry) -> bool,
+) -> RecentSends {
+    let mut matching: Vec<HistoryEntry> = read_all_at(path)
         .into_iter()
         .filter(|entry| entry.action == ChannelAction::Send && predicate(entry))
-        .max_by_key(|entry| entry.timestamp_ms)
+        .collect();
+    matching.sort_by_key(|entry| std::cmp::Reverse(entry.timestamp_ms));
+    let total = matching.len();
+    if n == 0 {
+        return RecentSends {
+            entries: Vec::new(),
+            total,
+        };
+    }
+    matching.truncate(n);
+    RecentSends {
+        entries: matching,
+        total,
+    }
+}
+
+fn recent_sends_for_session_at(
+    path: &Path,
+    agent_kind: &str,
+    session_id: &str,
+    n: usize,
+) -> RecentSends {
+    recent_sends_at(path, n, |entry| {
+        entry.agent_kind.as_deref() == Some(agent_kind)
+            && entry.agent_session_id.as_deref() == Some(session_id)
+    })
+}
+
+fn recent_sends_for_mcp_instance_at(
+    path: &Path,
+    mcp_instance_id: &str,
+    project: &str,
+    n: usize,
+) -> RecentSends {
+    recent_sends_at(path, n, |entry| {
+        entry.mcp_instance_id.as_deref() == Some(mcp_instance_id) && entry.project == project
+    })
+}
+
+fn recent_sends_for_project_at(path: &Path, project: &str, n: usize) -> RecentSends {
+    recent_sends_at(path, n, |entry| entry.project == project)
 }
 
 fn latest_send_for_session_at(
@@ -188,10 +269,10 @@ fn latest_send_for_session_at(
     agent_kind: &str,
     session_id: &str,
 ) -> Option<HistoryEntry> {
-    latest_send_at(path, |entry| {
-        entry.agent_kind.as_deref() == Some(agent_kind)
-            && entry.agent_session_id.as_deref() == Some(session_id)
-    })
+    recent_sends_for_session_at(path, agent_kind, session_id, 1)
+        .entries
+        .into_iter()
+        .next()
 }
 
 fn latest_send_for_mcp_instance_at(
@@ -199,13 +280,17 @@ fn latest_send_for_mcp_instance_at(
     mcp_instance_id: &str,
     project: &str,
 ) -> Option<HistoryEntry> {
-    latest_send_at(path, |entry| {
-        entry.mcp_instance_id.as_deref() == Some(mcp_instance_id) && entry.project == project
-    })
+    recent_sends_for_mcp_instance_at(path, mcp_instance_id, project, 1)
+        .entries
+        .into_iter()
+        .next()
 }
 
 fn latest_send_for_project_at(path: &Path, project: &str) -> Option<HistoryEntry> {
-    latest_send_at(path, |entry| entry.project == project)
+    recent_sends_for_project_at(path, project, 1)
+        .entries
+        .into_iter()
+        .next()
 }
 
 fn projects_at(path: &Path) -> Vec<ProjectInfo> {
@@ -504,6 +589,34 @@ mod tests {
                 .id,
             "restarted"
         );
+    }
+
+    #[test]
+    fn recent_sends_return_newest_first_slice_and_total() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        for i in 1..=5 {
+            let mut e = entry(&format!("e{i}"), "/p", i);
+            e.agent_kind = Some("codex".into());
+            e.agent_session_id = Some("s1".into());
+            record_at(&path, e, 200);
+        }
+        let mut cancelled = entry("cancel", "/p", 6);
+        cancelled.agent_kind = Some("codex".into());
+        cancelled.agent_session_id = Some("s1".into());
+        cancelled.action = ChannelAction::Cancel;
+        record_at(&path, cancelled, 200);
+
+        let recent = recent_sends_for_session_at(&path, "codex", "s1", 2);
+        assert_eq!(recent.total, 5);
+        assert_eq!(recent.entries.len(), 2);
+        assert_eq!(recent.entries[0].id, "e5");
+        assert_eq!(recent.entries[1].id, "e4");
+
+        let all = recent_sends_for_session_at(&path, "codex", "s1", 100);
+        assert_eq!(all.total, 5);
+        assert_eq!(all.entries.len(), 5);
+        assert_eq!(all.entries[4].id, "e1");
     }
 
     #[test]

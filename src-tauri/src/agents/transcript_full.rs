@@ -205,6 +205,160 @@ pub fn load_events(kind: AgentKind, session_id: &str) -> Result<TranscriptDoc, S
     Ok(doc)
 }
 
+/// Latest real user prompt in a session that has a reliable unix timestamp (seconds → ms).
+/// Best-effort: missing transcript, inject-only text, or unparseable time → `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastUserPrompt {
+    pub text: String,
+    pub at_ms: i64,
+}
+
+pub fn last_timestamped_user_prompt(kind: AgentKind, session_id: &str) -> Option<LastUserPrompt> {
+    let doc = load_events(kind, session_id).ok()?;
+    for ev in doc.events.iter().rev() {
+        let TranscriptEvent::UserText { text, at, at_label } = ev else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let at_ms = match at {
+            Some(secs) => (*secs as i64).saturating_mul(1000),
+            None => match at_label.as_deref().and_then(parse_cursor_wall_clock_label) {
+                Some(secs) => (secs as i64).saturating_mul(1000),
+                None => continue,
+            },
+        };
+        return Some(LastUserPrompt {
+            text: text.to_string(),
+            at_ms,
+        });
+    }
+    None
+}
+
+/// Parse Cursor-style wall-clock labels such as
+/// `Monday, May 25, 2026, 7:57 AM (UTC+8)` → unix seconds.
+/// Best-effort; unknown layouts return `None`.
+pub fn parse_cursor_wall_clock_label(label: &str) -> Option<u64> {
+    let s = label.trim();
+    // Drop leading weekday: "Monday, May 25, 2026, 7:57 AM (UTC+8)"
+    let rest = s.split_once(", ").map(|(_, r)| r).unwrap_or(s);
+    // rest: "May 25, 2026, 7:57 AM (UTC+8)" or "May 25, 2026, 7:57 AM (UTC+08:00)"
+    let (date_time, tz) = rest.rsplit_once('(')?;
+    let tz = tz.trim().trim_end_matches(')').trim();
+    let date_time = date_time.trim().trim_end_matches(',').trim();
+    // date_time: "May 25, 2026, 7:57 AM"
+    let parts: Vec<&str> = date_time.split(',').map(str::trim).collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let mon_day: Vec<&str> = parts[0].split_whitespace().collect();
+    if mon_day.len() != 2 {
+        return None;
+    }
+    let month = month_abbr_to_num(mon_day[0])?;
+    let day: u32 = mon_day[1].parse().ok()?;
+    let year: i32 = parts[1].parse().ok()?;
+    let time_bits: Vec<&str> = parts[2].split_whitespace().collect();
+    if time_bits.len() != 2 {
+        return None;
+    }
+    let (hh_mm, ampm) = (time_bits[0], time_bits[1].to_ascii_uppercase());
+    let (h_str, m_str) = hh_mm.split_once(':')?;
+    let mut hour: u32 = h_str.parse().ok()?;
+    let minute: u32 = m_str.parse().ok()?;
+    match ampm.as_str() {
+        "AM" => {
+            if hour == 12 {
+                hour = 0;
+            }
+        }
+        "PM" => {
+            if hour != 12 {
+                hour += 12;
+            }
+        }
+        _ => return None,
+    }
+    let offset_secs = parse_utc_offset_label(tz)?;
+    // Civil time in that offset → UTC unix.
+    let utc_secs = civil_to_unix_secs(year, month, day, hour, minute, 0)? as i64 - offset_secs;
+    if utc_secs < 0 {
+        return None;
+    }
+    Some(utc_secs as u64)
+}
+
+fn month_abbr_to_num(s: &str) -> Option<u32> {
+    match s {
+        "Jan" | "January" => Some(1),
+        "Feb" | "February" => Some(2),
+        "Mar" | "March" => Some(3),
+        "Apr" | "April" => Some(4),
+        "May" => Some(5),
+        "Jun" | "June" => Some(6),
+        "Jul" | "July" => Some(7),
+        "Aug" | "August" => Some(8),
+        "Sep" | "Sept" | "September" => Some(9),
+        "Oct" | "October" => Some(10),
+        "Nov" | "November" => Some(11),
+        "Dec" | "December" => Some(12),
+        _ => None,
+    }
+}
+
+/// `UTC+8`, `UTC+08:00`, `UTC-5`, `UTC` → offset east of UTC in seconds.
+fn parse_utc_offset_label(tz: &str) -> Option<i64> {
+    let t = tz.trim();
+    if t.eq_ignore_ascii_case("UTC") || t.eq_ignore_ascii_case("GMT") {
+        return Some(0);
+    }
+    let rest = t
+        .strip_prefix("UTC")
+        .or_else(|| t.strip_prefix("utc"))
+        .or_else(|| t.strip_prefix("GMT"))
+        .or_else(|| t.strip_prefix("gmt"))?;
+    if rest.is_empty() {
+        return Some(0);
+    }
+    let (sign, body) = match rest.chars().next()? {
+        '+' => (1i64, &rest[1..]),
+        '-' => (-1i64, &rest[1..]),
+        _ => return None,
+    };
+    let (h, m) = if let Some((h, m)) = body.split_once(':') {
+        (h.parse::<i64>().ok()?, m.parse::<i64>().ok()?)
+    } else {
+        (body.parse::<i64>().ok()?, 0)
+    };
+    Some(sign * (h * 3600 + m * 60))
+}
+
+/// Proleptic Gregorian civil date/time → unix seconds (UTC components).
+fn civil_to_unix_secs(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    min: u32,
+    sec: u32,
+) -> Option<i64> {
+    if !(1..=12).contains(&month) || day == 0 || day > 31 || hour > 23 || min > 59 || sec > 59 {
+        return None;
+    }
+    // Howard Hinnant civil_from_days inverse.
+    let y = year as i64 - if month <= 2 { 1 } else { 0 };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400) as u64;
+    let mp = month as u64 + if month > 2 { 0 } else { 12 } - 3;
+    let doy = (153 * mp + 2) / 5 + day as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = (era * 146097 + doe as i64) - 719468;
+    Some(days * 86400 + hour as i64 * 3600 + min as i64 * 60 + sec as i64)
+}
+
 /// Transcript file mtime（控制台分页缓存的失效键，spec gui-agent-console C14）。
 /// Cursor IDE 形态取 vscdb 的 `lastUpdatedAt`（全局库文件 mtime 恒变，不能当键）。
 pub fn transcript_mtime(kind: AgentKind, session_id: &str) -> Option<std::time::SystemTime> {

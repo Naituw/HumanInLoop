@@ -78,7 +78,32 @@ pub fn dispatch() {
             exit(0);
         }
         "--show-last" => {
+            let count = match argv.get(2).map(String::as_str) {
+                None => 1usize,
+                Some(raw) if argv.len() == 3 => match crate::show_last::parse_count(Some(raw)) {
+                    Ok(n) => n,
+                    Err(error) => {
+                        eprintln!("{}{error}", i18n::err_prefix(lang));
+                        exit(1);
+                    }
+                },
+                _ => {
+                    eprintln!(
+                        "{}{}",
+                        i18n::err_prefix(lang),
+                        crate::show_last::Error::InvalidCount
+                    );
+                    exit(1);
+                }
+            };
             let context = caller_context();
+            let transcript = match (&context.agent_kind, &context.agent_session_id) {
+                (Some(agent_kind), Some(session_id)) => Some(crate::show_last::TranscriptHint {
+                    agent_kind: agent_kind.clone(),
+                    session_id: session_id.clone(),
+                }),
+                _ => None,
+            };
             let scope = match show_last_cli_scope(
                 context.agent_kind,
                 context.agent_session_id,
@@ -90,7 +115,12 @@ pub fn dispatch() {
                     exit(1);
                 }
             };
-            match crate::show_last::recover(&scope) {
+            match crate::show_last::recover(
+                &scope,
+                count,
+                crate::show_last::Surface::Cli,
+                transcript.as_ref(),
+            ) {
                 Ok(output) => {
                     print_line(&output);
                     exit(0);

@@ -672,7 +672,12 @@ fn self_call_usage_allowed(args: &[String]) -> bool {
         None => false,
         // Read-only recovery of the last exchange; the interaction protocol requires agents to run
         // it after a compaction, so making them ask for approval first is pure friction.
-        Some("--agent-help") | Some("--show-last") => args.len() == 1,
+        Some("--agent-help") => args.len() == 1,
+        // Read-only recovery; optional count 1..=10 after the flag (see show-last-multi).
+        Some("--show-last") => {
+            args.len() == 1
+                || (args.len() == 2 && args[1].parse::<u32>().is_ok_and(|n| (1..=10).contains(&n)))
+        }
         Some("todo") => {
             args.get(1).map(String::as_str) == Some("add")
                 && args.len() >= 3
@@ -2143,6 +2148,7 @@ mod tests {
         };
         assert!(ok(&["--agent-help"]));
         assert!(ok(&["--show-last"]));
+        assert!(ok(&["--show-last", "5"]));
         assert!(ok(&["todo", "add", "review the deploy plan"]));
         assert!(ok(&[
             "--whats-next",
@@ -2167,6 +2173,8 @@ mod tests {
         assert!(!ok(&[]));
         assert!(!ok(&["--agent-help", "extra"]));
         assert!(!ok(&["--show-last", "extra"]));
+        assert!(!ok(&["--show-last", "0"]));
+        assert!(!ok(&["--show-last", "11"]));
         assert!(!ok(&["todo", "list"]));
         assert!(!ok(&["todo", "add"]));
         assert!(!ok(&["--whats-next", "-q", "smuggled question"]));

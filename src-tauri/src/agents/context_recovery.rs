@@ -184,7 +184,7 @@ fn input_shape_matches(tool_name: &str, input: &Value) -> bool {
     let allowed: &[&str] = match tool_name {
         "ask" => &["message", "questions", "files"],
         "whats_next" => &["message", "options", "files"],
-        "show_last" => &[],
+        "show_last" => &["count"],
         _ => return false,
     };
     if object.keys().any(|key| !allowed.contains(&key.as_str())) {
@@ -201,7 +201,11 @@ fn input_shape_matches(tool_name: &str, input: &Value) -> bool {
                     .and_then(Value::as_array)
                     .is_some_and(|questions| !questions.is_empty())
         }
-        "show_last" => object.is_empty(),
+        "show_last" => match object.get("count") {
+            None => true,
+            Some(Value::Number(n)) => n.as_u64().is_some_and(|v| (1..=10).contains(&v)),
+            _ => false,
+        },
         "whats_next" => true,
         _ => false,
     }
@@ -292,6 +296,8 @@ mod tests {
         );
         assert!(askhuman_tool_name(AgentKind::Cursor, "MCP:other").is_none());
         assert!(input_shape_matches("show_last", &json!({})));
+        assert!(input_shape_matches("show_last", &json!({"count": 3})));
+        assert!(!input_shape_matches("show_last", &json!({"count": 0})));
         assert!(!input_shape_matches("show_last", &json!({"x": 1})));
         assert!(input_shape_matches("ask", &json!({"message": "hello"})));
         assert!(!input_shape_matches("ask", &json!({"message": ""})));

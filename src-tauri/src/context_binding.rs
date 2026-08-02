@@ -285,12 +285,20 @@ pub fn canonical_tool_arguments_sha256(tool_name: &str, arguments: &Value) -> Op
                     .ok()?;
             crate::mcp::ask::whats_next_arguments_value(&params)
         }
-        "show_last"
-            if arguments
-                .as_object()
-                .is_some_and(|object| object.is_empty()) =>
-        {
-            serde_json::json!({})
+        "show_last" => {
+            let params =
+                serde_json::from_value::<crate::mcp::ask::ShowLastParams>(arguments.clone())
+                    .ok()?;
+            // Reject unknown public keys by requiring deserialize + only known fields.
+            if let Some(object) = arguments.as_object() {
+                if object
+                    .keys()
+                    .any(|key| key != "count" && !key.starts_with("__askhuman_"))
+                {
+                    return None;
+                }
+            }
+            crate::mcp::ask::show_last_arguments_value(&params)
         }
         _ => return None,
     };
@@ -563,6 +571,10 @@ mod tests {
         assert_eq!(
             canonical_tool_arguments_sha256("show_last", &serde_json::json!({})),
             Some(canonical_arguments_sha256(&serde_json::json!({})))
+        );
+        assert_eq!(
+            canonical_tool_arguments_sha256("show_last", &serde_json::json!({"count": 3})),
+            Some(canonical_arguments_sha256(&serde_json::json!({"count": 3})))
         );
         assert!(canonical_tool_arguments_sha256(
             "show_last",

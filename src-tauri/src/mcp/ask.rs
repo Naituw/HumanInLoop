@@ -185,10 +185,13 @@ pub struct WhatsNextParams {
     session_token: Option<String>,
 }
 
-// Publicly zero-argument input. Managed hooks may add the private field after model generation;
-// it is deliberately absent from tools/list.
+// Optional public `count` (1..=10, default 1). Managed hooks may add the private session token
+// after model generation; the token is deliberately absent from tools/list.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ShowLastParams {
+    /// How many recent completed AskHuman exchanges to recover (1–10). Defaults to 1.
+    #[serde(default)]
+    pub count: Option<u32>,
     #[serde(default, rename = "__askhuman_session_token_v1")]
     #[schemars(skip)]
     session_token: Option<String>,
@@ -425,12 +428,13 @@ approves ending the turn — only then may you end it.",
         )]))
     }
 
-    /// Recover the complete latest AskHuman exchange for the current Agent session.
+    /// Recover recent completed AskHuman exchange(s) for the current Agent session.
     #[tool(
         name = "show_last",
-        description = "Retrieve the full latest completed AskHuman question and human answer for \
-the current Agent session. Call this immediately after context summarization/compaction, or whenever \
-you are unsure of the exact prior AskHuman exchange. Takes no public arguments.",
+        description = "Retrieve recent completed AskHuman exchange(s) for the current Agent session \
+(dialogue script with assistant/user roles and answer times). Call after context \
+summarization/compaction, or whenever prior AskHuman details are uncertain. Optional `count` \
+(1–10, default 1) returns more recent exchanges; omit it for the default single exchange.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -445,16 +449,37 @@ you are unsure of the exact prior AskHuman exchange. Takes no public arguments."
         if let Some(blocked) = codex_thread_guard(&context.meta, "show_last") {
             return Ok(blocked);
         }
+        let count = match params.count {
+            None => 1usize,
+            Some(n) => match crate::show_last::validate_count(n as usize) {
+                Ok(n) => n,
+                Err(error) => {
+                    return Ok(CallToolResult::error(vec![ContentBlock::text(
+                        error.to_string(),
+                    )]));
+                }
+            },
+        };
+        let public_arguments = show_last_arguments_value(&params);
         let binding = self
             .resolve_binding(
                 &context.meta,
                 params.session_token.as_deref(),
                 "show_last",
-                &serde_json::json!({}),
+                &public_arguments,
             )
             .await;
+        let transcript = binding.as_ref().map(|b| crate::show_last::TranscriptHint {
+            agent_kind: b.agent_kind.clone(),
+            session_id: b.session_id.clone(),
+        });
         let scope = show_last_scope(binding, &self.mcp_instance_id, &self.project);
-        match crate::show_last::recover(&scope) {
+        match crate::show_last::recover(
+            &scope,
+            count,
+            crate::show_last::Surface::Mcp,
+            transcript.as_ref(),
+        ) {
             Ok(output) => Ok(CallToolResult::success(vec![ContentBlock::text(output)])),
             Err(error) => Ok(CallToolResult::error(vec![ContentBlock::text(
                 error.to_string(),
@@ -808,6 +833,15 @@ pub(crate) fn ask_arguments_value(params: &AskParams) -> Value {
         );
     }
     Value::Object(object)
+}
+
+/// Public (fingerprint) view of `show_last` params: omit default count so empty `{}` stays stable.
+pub(crate) fn show_last_arguments_value(params: &ShowLastParams) -> Value {
+    let mut map = serde_json::Map::new();
+    if let Some(count) = params.count {
+        map.insert("count".into(), Value::from(count));
+    }
+    Value::Object(map)
 }
 
 pub(crate) fn whats_next_arguments_value(params: &WhatsNextParams) -> Value {
@@ -1445,18 +1479,25 @@ mod tests {
     }
 
     #[test]
-    fn show_last_is_registered_with_zero_public_fields() {
+    fn show_last_is_registered_with_optional_count_only() {
         let server = AskServer::new();
         let tool = server.tool_router.get("show_last").unwrap();
         let schema = Value::Object((*tool.input_schema).clone());
         assert!(schema
             .pointer("/properties/__askhuman_session_token_v1")
             .is_none());
+        assert!(schema.pointer("/properties/count").is_some());
         assert!(tool
             .description
             .as_deref()
             .unwrap_or("")
             .contains("context summarization/compaction"));
+        let params: ShowLastParams = serde_json::from_value(json!({"count": 3})).unwrap();
+        assert_eq!(show_last_arguments_value(&params), json!({"count": 3}));
+        assert_eq!(
+            show_last_arguments_value(&ShowLastParams::default()),
+            json!({})
+        );
     }
 
     #[test]

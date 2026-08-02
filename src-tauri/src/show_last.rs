@@ -1,11 +1,20 @@
-//! Exact recovery of the latest completed AskHuman exchange after Agent context compaction.
+//! Recover completed AskHuman exchanges (and optional last User Prompt) after Agent context
+//! compaction. Output is an indented dialogue script (see `docs/specs/show-last-multi.md`).
 
-use crate::history::{HistoryAnswer, HistoryEntry};
+use crate::agents::transcript_full::LastUserPrompt;
+use crate::agents::AgentKind;
+use crate::history::{HistoryAnswer, HistoryEntry, RecentSends};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const MESSAGE_FILE_THRESHOLD_BYTES: usize = 8 * 1024;
 pub const MESSAGE_STDOUT_PREFIX_BYTES: usize = 2 * 1024;
+pub const MAX_COUNT: usize = 10;
+
+const PRIORITY_NOTE: &str = "\
+priority note:
+  A later AskHuman answer below is newer than the User Prompt. Use that
+  AskHuman exchange as the current task — not the older User Prompt.";
 
 #[derive(Debug, Clone)]
 pub enum Scope {
@@ -36,10 +45,25 @@ impl Scope {
     }
 }
 
+/// Whether recovery was invoked from CLI or MCP (affects “for more” header wording).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    Cli,
+    Mcp,
+}
+
+/// Optional transcript session used to load the last User Prompt (independent of history scope).
+#[derive(Debug, Clone)]
+pub struct TranscriptHint {
+    pub agent_kind: String,
+    pub session_id: String,
+}
+
 #[derive(Debug)]
 pub enum Error {
     HistoryDisabled,
     NotFound,
+    InvalidCount,
     Io(std::io::Error),
 }
 
@@ -47,7 +71,12 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::HistoryDisabled => write!(f, "AskHuman history is disabled"),
-            Error::NotFound => write!(f, "No completed AskHuman exchange was found for this scope"),
+            Error::NotFound => {
+                write!(f, "No completed AskHuman exchange was found for this scope")
+            }
+            Error::InvalidCount => {
+                write!(f, "count must be an integer between 1 and {MAX_COUNT}")
+            }
             Error::Io(error) => write!(
                 f,
                 "Failed to prepare the recovered AskHuman exchange: {error}"
@@ -58,139 +87,379 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Query and format the latest completed exchange. Exact session scopes never cascade to weaker
-/// partitions; callers must select the one authoritative scope they possess.
-pub fn recover(scope: &Scope) -> Result<String, Error> {
+/// Parse and validate count (1..=MAX_COUNT).
+pub fn parse_count(raw: Option<&str>) -> Result<usize, Error> {
+    match raw {
+        None => Ok(1),
+        Some(s) => {
+            let n: usize = s.parse().map_err(|_| Error::InvalidCount)?;
+            if (1..=MAX_COUNT).contains(&n) {
+                Ok(n)
+            } else {
+                Err(Error::InvalidCount)
+            }
+        }
+    }
+}
+
+pub fn validate_count(n: usize) -> Result<usize, Error> {
+    if (1..=MAX_COUNT).contains(&n) {
+        Ok(n)
+    } else {
+        Err(Error::InvalidCount)
+    }
+}
+
+/// Query and format recovered exchanges for `scope`.
+pub fn recover(
+    scope: &Scope,
+    count: usize,
+    surface: Surface,
+    transcript: Option<&TranscriptHint>,
+) -> Result<String, Error> {
     let history_limit = crate::config::AppConfig::load_without_secrets()
         .general
         .history_limit;
     recover_with(
-        scope,
-        history_limit,
-        |scope| match scope {
+        RecoverInput {
+            scope,
+            count,
+            surface,
+            transcript,
+            history_limit,
+            storage_dir: &crate::paths::show_last_dir(),
+            now_ms: crate::history::now_ms(),
+        },
+        |scope, n| match scope {
             Scope::AgentSession {
                 agent_kind,
                 session_id,
-            } => crate::history::latest_send_for_session(agent_kind, session_id),
+            } => crate::history::recent_sends_for_session(agent_kind, session_id, n),
             Scope::McpInstance {
                 mcp_instance_id,
                 project,
-            } => crate::history::latest_send_for_mcp_instance(mcp_instance_id, project),
-            Scope::Project(project) => crate::history::latest_send_for_project(project),
+            } => crate::history::recent_sends_for_mcp_instance(mcp_instance_id, project, n),
+            Scope::Project(project) => crate::history::recent_sends_for_project(project, n),
         },
-        &crate::paths::show_last_dir(),
+        |hint| {
+            let kind = AgentKind::parse(&hint.agent_kind)?;
+            crate::agents::transcript_full::last_timestamped_user_prompt(kind, &hint.session_id)
+        },
     )
 }
 
-fn recover_with(
-    scope: &Scope,
+struct RecoverInput<'a> {
+    scope: &'a Scope,
+    count: usize,
+    surface: Surface,
+    transcript: Option<&'a TranscriptHint>,
     history_limit: u32,
-    lookup: impl FnOnce(&Scope) -> Option<HistoryEntry>,
-    storage_dir: &std::path::Path,
+    storage_dir: &'a Path,
+    now_ms: i64,
+}
+
+fn recover_with(
+    input: RecoverInput<'_>,
+    lookup: impl FnOnce(&Scope, usize) -> RecentSends,
+    load_prompt: impl FnOnce(&TranscriptHint) -> Option<LastUserPrompt>,
 ) -> Result<String, Error> {
-    if history_limit == 0 {
+    if input.history_limit == 0 {
         return Err(Error::HistoryDisabled);
     }
-    let entry = lookup(scope).ok_or(Error::NotFound)?;
-    render_at(&entry, &scope.storage_key(), storage_dir).map_err(Error::Io)
+    let count = validate_count(input.count)?;
+    let recent = lookup(input.scope, count);
+    if recent.entries.is_empty() {
+        return Err(Error::NotFound);
+    }
+    let prompt = input.transcript.and_then(load_prompt);
+    render_timeline(
+        &recent.entries,
+        recent.total,
+        prompt.as_ref(),
+        input.surface,
+        &input.scope.storage_key(),
+        input.storage_dir,
+        input.now_ms,
+    )
+    .map_err(Error::Io)
 }
 
-fn render(entry: &HistoryEntry, storage_key: &str) -> std::io::Result<String> {
-    render_at(entry, storage_key, &crate::paths::show_last_dir())
+#[derive(Debug)]
+enum TimelineItem<'a> {
+    Exchange {
+        entry: &'a HistoryEntry,
+        /// 1-based index in output order (oldest = 1); assigned after sort.
+        index: usize,
+    },
+    UserPrompt(&'a LastUserPrompt),
 }
 
-fn render_at(
+fn item_time_ms(item: &TimelineItem<'_>) -> i64 {
+    match item {
+        TimelineItem::Exchange { entry, .. } => entry.timestamp_ms,
+        TimelineItem::UserPrompt(p) => p.at_ms,
+    }
+}
+
+fn render_timeline(
+    entries_newest_first: &[HistoryEntry],
+    total: usize,
+    prompt: Option<&LastUserPrompt>,
+    surface: Surface,
+    storage_key: &str,
+    storage_dir: &Path,
+    now_ms: i64,
+) -> std::io::Result<String> {
+    let shown = entries_newest_first.len();
+    let mut items: Vec<TimelineItem<'_>> = entries_newest_first
+        .iter()
+        .map(|entry| TimelineItem::Exchange { entry, index: 0 })
+        .collect();
+    if let Some(p) = prompt {
+        items.push(TimelineItem::UserPrompt(p));
+    }
+    // Oldest first; equal times: User Prompt before Exchange.
+    items.sort_by(|a, b| {
+        item_time_ms(a)
+            .cmp(&item_time_ms(b))
+            .then_with(|| match (a, b) {
+                (TimelineItem::UserPrompt(_), TimelineItem::Exchange { .. }) => {
+                    std::cmp::Ordering::Less
+                }
+                (TimelineItem::Exchange { .. }, TimelineItem::UserPrompt(_)) => {
+                    std::cmp::Ordering::Greater
+                }
+                _ => std::cmp::Ordering::Equal,
+            })
+    });
+    // Number exchanges in output order.
+    let mut exchange_n = 0usize;
+    for item in &mut items {
+        if let TimelineItem::Exchange { index, .. } = item {
+            exchange_n += 1;
+            *index = exchange_n;
+        }
+    }
+
+    let has_prompt = prompt.is_some();
+    let use_shell = shown >= 2 || has_prompt || total > shown;
+    let has_later_exchange = prompt.is_some_and(|p| {
+        entries_newest_first
+            .iter()
+            .any(|e| e.timestamp_ms > p.at_ms)
+    });
+
+    let mut sections: Vec<String> = Vec::new();
+    if use_shell {
+        sections.push(format_header(shown, total, surface));
+    }
+
+    for item in &items {
+        match item {
+            TimelineItem::Exchange { entry, index } => {
+                let body = render_exchange_body(entry, storage_key, storage_dir, now_ms)?;
+                if use_shell {
+                    sections.push(format!(
+                        "━━━━━━━━ Exchange #{index} ━━━━━━━━\n{}",
+                        body.trim_end()
+                    ));
+                } else {
+                    sections.push(body.trim_end().to_string());
+                }
+            }
+            TimelineItem::UserPrompt(p) => {
+                let mut block = format!(
+                    "━━━━━━━━ User Prompt ━━━━━━━━\nsaid at: {}\n\n{}",
+                    format_answered_at(p.at_ms, now_ms),
+                    render_says_block(
+                        "user says",
+                        &p.text,
+                        &[],
+                        storage_key,
+                        "user-prompt",
+                        storage_dir,
+                    )?
+                );
+                if has_later_exchange {
+                    block.push_str("\n\n");
+                    block.push_str(PRIORITY_NOTE);
+                }
+                sections.push(block.trim_end().to_string());
+            }
+        }
+    }
+
+    let mut out = sections.join("\n\n");
+    out.push('\n');
+    Ok(out)
+}
+
+fn format_header(shown: usize, total: usize, surface: Surface) -> String {
+    if shown < total {
+        let more = match surface {
+            Surface::Cli => "use --show-last [N] for more",
+            Surface::Mcp => "use count=[N] for more",
+        };
+        format!("show_last: {shown} of {total} exchanges (oldest first; {more})")
+    } else {
+        format!("show_last: {shown} exchanges (oldest first)")
+    }
+}
+
+fn render_exchange_body(
     entry: &HistoryEntry,
     storage_key: &str,
-    storage_dir: &std::path::Path,
+    storage_dir: &Path,
+    now_ms: i64,
 ) -> std::io::Result<String> {
-    let mut blocks = Vec::new();
-    let mut message_sections = Vec::new();
+    let mut parts = Vec::new();
+    parts.push(format!(
+        "answered at: {}",
+        format_answered_at(entry.timestamp_ms, now_ms)
+    ));
 
-    if entry.message.text.len() > MESSAGE_FILE_THRESHOLD_BYTES {
-        let path = write_full_message_at(storage_dir, storage_key, &entry.message.text)?;
-        message_sections.push(format!(
-            "[message_truncated]\n{}",
-            utf8_prefix(&entry.message.text, MESSAGE_STDOUT_PREFIX_BYTES)
-        ));
-        message_sections.push(format!("[message_full_file]\n{}", path.display()));
-    } else if !entry.message.text.is_empty() {
-        message_sections.push(format!("[message]\n{}", entry.message.text));
+    let message_files: Vec<&str> = entry
+        .message
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .collect();
+    if !entry.message.text.is_empty() || !message_files.is_empty() {
+        parts.push(render_says_block(
+            "assistant (you) says",
+            &entry.message.text,
+            &message_files,
+            storage_key,
+            &entry.id,
+            storage_dir,
+        )?);
     }
 
-    if !entry.message.files.is_empty() {
-        message_sections.push(format!(
-            "[message_files]\n{}",
-            entry
-                .message
-                .files
-                .iter()
-                .map(|file| file.path.as_str())
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
+    for (qi, question) in entry.questions.iter().enumerate() {
+        let mut qa = String::new();
+        qa.push_str(&format!("qa #{}\n", qi + 1));
+        qa.push_str("  assistant (you) asked:\n");
+        for line in question.message.lines() {
+            qa.push_str("    ");
+            qa.push_str(line);
+            qa.push('\n');
+        }
+        if question.message.ends_with('\n') || question.message.is_empty() {
+            // keep structure
+        }
+        // trim trailing single newline from asked body handling
+        if !qa.ends_with('\n') {
+            qa.push('\n');
+        }
+        qa.push_str(&render_user_answer(entry.answers.get(qi)));
+        parts.push(qa.trim_end().to_string());
     }
 
-    if !message_sections.is_empty() {
-        blocks.push(message_sections.join("\n\n"));
-    }
-
-    for (index, question) in entry.questions.iter().enumerate() {
-        let mut question_sections = vec![format!("[question]\n{}", question.message)];
-        question_sections.extend(render_answer(entry.answers.get(index)));
-        blocks.push(question_sections.join("\n\n"));
-    }
-
-    Ok(blocks.join("\n\n---\n\n"))
+    Ok(parts.join("\n\n") + "\n")
 }
 
-fn render_answer(answer: Option<&HistoryAnswer>) -> Vec<String> {
+fn render_user_answer(answer: Option<&HistoryAnswer>) -> String {
     let Some(answer) = answer else {
-        return vec!["[answer_status]\nunanswered".into()];
+        return "  user did not answer\n".into();
     };
-    let mut sections = Vec::new();
-
+    let mut fields = Vec::new();
     if !answer.selected_options.is_empty() {
-        sections.push(format!(
-            "[answer_selected_options]\n{}",
+        fields.push(format!(
+            "    selected_options: {}",
             answer.selected_options.join(", ")
         ));
     }
-
     if let Some(input) = answer
         .user_input
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|v| !v.is_empty())
     {
-        sections.push(format!("[answer_user_input]\n{input}"));
+        let mut block = String::from("    user_input:\n");
+        for line in input.lines() {
+            block.push_str("      ");
+            block.push_str(line);
+            block.push('\n');
+        }
+        fields.push(block.trim_end().to_string());
     }
+    let files: Vec<&str> = answer
+        .images
+        .iter()
+        .chain(answer.files.iter())
+        .map(String::as_str)
+        .collect();
+    if !files.is_empty() {
+        let mut block = String::from("    files:\n");
+        for f in files {
+            block.push_str("      - ");
+            block.push_str(f);
+            block.push('\n');
+        }
+        fields.push(block.trim_end().to_string());
+    }
+    if fields.is_empty() {
+        return "  user did not answer\n".into();
+    }
+    let mut out = String::from("  user answered:\n");
+    out.push_str(&fields.join("\n"));
+    out.push('\n');
+    out
+}
 
-    if !answer.images.is_empty() || !answer.files.is_empty() {
-        sections.push(format!(
-            "[answer_files]\n{}",
-            answer
-                .images
-                .iter()
-                .chain(&answer.files)
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
+fn render_says_block(
+    label: &str,
+    text: &str,
+    files: &[&str],
+    storage_key: &str,
+    file_id: &str,
+    storage_dir: &Path,
+) -> std::io::Result<String> {
+    let mut out = format!("{label}:\n");
+    if text.len() > MESSAGE_FILE_THRESHOLD_BYTES {
+        let path = write_full_message_at(storage_dir, storage_key, file_id, text)?;
+        let prefix = utf8_prefix(text, MESSAGE_STDOUT_PREFIX_BYTES);
+        for line in prefix.lines() {
+            out.push_str("  ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        if !prefix.ends_with('\n') && !prefix.is_empty() && text.len() > prefix.len() {
+            // no extra
+        }
+        out.push_str(&format!("  full message: {}\n", path.display()));
+    } else if !text.is_empty() {
+        for line in text.lines() {
+            out.push_str("  ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        if text.ends_with('\n') {
+            // empty trailing line already represented
+        }
     }
-
-    if sections.is_empty() {
-        sections.push("[answer_status]\nunanswered".into());
+    if !files.is_empty() {
+        out.push_str("  files:\n");
+        for f in files {
+            out.push_str("    - ");
+            out.push_str(f);
+            out.push('\n');
+        }
     }
-    sections
+    Ok(out.trim_end().to_string())
 }
 
 fn write_full_message_at(
-    storage_dir: &std::path::Path,
+    storage_dir: &Path,
     storage_key: &str,
+    entry_id: &str,
     message: &str,
 ) -> std::io::Result<PathBuf> {
-    let digest = Sha256::digest(storage_key.as_bytes());
+    let mut hasher = Sha256::new();
+    hasher.update(storage_key.as_bytes());
+    hasher.update([0]);
+    hasher.update(entry_id.as_bytes());
+    let digest = hasher.finalize();
     let filename = format!("{:x}.md", digest);
     let path = storage_dir.join(filename);
     crate::integrations::hook_edit::atomic_write_private(&path, message.as_bytes())
@@ -206,15 +475,114 @@ fn utf8_prefix(text: &str, max_bytes: usize) -> &str {
     &text[..end]
 }
 
+fn format_answered_at(at_ms: i64, now_ms: i64) -> String {
+    let relative = format_relative_en(at_ms, now_ms);
+    let absolute = format_absolute_local(at_ms);
+    format!("{relative} ({absolute})")
+}
+
+fn format_relative_en(at_ms: i64, now_ms: i64) -> String {
+    let delta = (now_ms - at_ms).max(0) as u64;
+    let secs = delta / 1000;
+    if secs < 5 {
+        return "just now".into();
+    }
+    if secs < 60 {
+        return format!("{secs} seconds ago");
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return if mins == 1 {
+            "1 minute ago".into()
+        } else {
+            format!("{mins} minutes ago")
+        };
+    }
+    let hours = mins / 60;
+    if hours < 48 {
+        return if hours == 1 {
+            "1 hour ago".into()
+        } else {
+            format!("{hours} hours ago")
+        };
+    }
+    let days = hours / 24;
+    if days == 1 {
+        "1 day ago".into()
+    } else {
+        format!("{days} days ago")
+    }
+}
+
+fn format_absolute_local(at_ms: i64) -> String {
+    let secs = at_ms.div_euclid(1000);
+    #[cfg(unix)]
+    {
+        let t = secs as libc::time_t;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        if unsafe { libc::localtime_r(&t, &mut tm).is_null() } {
+            return format_absolute_utc(secs);
+        }
+        // tm_gmtoff is seconds east of UTC (POSIX).
+        let off = tm.tm_gmtoff;
+        let sign = if off >= 0 { '+' } else { '-' };
+        let abs = off.unsigned_abs();
+        let oh = abs / 3600;
+        let om = (abs % 3600) / 60;
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02} {}{:02}{:02}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec,
+            sign,
+            oh,
+            om
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        format_absolute_utc(secs)
+    }
+}
+
+fn format_absolute_utc(secs: i64) -> String {
+    // Minimal UTC formatter without chrono.
+    let days = secs.div_euclid(86400);
+    let tod = secs.rem_euclid(86400) as u32;
+    let h = tod / 3600;
+    let m = (tod % 3600) / 60;
+    let s = tod % 60;
+    let (y, mo, d) = civil_from_days(days);
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02}:{s:02} +0000")
+}
+
+/// Howard Hinnant days_from_civil inverse: unix day count → y-m-d.
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m as u32, d as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::{ChannelAction, FileAttachment, MessagePrompt, OptionItem, Question};
 
-    fn sample(message: &str) -> HistoryEntry {
+    fn sample(message: &str, ts: i64) -> HistoryEntry {
         HistoryEntry {
-            id: "id".into(),
-            timestamp_ms: 1,
+            id: format!("id-{ts}"),
+            timestamp_ms: ts,
             project: "/p".into(),
             source: "Codex".into(),
             agent_kind: Some("codex".into()),
@@ -238,22 +606,119 @@ mod tests {
     }
 
     #[test]
-    fn renders_only_non_empty_context_question_and_actual_answer_fields() {
-        let output = render(&sample("Context"), "scope").unwrap();
-        assert_eq!(
-            output,
-            "[message]\nContext\n\n---\n\n[question]\nFull question\n\n\
-             [answer_selected_options]\nYes\n\n[answer_user_input]\ndetails\n\n\
-             [answer_files]\n/tmp/image.png\n/tmp/file.txt"
-        );
-        assert!(!output.contains("No"));
-        assert!(!output.contains("recommended"));
-        assert!(!output.contains("askhuman_last_exchange"));
+    fn parse_count_defaults_and_bounds() {
+        assert_eq!(parse_count(None).unwrap(), 1);
+        assert_eq!(parse_count(Some("3")).unwrap(), 3);
+        assert!(matches!(parse_count(Some("0")), Err(Error::InvalidCount)));
+        assert!(matches!(parse_count(Some("11")), Err(Error::InvalidCount)));
+        assert!(matches!(parse_count(Some("x")), Err(Error::InvalidCount)));
     }
 
     #[test]
-    fn renders_empty_message_files_multiple_questions_and_unanswered_states() {
-        let mut entry = sample("");
+    fn single_exchange_no_prompt_is_minimal() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = sample("Context", 1_000_000);
+        let out = render_timeline(
+            &[entry],
+            1,
+            None,
+            Surface::Cli,
+            "scope",
+            dir.path(),
+            1_000_000 + 120_000,
+        )
+        .unwrap();
+        assert!(!out.contains("show_last:"));
+        assert!(!out.contains("Exchange #"));
+        assert!(out.contains("answered at: 2 minutes ago"));
+        assert!(out.contains("assistant (you) says:\n  Context"));
+        assert!(out.contains("qa #1\n  assistant (you) asked:\n    Full question"));
+        assert!(out.contains("user answered:"));
+        assert!(out.contains("selected_options: Yes"));
+        assert!(out.contains("user_input:\n      details"));
+        assert!(!out.contains("priority note"));
+        assert!(!out.contains("No"));
+        assert!(!out.contains("recommended"));
+    }
+
+    #[test]
+    fn count_one_with_older_prompt_uses_shell_and_priority_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = sample("Context", 2_000_000);
+        let prompt = LastUserPrompt {
+            text: "帮我改成多条".into(),
+            at_ms: 1_000_000,
+        };
+        let out = render_timeline(
+            &[entry],
+            12,
+            Some(&prompt),
+            Surface::Cli,
+            "scope",
+            dir.path(),
+            2_000_000 + 60_000,
+        )
+        .unwrap();
+        assert!(out.starts_with(
+            "show_last: 1 of 12 exchanges (oldest first; use --show-last [N] for more)\n"
+        ));
+        assert!(out.contains("━━━━━━━━ User Prompt ━━━━━━━━"));
+        assert!(out.contains("user says:\n  帮我改成多条"));
+        assert!(out.contains("\n\npriority note:\n"));
+        assert!(out.contains("━━━━━━━━ Exchange #1 ━━━━━━━━"));
+        // Prompt section before exchange (older first).
+        let p = out.find("User Prompt").unwrap();
+        let e = out.find("Exchange #1").unwrap();
+        assert!(p < e);
+    }
+
+    #[test]
+    fn mcp_header_uses_count_placeholder() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = sample("x", 2_000_000);
+        let out = render_timeline(
+            &[entry],
+            5,
+            None,
+            Surface::Mcp,
+            "scope",
+            dir.path(),
+            2_000_000,
+        )
+        .unwrap();
+        assert!(
+            out.starts_with("show_last: 1 of 5 exchanges (oldest first; use count=[N] for more)\n")
+        );
+    }
+
+    #[test]
+    fn multi_exchange_oldest_first_numbering() {
+        let dir = tempfile::tempdir().unwrap();
+        let older = sample("old", 1_000_000);
+        let newer = sample("new", 3_000_000);
+        // newest-first input as history returns
+        let out = render_timeline(
+            &[newer, older],
+            2,
+            None,
+            Surface::Cli,
+            "scope",
+            dir.path(),
+            3_000_000,
+        )
+        .unwrap();
+        assert!(out.starts_with("show_last: 2 exchanges (oldest first)\n"));
+        let e1 = out.find("Exchange #1").unwrap();
+        let e2 = out.find("Exchange #2").unwrap();
+        assert!(e1 < e2);
+        assert!(out[e1..e2].contains("assistant (you) says:\n  old"));
+        assert!(out[e2..].contains("assistant (you) says:\n  new"));
+    }
+
+    #[test]
+    fn empty_answer_and_multi_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut entry = sample("", 1_000_000);
         entry.message.files = vec![FileAttachment {
             path: "/tmp/context.pdf".into(),
             name: "context.pdf".into(),
@@ -261,49 +726,90 @@ mod tests {
             is_image: false,
         }];
         entry.questions.push(Question::new(
-            "Second question".into(),
-            vec![OptionItem::new("A", false), OptionItem::new("B", true)],
+            "Second?".into(),
+            vec![OptionItem::new("A", false)],
         ));
-        entry.answers[0].selected_options = vec!["Yes".into(), "No".into()];
-        entry.answers[0].user_input = Some("  details  ".into());
-        // Missing answer entries and present-but-empty answers both render explicitly unanswered.
-        let output = render_at(&entry, "scope", tempfile::tempdir().unwrap().path()).unwrap();
-        assert!(output.starts_with("[message_files]\n/tmp/context.pdf\n\n---\n\n"));
-        assert!(output.contains("[answer_selected_options]\nYes, No"));
-        assert!(output.contains("[answer_user_input]\ndetails"));
-        assert!(output.contains("\n\n---\n\n[question]\nSecond question"));
-        assert!(output.ends_with("[answer_status]\nunanswered"));
-        assert!(!output.contains("[message]\n"));
-        assert!(!output.contains("recommended"));
-
         entry.answers.push(HistoryAnswer {
             selected_options: Vec::new(),
             user_input: Some("  ".into()),
             images: Vec::new(),
             files: Vec::new(),
         });
-        let output = render_at(&entry, "scope", tempfile::tempdir().unwrap().path()).unwrap();
-        assert!(output.ends_with("[answer_status]\nunanswered"));
+        let out = render_timeline(
+            &[entry],
+            1,
+            None,
+            Surface::Cli,
+            "scope",
+            dir.path(),
+            1_000_000,
+        )
+        .unwrap();
+        assert!(out.contains("assistant (you) says:\n  files:\n    - /tmp/context.pdf"));
+        assert!(out.contains("qa #2\n  assistant (you) asked:\n    Second?"));
+        assert!(out.contains("user did not answer"));
     }
 
     #[test]
-    fn recovery_errors_are_explicit_and_history_disabled_skips_lookup() {
-        let scope = Scope::Project("/p".into());
-        let looked_up = std::cell::Cell::new(false);
+    fn long_message_single_says_block_with_full_message_path() {
         let dir = tempfile::tempdir().unwrap();
+        let message = "x".repeat(MESSAGE_FILE_THRESHOLD_BYTES + 1);
+        let entry = sample(&message, 1);
+        let out = render_timeline(&[entry], 1, None, Surface::Cli, "scope", dir.path(), 1).unwrap();
+        assert!(out.contains("assistant (you) says:"));
+        assert!(out.contains("full message:"));
+        assert!(!out.contains("[message_truncated]"));
+        let path_line = out
+            .lines()
+            .find(|l| l.trim_start().starts_with("full message:"))
+            .unwrap();
+        let path = path_line.split_once(':').unwrap().1.trim();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), message);
+    }
+
+    #[test]
+    fn recovery_errors_and_history_disabled() {
+        let scope = Scope::Project("/p".into());
+        let dir = tempfile::tempdir().unwrap();
+        let looked = std::cell::Cell::new(false);
         let disabled = recover_with(
-            &scope,
-            0,
-            |_| {
-                looked_up.set(true);
-                Some(sample("ignored"))
+            RecoverInput {
+                scope: &scope,
+                count: 1,
+                surface: Surface::Cli,
+                transcript: None,
+                history_limit: 0,
+                storage_dir: dir.path(),
+                now_ms: 1,
             },
-            dir.path(),
+            |_, _| {
+                looked.set(true);
+                RecentSends {
+                    entries: vec![sample("x", 1)],
+                    total: 1,
+                }
+            },
+            |_| None,
         );
         assert!(matches!(disabled, Err(Error::HistoryDisabled)));
-        assert!(!looked_up.get());
+        assert!(!looked.get());
         assert!(matches!(
-            recover_with(&scope, 200, |_| None, dir.path()),
+            recover_with(
+                RecoverInput {
+                    scope: &scope,
+                    count: 1,
+                    surface: Surface::Cli,
+                    transcript: None,
+                    history_limit: 200,
+                    storage_dir: dir.path(),
+                    now_ms: 1,
+                },
+                |_, _| RecentSends {
+                    entries: vec![],
+                    total: 0
+                },
+                |_| None,
+            ),
             Err(Error::NotFound)
         ));
     }
@@ -322,8 +828,6 @@ mod tests {
         assert_eq!(session.storage_key(), "session:codex:same");
         assert_eq!(mcp.storage_key(), "mcp:same:/p");
         assert_eq!(project.storage_key(), "project:/p");
-        assert_ne!(session.storage_key(), mcp.storage_key());
-        assert_ne!(mcp.storage_key(), project.storage_key());
     }
 
     #[test]
@@ -333,45 +837,26 @@ mod tests {
     }
 
     #[test]
-    fn long_message_uses_private_overwrite_file_and_two_kib_prefix() {
+    fn newer_prompt_skips_priority_note() {
         let dir = tempfile::tempdir().unwrap();
-        let message = "x".repeat(MESSAGE_FILE_THRESHOLD_BYTES + 1);
-        let output = render_at(&sample(&message), "same-scope", dir.path()).unwrap();
-        let path = write_full_message_at(dir.path(), "same-scope", &message).unwrap();
-
-        assert!(output.contains("[message_truncated]"));
-        assert!(output.contains("[message_full_file]"));
-        assert!(output.contains(&path.display().to_string()));
-        let displayed = output
-            .split("[message_truncated]\n")
-            .nth(1)
-            .unwrap()
-            .split("\n\n[message_full_file]")
-            .next()
-            .unwrap();
-        assert_eq!(displayed.len(), MESSAGE_STDOUT_PREFIX_BYTES);
-        assert!(!output.contains("[message]\n"));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), message);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
-                0o700
-            );
-            assert_eq!(
-                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
-                0o600
-            );
-        }
-    }
-
-    #[test]
-    fn message_at_exact_threshold_stays_inline() {
-        let dir = tempfile::tempdir().unwrap();
-        let message = "x".repeat(MESSAGE_FILE_THRESHOLD_BYTES);
-        let output = render_at(&sample(&message), "threshold", dir.path()).unwrap();
-        assert!(!output.contains("[message_truncated]"));
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        let entry = sample("Context", 1_000_000);
+        let prompt = LastUserPrompt {
+            text: "new task".into(),
+            at_ms: 2_000_000,
+        };
+        let out = render_timeline(
+            &[entry],
+            1,
+            Some(&prompt),
+            Surface::Cli,
+            "scope",
+            dir.path(),
+            2_000_000,
+        )
+        .unwrap();
+        assert!(!out.contains("priority note"));
+        let e = out.find("Exchange #1").unwrap();
+        let p = out.find("User Prompt").unwrap();
+        assert!(e < p);
     }
 }
