@@ -2807,7 +2807,11 @@ pub async fn interject_init(session_id: String) -> Result<InterjectInit, String>
     #[cfg(not(unix))]
     let (text, entries, attachments) = {
         let _ = &session_id;
-        (String::new(), 0usize, Vec::new())
+        (
+            String::new(),
+            0usize,
+            Vec::<crate::models::FileAttachment>::new(),
+        )
     };
     Ok(InterjectInit {
         theme,
