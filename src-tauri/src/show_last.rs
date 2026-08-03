@@ -172,24 +172,53 @@ fn recover_with(
         return Err(Error::NotFound);
     }
     let prompt = input.transcript.and_then(load_prompt);
-    render_timeline(
-        &recent.entries,
-        recent.total,
-        prompt.as_ref(),
-        input.surface,
-        &input.scope.storage_key(),
-        input.storage_dir,
-        input.now_ms,
-    )
+    let after_prompt_total = prompt
+        .as_ref()
+        .map(|p| count_after_prompt(input.scope, p.at_ms));
+    render_timeline(TimelineInput {
+        entries_newest_first: &recent.entries,
+        total: recent.total,
+        prompt: prompt.as_ref(),
+        after_prompt_total,
+        surface: input.surface,
+        storage_key: &input.scope.storage_key(),
+        storage_dir: input.storage_dir,
+        now_ms: input.now_ms,
+    })
     .map_err(Error::Io)
+}
+
+struct TimelineInput<'a> {
+    entries_newest_first: &'a [HistoryEntry],
+    total: usize,
+    prompt: Option<&'a LastUserPrompt>,
+    after_prompt_total: Option<usize>,
+    surface: Surface,
+    storage_key: &'a str,
+    storage_dir: &'a Path,
+    now_ms: i64,
+}
+
+fn count_after_prompt(scope: &Scope, after_ms: i64) -> usize {
+    match scope {
+        Scope::AgentSession {
+            agent_kind,
+            session_id,
+        } => crate::history::count_sends_for_session_after(agent_kind, session_id, after_ms),
+        Scope::McpInstance {
+            mcp_instance_id,
+            project,
+        } => crate::history::count_sends_for_mcp_instance_after(mcp_instance_id, project, after_ms),
+        Scope::Project(project) => crate::history::count_sends_for_project_after(project, after_ms),
+    }
 }
 
 #[derive(Debug)]
 enum TimelineItem<'a> {
     Exchange {
         entry: &'a HistoryEntry,
-        /// 1-based index in output order (oldest = 1); assigned after sort.
-        index: usize,
+        /// Stable 1-based index in the full session (oldest Send = 1, newest = total).
+        absolute_n: usize,
     },
     UserPrompt(&'a LastUserPrompt),
 }
@@ -201,24 +230,31 @@ fn item_time_ms(item: &TimelineItem<'_>) -> i64 {
     }
 }
 
-fn render_timeline(
-    entries_newest_first: &[HistoryEntry],
-    total: usize,
-    prompt: Option<&LastUserPrompt>,
-    surface: Surface,
-    storage_key: &str,
-    storage_dir: &Path,
-    now_ms: i64,
-) -> std::io::Result<String> {
+fn render_timeline(input: TimelineInput<'_>) -> std::io::Result<String> {
+    let TimelineInput {
+        entries_newest_first,
+        total,
+        prompt,
+        after_prompt_total,
+        surface,
+        storage_key,
+        storage_dir,
+        now_ms,
+    } = input;
     let shown = entries_newest_first.len();
+    // Absolute numbers: newest-first rank 0 → total, rank 1 → total-1, …
     let mut items: Vec<TimelineItem<'_>> = entries_newest_first
         .iter()
-        .map(|entry| TimelineItem::Exchange { entry, index: 0 })
+        .enumerate()
+        .map(|(rank, entry)| TimelineItem::Exchange {
+            entry,
+            absolute_n: total.saturating_sub(rank),
+        })
         .collect();
     if let Some(p) = prompt {
         items.push(TimelineItem::UserPrompt(p));
     }
-    // Oldest first; equal times: User Prompt before Exchange.
+    // Chronological output (old → new); equal times: User Prompt before Exchange.
     items.sort_by(|a, b| {
         item_time_ms(a)
             .cmp(&item_time_ms(b))
@@ -232,14 +268,6 @@ fn render_timeline(
                 _ => std::cmp::Ordering::Equal,
             })
     });
-    // Number exchanges in output order.
-    let mut exchange_n = 0usize;
-    for item in &mut items {
-        if let TimelineItem::Exchange { index, .. } = item {
-            exchange_n += 1;
-            *index = exchange_n;
-        }
-    }
 
     let has_prompt = prompt.is_some();
     let use_shell = shown >= 2 || has_prompt || total > shown;
@@ -248,19 +276,30 @@ fn render_timeline(
             .iter()
             .any(|e| e.timestamp_ms > p.at_ms)
     });
+    let shown_after_prompt = prompt
+        .map(|p| {
+            entries_newest_first
+                .iter()
+                .filter(|e| e.timestamp_ms > p.at_ms)
+                .count()
+        })
+        .unwrap_or(0);
+    let omitted_after_prompt = after_prompt_total
+        .map(|t| t.saturating_sub(shown_after_prompt))
+        .unwrap_or(0);
 
     let mut sections: Vec<String> = Vec::new();
     if use_shell {
-        sections.push(format_header(shown, total, surface));
+        sections.push(format_header(shown));
     }
 
     for item in &items {
         match item {
-            TimelineItem::Exchange { entry, index } => {
+            TimelineItem::Exchange { entry, absolute_n } => {
                 let body = render_exchange_body(entry, storage_key, storage_dir, now_ms)?;
                 if use_shell {
                     sections.push(format!(
-                        "━━━━━━━━ Exchange #{index} ━━━━━━━━\n{}",
+                        "━━━━━━━━ Exchange #{absolute_n} ━━━━━━━━\n{}",
                         body.trim_end()
                     ));
                 } else {
@@ -284,6 +323,10 @@ fn render_timeline(
                     block.push_str("\n\n");
                     block.push_str(PRIORITY_NOTE);
                 }
+                if omitted_after_prompt > 0 {
+                    block.push_str("\n\n");
+                    block.push_str(&format_omitted_after_prompt(omitted_after_prompt, surface));
+                }
                 sections.push(block.trim_end().to_string());
             }
         }
@@ -294,16 +337,20 @@ fn render_timeline(
     Ok(out)
 }
 
-fn format_header(shown: usize, total: usize, surface: Surface) -> String {
-    if shown < total {
-        let more = match surface {
-            Surface::Cli => "use --show-last [N] for more",
-            Surface::Mcp => "use count=[N] for more",
-        };
-        format!("show_last: {shown} of {total} exchanges (oldest first; {more})")
+fn format_header(shown: usize) -> String {
+    if shown == 1 {
+        "show_last: 1 exchange".into()
     } else {
-        format!("show_last: {shown} exchanges (oldest first)")
+        format!("show_last: {shown} exchanges")
     }
+}
+
+fn format_omitted_after_prompt(omitted: usize, surface: Surface) -> String {
+    let more = match surface {
+        Surface::Cli => "use --show-last [N] for more",
+        Surface::Mcp => "use count=[N] for more",
+    };
+    format!("… {omitted} AskHuman exchanges omitted after this prompt; {more} …")
 }
 
 fn render_exchange_body(
@@ -605,6 +652,30 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn render(
+        entries: &[HistoryEntry],
+        total: usize,
+        prompt: Option<&LastUserPrompt>,
+        after_prompt_total: Option<usize>,
+        surface: Surface,
+        storage_key: &str,
+        storage_dir: &std::path::Path,
+        now_ms: i64,
+    ) -> String {
+        render_timeline(TimelineInput {
+            entries_newest_first: entries,
+            total,
+            prompt,
+            after_prompt_total,
+            surface,
+            storage_key,
+            storage_dir,
+            now_ms,
+        })
+        .unwrap()
+    }
+
     #[test]
     fn parse_count_defaults_and_bounds() {
         assert_eq!(parse_count(None).unwrap(), 1);
@@ -618,16 +689,16 @@ mod tests {
     fn single_exchange_no_prompt_is_minimal() {
         let dir = tempfile::tempdir().unwrap();
         let entry = sample("Context", 1_000_000);
-        let out = render_timeline(
+        let out = render(
             &[entry],
             1,
+            None,
             None,
             Surface::Cli,
             "scope",
             dir.path(),
             1_000_000 + 120_000,
-        )
-        .unwrap();
+        );
         assert!(!out.contains("show_last:"));
         assert!(!out.contains("Exchange #"));
         assert!(out.contains("answered at: 2 minutes ago"));
@@ -642,77 +713,89 @@ mod tests {
     }
 
     #[test]
-    fn count_one_with_older_prompt_uses_shell_and_priority_note() {
+    fn count_one_with_older_prompt_uses_shell_priority_note_and_omitted() {
         let dir = tempfile::tempdir().unwrap();
         let entry = sample("Context", 2_000_000);
         let prompt = LastUserPrompt {
             text: "帮我改成多条".into(),
             at_ms: 1_000_000,
         };
-        let out = render_timeline(
+        // 12 total in session; 11 after prompt; showing 1 → omit 10; absolute # of newest is 12.
+        let out = render(
             &[entry],
             12,
             Some(&prompt),
+            Some(11),
             Surface::Cli,
             "scope",
             dir.path(),
             2_000_000 + 60_000,
-        )
-        .unwrap();
-        assert!(out.starts_with(
-            "show_last: 1 of 12 exchanges (oldest first; use --show-last [N] for more)\n"
-        ));
+        );
+        assert!(out.starts_with("show_last: 1 exchange\n"));
+        assert!(!out.contains("oldest first"));
+        assert!(!out.contains(" of 12"));
         assert!(out.contains("━━━━━━━━ User Prompt ━━━━━━━━"));
         assert!(out.contains("user says:\n  帮我改成多条"));
         assert!(out.contains("\n\npriority note:\n"));
-        assert!(out.contains("━━━━━━━━ Exchange #1 ━━━━━━━━"));
-        // Prompt section before exchange (older first).
+        assert!(out.contains(
+            "… 10 AskHuman exchanges omitted after this prompt; use --show-last [N] for more …"
+        ));
+        assert!(out.contains("━━━━━━━━ Exchange #12 ━━━━━━━━"));
         let p = out.find("User Prompt").unwrap();
-        let e = out.find("Exchange #1").unwrap();
-        assert!(p < e);
+        let note = out.find("priority note:").unwrap();
+        let omit = out.find("omitted after this prompt").unwrap();
+        let e = out.find("Exchange #12").unwrap();
+        assert!(p < note && note < omit && omit < e);
     }
 
     #[test]
-    fn mcp_header_uses_count_placeholder() {
+    fn mcp_omitted_line_uses_count_placeholder() {
         let dir = tempfile::tempdir().unwrap();
         let entry = sample("x", 2_000_000);
-        let out = render_timeline(
+        let prompt = LastUserPrompt {
+            text: "hi".into(),
+            at_ms: 1_000_000,
+        };
+        let out = render(
             &[entry],
             5,
-            None,
+            Some(&prompt),
+            Some(4),
             Surface::Mcp,
             "scope",
             dir.path(),
             2_000_000,
-        )
-        .unwrap();
-        assert!(
-            out.starts_with("show_last: 1 of 5 exchanges (oldest first; use count=[N] for more)\n")
         );
+        assert!(out.starts_with("show_last: 1 exchange\n"));
+        assert!(out.contains(
+            "… 3 AskHuman exchanges omitted after this prompt; use count=[N] for more …"
+        ));
+        assert!(out.contains("Exchange #5"));
     }
 
     #[test]
-    fn multi_exchange_oldest_first_numbering() {
+    fn multi_exchange_uses_stable_absolute_numbers() {
         let dir = tempfile::tempdir().unwrap();
         let older = sample("old", 1_000_000);
         let newer = sample("new", 3_000_000);
-        // newest-first input as history returns
-        let out = render_timeline(
+        // newest-first input; total=10 so absolute ids are #9 and #10
+        let out = render(
             &[newer, older],
-            2,
+            10,
+            None,
             None,
             Surface::Cli,
             "scope",
             dir.path(),
             3_000_000,
-        )
-        .unwrap();
-        assert!(out.starts_with("show_last: 2 exchanges (oldest first)\n"));
-        let e1 = out.find("Exchange #1").unwrap();
-        let e2 = out.find("Exchange #2").unwrap();
-        assert!(e1 < e2);
-        assert!(out[e1..e2].contains("assistant (you) says:\n  old"));
-        assert!(out[e2..].contains("assistant (you) says:\n  new"));
+        );
+        assert!(out.starts_with("show_last: 2 exchanges\n"));
+        assert!(!out.contains("oldest first"));
+        let e9 = out.find("Exchange #9").unwrap();
+        let e10 = out.find("Exchange #10").unwrap();
+        assert!(e9 < e10);
+        assert!(out[e9..e10].contains("assistant (you) says:\n  old"));
+        assert!(out[e10..].contains("assistant (you) says:\n  new"));
     }
 
     #[test]
@@ -735,16 +818,16 @@ mod tests {
             images: Vec::new(),
             files: Vec::new(),
         });
-        let out = render_timeline(
+        let out = render(
             &[entry],
             1,
+            None,
             None,
             Surface::Cli,
             "scope",
             dir.path(),
             1_000_000,
-        )
-        .unwrap();
+        );
         assert!(out.contains("assistant (you) says:\n  files:\n    - /tmp/context.pdf"));
         assert!(out.contains("qa #2\n  assistant (you) asked:\n    Second?"));
         assert!(out.contains("user did not answer"));
@@ -755,7 +838,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let message = "x".repeat(MESSAGE_FILE_THRESHOLD_BYTES + 1);
         let entry = sample(&message, 1);
-        let out = render_timeline(&[entry], 1, None, Surface::Cli, "scope", dir.path(), 1).unwrap();
+        let out = render(
+            &[entry],
+            1,
+            None,
+            None,
+            Surface::Cli,
+            "scope",
+            dir.path(),
+            1,
+        );
         assert!(out.contains("assistant (you) says:"));
         assert!(out.contains("full message:"));
         assert!(!out.contains("[message_truncated]"));
@@ -844,19 +936,40 @@ mod tests {
             text: "new task".into(),
             at_ms: 2_000_000,
         };
-        let out = render_timeline(
+        let out = render(
             &[entry],
             1,
             Some(&prompt),
+            Some(0),
             Surface::Cli,
             "scope",
             dir.path(),
             2_000_000,
-        )
-        .unwrap();
+        );
         assert!(!out.contains("priority note"));
+        assert!(!out.contains("omitted after this prompt"));
         let e = out.find("Exchange #1").unwrap();
         let p = out.find("User Prompt").unwrap();
         assert!(e < p);
+    }
+
+    #[test]
+    fn single_with_more_history_no_prompt_uses_singular_header_and_absolute_n() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = sample("only latest", 9_000_000);
+        let out = render(
+            &[entry],
+            74,
+            None,
+            None,
+            Surface::Cli,
+            "scope",
+            dir.path(),
+            9_000_000,
+        );
+        assert!(out.starts_with("show_last: 1 exchange\n"));
+        assert!(out.contains("━━━━━━━━ Exchange #74 ━━━━━━━━"));
+        assert!(!out.contains("of 74"));
+        assert!(!out.contains("oldest first"));
     }
 }

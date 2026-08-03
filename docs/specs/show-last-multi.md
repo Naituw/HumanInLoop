@@ -98,50 +98,53 @@ said at: 15 minutes ago (2026-08-01 14:19:01 +0800)
 - 绝对：本地时区 `YYYY-MM-DD HH:MM:SS ±HHMM`。
 - AskHuman 数据源：`timestamp_ms`（回答落盘）。不存 / 不展示 asked_at。
 
-#### 3.3 总头（header）与 Exchange 横幅
+#### 3.3 总头（header）、稳定编号与 Prompt 后省略
 
-查询时除取出本次返回的 `shown` 条外，还要知道当前 scope 内 **可用 Send 总数** `total`（同一 history 扫描即可，不二次读盘）。
+查询时取出本次返回的最近 `shown` 条，并得到 scope 内 **Send 总数** `total`（用于稳定绝对编号）。有 User Prompt 时另计 `after_prompt` = `answered_at > prompt.said_at` 的 Send 数。
 
 **何时写总头 + 每条 Exchange 横幅**
 
 | 条件 | 写总头 + `Exchange #k` 横幅 |
 | --- | --- |
 | `shown == 1` 且 **无** User Prompt 且 `total == 1` | 否（极简单条） |
-| `shown == 1` 且 **无** User Prompt 但 `total > 1` | **是**（提示还有更多历史） |
+| `shown == 1` 且 **无** User Prompt 但 `total > 1` | **是** |
 | `shown == 1` 且 **有** User Prompt | **是**（与 Prompt 分节） |
 | `shown >= 2` | **是** |
 
-**总头一行格式（固定英文）**
+**总头（刻意简单，无选取歧义）**
 
-- 已返回全部（`shown == total`）：
+- 单条：`show_last: 1 exchange`
+- 多条：`show_last: 3 exchanges`
+- **不写** `(oldest first)`（易被理解成「从 session 最早开始取」；实际是取最近 N 条再按时间正序打印）。
+- **不写** `of total` / more；「还有多少」改由 Prompt 后省略行承担（有 Prompt 且有省略时）。
 
-  ```text
-  show_last: 2 exchanges (oldest first)
-  ```
+**Exchange 稳定绝对编号**
 
-- 还有未返回的更旧条目（`shown < total`）——**按调用入口区分** how-to（CLI 没有名为 count 的参数）：
+- 全 scope 按回答时间升序：最旧 `#1`，最新 `#total`。
+- 本次只展示最近 N 条时，横幅仍用绝对号（例 total=74、count=1 → `Exchange #74`；count=3 → `#72` `#73` `#74`）。
+- 不同 N 多次调用时，同一条的编号不变。
 
-  CLI：
+**输出顺序**：仍按时间升序（旧 → 新）打印时间线条目；靠绝对号 + `answered at` 自解释，不靠 oldest first 文案。
 
-  ```text
-  show_last: 1 of 12 exchanges (oldest first; use --show-last [N] for more)
-  ```
+**User Prompt 后省略行**（`omitted = after_prompt − shown_after_prompt`，仅 `omitted > 0`）
 
-  MCP：
+位置：User Prompt section 内，`priority note` **之后**（无 note 则在 `user says` 后），**下一条 Exchange 横幅之前**：
 
-  ```text
-  show_last: 1 of 12 exchanges (oldest first; use count=[N] for more)
-  ```
+CLI：
 
-说明：
+```text
+… 70 AskHuman exchanges omitted after this prompt; use --show-last [N] for more …
+```
 
-- `shown` = 本次输出的 AskHuman 条数；`total` = scope 内全部可恢复 Send 数（history 内实际条数）。
-- 渲染层接收 `Surface::Cli | Surface::Mcp`，只写**当前入口**能懂的参数名；禁止在 CLI 结果里写 `count`，也禁止在 MCP 结果里写 `--show-last N`（避免跨模式误导）。
-- 单数语法不抠：一律 `exchanges`。
-- Exchange 编号：`#1` = 本批最旧；最大号 = 本批最新。
-- User Prompt 横幅：`━━━━━━━━ User Prompt ━━━━━━━━`（无序号，不计入 shown/total）。
+MCP：
 
-**动机**：User Prompt 之后可能已多轮 AskHuman，默认只回 1 条时最新结论可能已偏离原 Prompt；总头用 `1 of 12` + `count` 提示，让 agent 知道可以加 N 拉更长上下文（仍不改安装提示词）。
+```text
+… 70 AskHuman exchanges omitted after this prompt; use count=[N] for more …
+```
+
+- 一律 `exchanges`（含 N=1）。
+- 只统计 **晚于该 Prompt** 的 AskHuman；Prompt 之前的轮次不在此行表达。
+- User Prompt 横幅：`━━━━━━━━ User Prompt ━━━━━━━━`（无序号，不计入 shown）。
 
 #### 3.5 多题配对
 
@@ -228,12 +231,12 @@ user says:
 2. 合并后按时间 **升序** 输出（文首旧，**文末最新 / 优先级最高**）。  
 3. 比较：`answered_at_ms` vs `said_at_secs * 1000`。  
 4. 时间戳完全相等：User Prompt 排在同毫秒的 AskHuman **之前**（先读到原话，再读后续确认）。  
-5. Exchange 编号按**输出顺序**从 1 递增（#1 最旧）。
+5. Exchange 编号为 scope 内 **稳定绝对序**（最旧 `#1` … 最新 `#total`），不是本批内 1…shown。
 
-#### 样例：count=1，session 内共 12 条，Prompt 更旧（总头提示还有更多 + note）
+#### 样例：count=1，session 共 12 条，Prompt 后省略 10 条 + note
 
 ```text
-show_last: 1 of 12 exchanges (oldest first; use --show-last [N] for more)
+show_last: 1 exchange
 
 ━━━━━━━━ User Prompt ━━━━━━━━
 said at: 15 minutes ago (2026-08-01 14:19:01 +0800)
@@ -245,7 +248,9 @@ priority note:
   A later AskHuman answer below is newer than the User Prompt. Use that
   AskHuman exchange as the current task — not the older User Prompt.
 
-━━━━━━━━ Exchange #1 ━━━━━━━━
+… 10 AskHuman exchanges omitted after this prompt; use --show-last [N] for more …
+
+━━━━━━━━ Exchange #12 ━━━━━━━━
 answered at: 2 minutes ago (2026-08-01 14:32:05 +0800)
 
 assistant (you) says:
@@ -258,49 +263,30 @@ qa #1:
     selected_options: 是
 ```
 
-（MCP 同场景总头为：`… use count=[N] for more`。）
+（MCP 省略行 more 为：`use count=[N] for more`。）
 
-#### 样例：count=2 + User Prompt 夹在中间（CLI；仍有更旧未返回）
+#### 样例：count=3，绝对号 #10–#12，Prompt 后省略
 
 ```text
-show_last: 2 of 12 exchanges (oldest first; use --show-last [N] for more)
-
-━━━━━━━━ Exchange #1 ━━━━━━━━
-answered at: 1 hour ago (2026-08-01 13:34:01 +0800)
-
-qa #1:
-  assistant (you) asked:
-    用哪种渠道测？
-  user answered:
-    selected_options: popup
+show_last: 3 exchanges
 
 ━━━━━━━━ User Prompt ━━━━━━━━
-said at: 15 minutes ago (2026-08-01 14:19:01 +0800)
+said at: …
 
-user says:
-  帮我改成多条 show last
+… 7 AskHuman exchanges omitted after this prompt; use --show-last [N] for more …
 
-priority note:
-  A later AskHuman answer below is newer than the User Prompt. Use that
-  AskHuman exchange as the current task — not the older User Prompt.
-
-━━━━━━━━ Exchange #2 ━━━━━━━━
-answered at: 2 minutes ago (2026-08-01 14:32:05 +0800)
-
-assistant (you) says:
-  请确认部署范围
-
-qa #1:
-  assistant (you) asked:
-    是否发布到 production？
-  user answered:
-    selected_options: 是
+━━━━━━━━ Exchange #10 ━━━━━━━━
+…
+━━━━━━━━ Exchange #11 ━━━━━━━━
+…
+━━━━━━━━ Exchange #12 ━━━━━━━━
+…
 ```
 
-#### 样例：count=2 且 total=2（已全部返回，无 “of” / 无 more 提示）
+#### 样例：count=2 且 total=2（无省略行）
 
 ```text
-show_last: 2 exchanges (oldest first)
+show_last: 2 exchanges
 
 ━━━━━━━━ Exchange #1 ━━━━━━━━
 …
@@ -317,8 +303,8 @@ show_last: 2 exchanges (oldest first)
 
 **不触发**：无 Prompt；或所有 exchange 都不新于 Prompt（Prompt 已是时间线最新人类信号）。
 
-**位置**：**User Prompt section 内部、该块末尾**（`user says` 正文之后）；`priority note:` **上方空一行**。  
-正序下夹在「旧 Prompt」与「新 AskHuman」之间：
+**位置**：**User Prompt section 内部**（`user says` 之后）；`priority note:` **上方空一行**。  
+其后若有 `omitted after this prompt` 行，再接后续 Exchange（见 §3.3）。
 
 ```text
 … 更旧的 exchange（若有）…
@@ -331,6 +317,8 @@ user says:
 priority note:
   A later AskHuman answer below is newer than the User Prompt. Use that
   AskHuman exchange as the current task — not the older User Prompt.
+
+… N AskHuman exchanges omitted after this prompt; use --show-last [N] for more …
 
 … 更新的 AskHuman exchange …
 ```

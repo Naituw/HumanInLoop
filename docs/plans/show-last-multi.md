@@ -87,10 +87,9 @@ enum TimelineItem {
 3. **升序** sort by time。  
 4. 对 Exchange 按输出顺序重编号 1..shown。  
 5. 若存在 Prompt 且存在更晚 exchange → Prompt section 末尾（上方空一行）写 `priority note`。  
-6. 外壳：见 spec §3.3；传入 `Surface::Cli|Mcp`。`shown < total` 时：  
-   - CLI：`… use --show-last [N] for more`  
-   - MCP：`… use count=[N] for more`  
-7. User Prompt 横幅永不带序号。
+6. 外壳：见 spec §3.3。总头仅 `show_last: N exchange(s)`（无 oldest first / of total）。  
+7. 绝对编号：`absolute_n = total - newest_rank`；省略行在 priority note 之后。  
+8. User Prompt 横幅永不带序号。
 
 ### 3.3 渲染细节
 

@@ -154,6 +154,32 @@ pub fn recent_sends_for_project(project: &str, n: usize) -> RecentSends {
     recent_sends_for_project_at(&paths::history_file(), project, n)
 }
 
+/// Count completed Send entries in a session with `timestamp_ms` strictly after `after_ms`.
+pub fn count_sends_for_session_after(agent_kind: &str, session_id: &str, after_ms: i64) -> usize {
+    count_sends_after_at(&paths::history_file(), after_ms, |entry| {
+        entry.agent_kind.as_deref() == Some(agent_kind)
+            && entry.agent_session_id.as_deref() == Some(session_id)
+    })
+}
+
+/// Count completed Send entries for an MCP instance partition after `after_ms`.
+pub fn count_sends_for_mcp_instance_after(
+    mcp_instance_id: &str,
+    project: &str,
+    after_ms: i64,
+) -> usize {
+    count_sends_after_at(&paths::history_file(), after_ms, |entry| {
+        entry.mcp_instance_id.as_deref() == Some(mcp_instance_id) && entry.project == project
+    })
+}
+
+/// Count completed Send entries for a project after `after_ms`.
+pub fn count_sends_for_project_after(project: &str, after_ms: i64) -> usize {
+    count_sends_after_at(&paths::history_file(), after_ms, |entry| {
+        entry.project == project
+    })
+}
+
 /// Distinct projects present in history, most recently active first.
 pub fn projects() -> Vec<ProjectInfo> {
     projects_at(&paths::history_file())
@@ -262,6 +288,19 @@ fn recent_sends_for_mcp_instance_at(
 
 fn recent_sends_for_project_at(path: &Path, project: &str, n: usize) -> RecentSends {
     recent_sends_at(path, n, |entry| entry.project == project)
+}
+
+fn count_sends_after_at(
+    path: &Path,
+    after_ms: i64,
+    predicate: impl Fn(&HistoryEntry) -> bool,
+) -> usize {
+    read_all_at(path)
+        .into_iter()
+        .filter(|entry| {
+            entry.action == ChannelAction::Send && entry.timestamp_ms > after_ms && predicate(entry)
+        })
+        .count()
 }
 
 fn latest_send_for_session_at(
