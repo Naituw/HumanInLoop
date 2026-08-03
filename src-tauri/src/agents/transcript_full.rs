@@ -320,7 +320,7 @@ pub fn parse_cursor_wall_clock_label(label: &str) -> Option<u64> {
     }
     let offset_secs = parse_utc_offset_label(tz)?;
     // Civil time in that offset → UTC unix.
-    let utc_secs = civil_to_unix_secs(year, month, day, hour, minute, 0)? as i64 - offset_secs;
+    let utc_secs = civil_to_unix_secs(year, month, day, hour, minute, 0)? - offset_secs;
     if utc_secs < 0 {
         return None;
     }
