@@ -213,9 +213,45 @@ pub struct LastUserPrompt {
     pub at_ms: i64,
 }
 
+/// How far back from the end of a transcript file to search for the latest real user prompt.
+/// Full export (`load_events`) only keeps a 2 MiB tail for IM/console; long Codex sessions often
+/// have **no** user lines in that tail (only tools/assistant). show_last needs a wider scan.
+const LAST_USER_PROMPT_SCAN_BYTES: u64 = 16 * 1024 * 1024;
+
 pub fn last_timestamped_user_prompt(kind: AgentKind, session_id: &str) -> Option<LastUserPrompt> {
-    let doc = load_events(kind, session_id).ok()?;
-    for ev in doc.events.iter().rev() {
+    // Cursor IDE: vscdb is already the live source with per-bubble times.
+    if kind == AgentKind::Cursor {
+        if let Ok(doc) = super::cursor_vscdb::load_events(session_id) {
+            if let Some(found) = last_user_prompt_from_events(&doc.events) {
+                return Some(found);
+            }
+        }
+    }
+    let path = transcript_path(kind, session_id)?;
+    last_timestamped_user_prompt_from_path(kind, &path)
+}
+
+fn last_timestamped_user_prompt_from_path(kind: AgentKind, path: &Path) -> Option<LastUserPrompt> {
+    let (lines, _) = read_lines_bounded(path, LAST_USER_PROMPT_SCAN_BYTES).ok()?;
+    let mut events: Vec<TranscriptEvent> = Vec::new();
+    let mut open_tools = OpenTools::default();
+    for line in lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        push_full(kind, &v, &mut events, &mut open_tools);
+    }
+    if kind == AgentKind::Grok {
+        grok_backfill_times(path.parent(), &mut events);
+    }
+    last_user_prompt_from_events(&events)
+}
+
+fn last_user_prompt_from_events(events: &[TranscriptEvent]) -> Option<LastUserPrompt> {
+    for ev in events.iter().rev() {
         let TranscriptEvent::UserText { text, at, at_label } = ev else {
             continue;
         };
