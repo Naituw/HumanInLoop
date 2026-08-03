@@ -123,19 +123,57 @@ fn matches_agent(entry: &ProcEntry, kind: AgentKind) -> bool {
 /// （`walk_agent_pid` 命中它即返回 None，让该会话落到 registry 的「无 pid」路径 = 同 Claude 被
 /// PID-scrub 时）。
 ///
-/// 判据（D27 主判据）：命令行里基名为 `codex` 的令牌，其**紧邻的下一个令牌**是 `app-server`
-/// 子命令（即 `codex app-server …`，覆盖 `--listen unix://` 与 `stdio://`，以及 `node <path>/codex
-/// app-server …` 包装器）。
+/// 判据（D27 主判据）：命令行里基名为 `codex` 的令牌之后，**跳过前导全局选项**，第一个非选项
+/// token 是 `app-server` 子命令（覆盖 `codex app-server …`、`node <path>/codex app-server …`，
+/// 以及 ChatGPT / Codex Desktop 的 `codex -c features.…=true app-server …`）。
 ///
-/// 只认「codex 后面紧跟的子命令位」而非「参数里任意出现 app-server」，以免把提示词里恰好含
+/// 只认「codex 后的子命令位」而非「参数里任意出现 app-server」，以免把提示词里恰好含
 /// "app-server" 的 TUI（如 `codex exec "用 app-server 提问"`）误判。嵌入 / 旧模式 TUI 命令为纯
 /// `codex`（子命令是 `exec`/`resume`/无）→ 返回 false，pid 照常可用。
 fn is_shared_app_server(entry: &ProcEntry) -> bool {
     let command = entry.command.to_ascii_lowercase();
     let tokens: Vec<&str> = command.split_whitespace().collect();
     tokens.iter().enumerate().any(|(i, tok)| {
-        basename(tok) == "codex" && tokens.get(i + 1).is_some_and(|next| *next == "app-server")
+        basename(tok) == "codex" && codex_subcommand(&tokens[i + 1..]) == Some("app-server")
     })
+}
+
+/// Codex CLI 在 argv0（或包装路径中的 `…/codex`）之后、**子命令之前**常见的取值型全局选项。
+/// 命中时需连同下一 token（选项值）一起跳过，才能正确定位子命令（D27 / ChatGPT Desktop）。
+const CODEX_VALUE_OPTS: &[&str] = &[
+    "-c",
+    "--config",
+    "-m",
+    "--model",
+    "-p",
+    "--profile",
+    "--cdn-base-url",
+];
+
+/// 从 `codex` 之后的参数里取出**第一个非选项 token**（即子命令位）；全是选项则 `None`。
+///
+/// 跳过规则：`--flag=value` / `-c=value` 计一个 token；已知取值型选项（见 `CODEX_VALUE_OPTS`）
+/// 再吞掉紧随的值；其余以 `-` 开头的当作 boolean / 未知 flag 只跳自身。这样
+/// `codex -c features.code_mode_host=true app-server …` 的子命令仍是 `app-server`，而
+/// `codex exec … app-server …` 的子命令仍是 `exec`。
+fn codex_subcommand<'a>(args: &[&'a str]) -> Option<&'a str> {
+    let mut i = 0;
+    while i < args.len() {
+        let t = args[i];
+        if !t.starts_with('-') {
+            return Some(t);
+        }
+        if t.contains('=') {
+            i += 1;
+            continue;
+        }
+        if CODEX_VALUE_OPTS.contains(&t) {
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    None
 }
 
 fn is_self(entry: &ProcEntry) -> bool {
@@ -435,7 +473,7 @@ mod tests {
 
     #[test]
     fn shared_app_server_detected_by_command_token() {
-        // 共享 app-server 守护：argv0=codex 且参数含独立令牌 app-server（unix / stdio 皆算）。
+        // 共享 app-server 守护：子命令位为 app-server（unix / stdio 皆算）。
         let unix = ProcEntry {
             pid: 52407,
             ppid: 1,
@@ -450,7 +488,7 @@ mod tests {
             command: "/Applications/Codex.app/.../codex app-server --listen stdio://".to_string(),
         };
         assert!(is_shared_app_server(&stdio));
-        // node 包装器：`node <path>/codex app-server …`——codex 后紧跟 app-server 也算。
+        // node 包装器：`node <path>/codex app-server …`——codex 后子命令 app-server 也算。
         let wrapper = ProcEntry {
             pid: 52404,
             ppid: 1,
@@ -458,6 +496,24 @@ mod tests {
             command: "node /opt/homebrew/bin/codex app-server --listen unix://".to_string(),
         };
         assert!(is_shared_app_server(&wrapper));
+        // ChatGPT / Codex Desktop：`codex -c features.…=true app-server …`——全局 -c 插在子命令前。
+        let desktop = ProcEntry {
+            pid: 98289,
+            ppid: 98175,
+            comm: "codex".to_string(),
+            command: "/Applications/ChatGPT.app/Contents/Resources/codex -c features.code_mode_host=true app-server --analytics-default-enabled".to_string(),
+        };
+        assert!(is_shared_app_server(&desktop));
+        // `--config=value` 合并写法、以及布尔 flag 夹在中间。
+        let config_eq = ProcEntry {
+            pid: 1,
+            ppid: 1,
+            comm: "codex".to_string(),
+            command:
+                "codex --config=features.code_mode_host=true --analytics-default-enabled app-server"
+                    .to_string(),
+        };
+        assert!(is_shared_app_server(&config_eq));
     }
 
     #[test]
@@ -467,7 +523,11 @@ mod tests {
             "/opt/homebrew/lib/.../bin/codex",
             "codex",
             "codex resume",
-            "codex exec 用 app-server 关键词提问", // "app-server" 只是提示词里的子串，非独立子命令令牌
+            "codex exec 用 app-server 关键词提问", // "app-server" 在提示词里，子命令仍是 exec
+            // 真实 TUI：全局 flag + 用户 prompt，子命令位不是 app-server
+            "codex --dangerously-bypass-approvals-and-sandbox 帮我分析一下提交",
+            // -c 的值碰巧含 app-server 字样也不应误判（子命令缺省 / 另有子命令）
+            "codex -c foo.app-server=true resume",
         ] {
             let e = ProcEntry {
                 pid: 1,
@@ -477,6 +537,24 @@ mod tests {
             };
             assert!(!is_shared_app_server(&e), "should not flag: {cmd}");
         }
+    }
+
+    #[test]
+    fn codex_subcommand_skips_leading_options() {
+        assert_eq!(codex_subcommand(&["app-server"]), Some("app-server"));
+        assert_eq!(
+            codex_subcommand(&["-c", "features.code_mode_host=true", "app-server"]),
+            Some("app-server")
+        );
+        assert_eq!(
+            codex_subcommand(&["--config=x=y", "app-server", "--listen", "unix://"]),
+            Some("app-server")
+        );
+        assert_eq!(
+            codex_subcommand(&["exec", "用", "app-server", "提问"]),
+            Some("exec")
+        );
+        assert_eq!(codex_subcommand(&["-c", "x=y"]), None);
     }
 
     #[test]
