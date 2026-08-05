@@ -235,13 +235,18 @@ fn last_timestamped_user_prompt_from_path(kind: AgentKind, path: &Path) -> Optio
     let (lines, _) = read_lines_bounded(path, LAST_USER_PROMPT_SCAN_BYTES).ok()?;
     let mut events: Vec<TranscriptEvent> = Vec::new();
     let mut open_tools = OpenTools::default();
-    for line in lines {
+    for (index, line) in lines.iter().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
         };
+        if kind == AgentKind::Codex
+            && codex_response_user_is_followed_by_explicit_user(&v, &lines[index + 1..])
+        {
+            continue;
+        }
         push_full(kind, &v, &mut events, &mut open_tools);
     }
     if kind == AgentKind::Grok {
@@ -464,7 +469,7 @@ pub fn load_path(kind: AgentKind, path: &Path) -> Result<TranscriptDoc, String> 
     let mut partial = false;
     let mut open_tools = OpenTools::default();
 
-    for line in lines {
+    for (index, line) in lines.iter().enumerate() {
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -473,6 +478,11 @@ pub fn load_path(kind: AgentKind, path: &Path) -> Result<TranscriptDoc, String> 
             partial = true;
             continue;
         };
+        if kind == AgentKind::Codex
+            && codex_response_user_is_followed_by_explicit_user(&v, &lines[index + 1..])
+        {
+            continue;
+        }
         let before = events.len();
         push_full(kind, &v, &mut events, &mut open_tools);
         if events.len() == before {
@@ -599,6 +609,39 @@ fn push_full(
         AgentKind::Codex => push_codex(v, out, open_tools),
         AgentKind::Grok => push_grok(v, out, open_tools),
     }
+}
+
+/// Codex records a real human submission twice: first as a model-facing
+/// `response_item/message(role=user)`, then immediately as the authoritative
+/// `event_msg/user_message`. Context fragments such as loaded skills only use the first envelope.
+/// Drop the model-facing duplicate when the explicit user event follows, while retaining standalone
+/// response items as a compatibility fallback for older rollout formats.
+fn codex_response_user_is_followed_by_explicit_user(v: &Value, following: &[String]) -> bool {
+    if !is_codex_response_user_message(v) {
+        return false;
+    }
+    following
+        .iter()
+        .find_map(|line| serde_json::from_str::<Value>(line).ok())
+        .is_some_and(|next| is_codex_explicit_user_message(&next))
+}
+
+fn is_codex_response_user_message(v: &Value) -> bool {
+    v.get("type").and_then(Value::as_str) == Some("response_item")
+        && v.pointer("/payload/type").and_then(Value::as_str) == Some("message")
+        && v.pointer("/payload/role").and_then(Value::as_str) == Some("user")
+}
+
+fn is_codex_explicit_user_message(v: &Value) -> bool {
+    v.get("type").and_then(Value::as_str) == Some("event_msg")
+        && v.pointer("/payload/type").and_then(Value::as_str) == Some("user_message")
+}
+
+fn is_codex_contextual_user_payload(text: &str) -> bool {
+    // ContextualUserFragment uses an XML-like wrapper. A real modern Codex submission also has an
+    // `event_msg/user_message`, so an actual user prompt beginning with markup remains visible via
+    // that authoritative event. This check only governs the response-item compatibility path.
+    text.trim_start().starts_with('<')
 }
 
 fn push_msg(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut OpenTools) {
@@ -728,6 +771,9 @@ fn push_codex(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut OpenTo
                     return;
                 }
                 if role == "user" {
+                    if is_codex_contextual_user_payload(t) {
+                        return;
+                    }
                     let (t, label) = clean_user(t);
                     if !t.is_empty() {
                         out.push(TranscriptEvent::UserText {
@@ -1654,6 +1700,116 @@ fn trunc(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_jsonl(lines: &[Value]) -> tempfile::NamedTempFile {
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        for line in lines {
+            writeln!(file, "{line}").unwrap();
+        }
+        file
+    }
+
+    fn codex_response_user(timestamp: &str, text: &str) -> Value {
+        serde_json::json!({
+            "timestamp": timestamp,
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": text}]
+            }
+        })
+    }
+
+    fn codex_explicit_user(timestamp: &str, text: &str) -> Value {
+        serde_json::json!({
+            "timestamp": timestamp,
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": text}
+        })
+    }
+
+    #[test]
+    fn codex_loader_deduplicates_real_users_and_filters_context_fragments() {
+        let file = write_jsonl(&[
+            // Standalone response items remain as a fallback for older rollout formats.
+            codex_response_user("2026-08-05T15:00:00Z", "legacy prompt"),
+            serde_json::json!({
+                "timestamp": "2026-08-05T15:00:01Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "legacy answer"}]
+                }
+            }),
+            // Modern real submissions have two different model/event texts when attachments exist.
+            codex_response_user(
+                "2026-08-05T15:01:00.100Z",
+                "<section>real markup prompt</section>\n<image>attachment</image>",
+            ),
+            codex_explicit_user(
+                "2026-08-05T15:01:00.101Z",
+                "<section>real markup prompt</section>",
+            ),
+            // Model-facing context uses role=user but has no explicit user event.
+            codex_response_user(
+                "2026-08-05T15:01:00.102Z",
+                "<skill>\n<name>demo</name>\nloaded skill body\n</skill>",
+            ),
+            codex_response_user(
+                "2026-08-05T15:01:02Z",
+                "<hook_prompt hook_run_id=\"stop:1\">continue</hook_prompt>",
+            ),
+        ]);
+
+        let doc = load_path(AgentKind::Codex, file.path()).unwrap();
+        let users = doc
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                TranscriptEvent::UserText { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            users,
+            vec!["legacy prompt", "<section>real markup prompt</section>"]
+        );
+
+        let last = last_timestamped_user_prompt_from_path(AgentKind::Codex, file.path()).unwrap();
+        assert_eq!(last.text, "<section>real markup prompt</section>");
+        assert_eq!(
+            last.at_ms,
+            (parse_iso8601_secs("2026-08-05T15:01:00.101Z").unwrap() as i64) * 1000
+        );
+    }
+
+    #[test]
+    fn codex_context_only_response_items_are_not_user_prompts() {
+        let file = write_jsonl(&[
+            codex_response_user(
+                "2026-08-05T15:00:00Z",
+                "<recommended_plugins>plugins</recommended_plugins>",
+            ),
+            codex_response_user(
+                "2026-08-05T15:00:01Z",
+                "<turn_aborted>interrupted</turn_aborted>",
+            ),
+        ]);
+
+        let doc = load_path(AgentKind::Codex, file.path()).unwrap();
+        assert!(doc
+            .events
+            .iter()
+            .all(|event| !matches!(event, TranscriptEvent::UserText { .. })));
+        assert_eq!(
+            last_timestamped_user_prompt_from_path(AgentKind::Codex, file.path()),
+            None
+        );
+    }
 
     #[test]
     fn parse_claude_style_assistant_and_tool() {

@@ -205,6 +205,10 @@ User Prompt 过长时同样：`user says:` 块内前缀 + `full message:`。
 
 - 扫 transcript 事件，取**时间上最近**的一条真实用户输入：  
   复用 `clean_user` / 注入块过滤（跳过 AGENTS.md、environment_context、协议 skill 大段等）。
+- Codex 以 `event_msg / user_message` 为现代 rollout 的权威真人输入；紧邻的
+  `response_item / message(role=user)` 只是模型输入副本，需去重。仅在没有对应显式 user event
+  的旧格式中把非上下文 `response_item` 当兼容回退；`<skill>`、Hook 等 XML 包裹的上下文不得进入
+  User Prompt。
 - **必须有可解析的 unix 时间**（`UserText.at` 或等价）。  
   - 仅有 `at_label`、无法得到可靠排序时间 → **整段不显示**。  
   - 无时间则无法排序 → 不显示（定案）。
@@ -347,7 +351,7 @@ priority note:
 | Agent | 时间来源 | 可靠性 | show_last |
 | --- | --- | --- | --- |
 | **Claude** | 会话 jsonl 行顶层 `timestamp`（RFC3339） | 高（本机用户行全有） | `event_time` 直接填 `at` |
-| **Codex** | rollout 行顶层 `timestamp` | 高（本机用户行全有） | 同上 |
+| **Codex** | `event_msg / user_message` 行顶层 `timestamp`；旧格式回退非上下文 `response_item` | 高（本机用户行全有） | 去重模型输入副本后填 `at` |
 | **Cursor IDE** | vscdb bubble `createdAt` ISO | 高（`load_events` 优先 vscdb） | `bubble_at` → `at` |
 | **Cursor jsonl 回退** | 无结构化 ts；正文 `<timestamp>Weekday, Mon DD, YYYY, H:MM AM/PM (UTC+8)</timestamp>` → 现仅 `at_label` | 中 | **本需求** best-effort 解析 label → unix；失败则不加 Prompt |
 | **Grok** | `chat_history.jsonl` 行上无 ts；同目录 `updates.jsonl` 的 `timestamp` / `agentTimestampMs` 按顺序 backfill | 中（依赖 updates 在） | 现网 `grok_backfill_times`；无 updates / 对不齐 → 无 `at` → 不加 Prompt |
