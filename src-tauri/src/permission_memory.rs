@@ -1332,6 +1332,7 @@ fn shell_enhancement(
             group: group.to_string(),
             level,
             level_label: level_label(&candidates[index]),
+            segment_label: segment_label(candidates, index),
             recommended: index == recommended,
         })
     };
@@ -1504,6 +1505,17 @@ fn level_label(prefix: &[String]) -> String {
     } else {
         text
     }
+}
+
+/// Exact token chunk introduced by one shortest-first selector level. A skipped unsafe
+/// intermediate prefix therefore becomes one indivisible, still-valid segment.
+fn segment_label(candidates: &[Vec<String>], index: usize) -> String {
+    let candidate = &candidates[index];
+    let shorter_len = candidates
+        .get(index + 1)
+        .filter(|shorter| candidate.starts_with(shorter.as_slice()))
+        .map_or(0, |shorter| shorter.len());
+    candidate[shorter_len..].join(" ")
 }
 
 /// Short human preview of split segments for the exact-tier subtext.
@@ -3434,6 +3446,18 @@ mod tests {
             extra_choices[1].variant.as_ref().unwrap().level_label,
             "cargo build"
         );
+        assert_eq!(
+            extra_choices[0].variant.as_ref().unwrap().segment_label,
+            "cargo"
+        );
+        assert_eq!(
+            extra_choices[1].variant.as_ref().unwrap().segment_label,
+            "build"
+        );
+        assert_eq!(
+            extra_choices[2].variant.as_ref().unwrap().segment_label,
+            "--release"
+        );
         // Each tier×level has its own save keyed by the action id (+1 relaxed opt-in).
         assert_eq!(memory.saves.len(), 7);
         let session_short = memory
@@ -3491,6 +3515,16 @@ mod tests {
         // Single-token base recommends itself.
         let candidates = ladder(&[&["ls"]]);
         assert_eq!(recommended_candidate_index(&candidates), 0);
+    }
+
+    #[test]
+    fn segment_labels_group_tokens_across_filtered_prefix_lengths() {
+        let candidates = vec![
+            vec!["git".into(), "push".into(), "origin".into(), "main".into()],
+            vec!["git".into(), "push".into()],
+        ];
+        assert_eq!(segment_label(&candidates, 1), "git push");
+        assert_eq!(segment_label(&candidates, 0), "origin main");
     }
 
     #[test]

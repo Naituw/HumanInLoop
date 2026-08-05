@@ -889,6 +889,7 @@ mod tests {
                 group: group.into(),
                 level,
                 level_label: if level == 0 { "cargo" } else { "cargo build" }.into(),
+                segment_label: if level == 0 { "cargo" } else { "build" }.into(),
                 recommended,
             })
         };

@@ -35,6 +35,8 @@ export interface ChoiceVariant {
   group: string;
   level: number;
   levelLabel: string;
+  /** Exact token chunk added at this level; old daemons fall back to levelLabel. */
+  segmentLabel?: string;
   recommended: boolean;
 }
 

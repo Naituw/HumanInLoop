@@ -1636,13 +1636,25 @@ export function usePopupCore() {
   const confirmVariantGroups = computed(() => {
     const groups = new Map<
       string,
-      { level: number; index: number; levelLabel: string }[]
+      {
+        level: number;
+        index: number;
+        levelLabel: string;
+        segmentLabel: string;
+        recommended: boolean;
+      }[]
     >();
     (confirmRequest.value?.choices ?? []).forEach((choice, index) => {
       const variant = choice.variant;
       if (!variant) return;
       const list = groups.get(variant.group) ?? [];
-      list.push({ level: variant.level, index, levelLabel: variant.levelLabel });
+      list.push({
+        level: variant.level,
+        index,
+        levelLabel: variant.levelLabel,
+        segmentLabel: variant.segmentLabel || variant.levelLabel,
+        recommended: variant.recommended,
+      });
       groups.set(variant.group, list);
     });
     for (const list of groups.values()) list.sort((a, b) => a.level - b.level);
@@ -1651,12 +1663,31 @@ export function usePopupCore() {
 
   // 选择器档位（标签取第一个 group；各 group 的阶梯由 Hook 端保证一致）。
   const confirmVariantLevels = computed(() => {
-    const first: { level: number; levelLabel: string }[] | undefined =
+    const first:
+      | {
+          level: number;
+          levelLabel: string;
+          segmentLabel: string;
+          recommended: boolean;
+        }[]
+      | undefined =
       confirmVariantGroups.value.values().next().value;
     return first && first.length > 1
-      ? first.map((entry) => ({ level: entry.level, label: entry.levelLabel }))
+      ? first.map((entry) => ({
+          level: entry.level,
+          label: entry.segmentLabel,
+          prefixLabel: entry.levelLabel,
+          recommended: entry.recommended,
+        }))
       : [];
   });
+
+  const confirmVariantRecommendedLevel = computed(
+    () =>
+      confirmVariantLevels.value.find((entry) => entry.recommended)?.level ??
+      confirmVariantLevels.value[0]?.level ??
+      0,
+  );
 
   // 展示行：普通 choice 原样一行；每个 group 在其首个 choice 的位置折叠为一行，
   // 行内容（label/description/wire index）跟随当前档位。
@@ -2458,6 +2489,7 @@ export function usePopupCore() {
     confirmRows,
     confirmVariantLevel,
     confirmVariantLevels,
+    confirmVariantRecommendedLevel,
     selectConfirmVariantLevel,
     permissionEdit,
     permissionDiff,

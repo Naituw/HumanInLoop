@@ -368,6 +368,11 @@ pub struct ChoiceVariant {
     pub level: usize,
     /// Short selector label for this level (the truncated prefix text).
     pub level_label: String,
+    /// Exact token chunk introduced by this level. Popup clients render these chunks as
+    /// one cumulative prefix track; one chunk may contain multiple tokens when unsafe
+    /// intermediate prefix lengths were filtered out.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub segment_label: String,
     /// The auto-recommended level (smart 2-token, D51): the only variant that
     /// non-popup surfaces show.
     pub recommended: bool,

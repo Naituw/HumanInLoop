@@ -30,6 +30,7 @@ export default {
     recommended: "Recommended",
     permissionReason: "Reason:",
     prefixLevel: "Prefix scope",
+    resetPrefixLevel: "Reset",
     permissionDiff: {
       title: "Proposed changes",
       files: "{n} files",

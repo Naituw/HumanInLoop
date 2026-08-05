@@ -53,7 +53,9 @@ Codex 权限 Hook 的「始终允许」前缀经常带满具体参数（原生�
 ### B. 协议扩展 + 弹窗调档（已完成 ✅）
 
 **协议（models.rs，已完成）**：`ConfirmChoice` 新增
-`variant: Option<ChoiceVariant>`，`ChoiceVariant { group, level, level_label, recommended }`。
+`variant: Option<ChoiceVariant>`，`ChoiceVariant { group, level, level_label, segment_label,
+recommended }`。`segment_label` 是相对上一更短候选新增的完整 token 块；若中间长度被
+安全过滤，跨过的 token 合并为一个不可拆分 segment。`level_label` 保留整档位兼容摘要标签。
 同一 `group` 的 choice 是同一逻辑动作的不同档位；弹窗折叠成一行 + 共享选择器；
 其余渠道只渲染 `recommended` 档。单候选时 `variant: None`，一切保持现状。
 
@@ -85,10 +87,11 @@ Codex 权限 Hook 的「始终允许」前缀经常带满具体参数（原生�
 
 **弹窗（已完成）**：`types.ts` 加 `ChoiceVariant`；`usePopupCore.ts` 新增
 `confirmRows`（同 group 折叠为一行）、`confirmVariantLevels`（选择器档位，标签取
-`levelLabel`）、`confirmVariantLevel`（共享档位，加载时停在推荐档）、
-`selectConfirmVariantLevel`（切档时已选行跟随换 wire index）；⌘1-9 快捷键按展示行
-计数。`ConfirmPane.vue` 渲染 segmented 档位选择器 + 行内容实时切换；样式在
-`popup.css`（`.confirm-variant-*`）。历史视图不渲染 choices，无需处理。
+`segmentLabel`，旧 daemon 回退 `levelLabel`）、`confirmVariantLevel`（共享档位，加载时
+停在推荐档）、`selectConfirmVariantLevel`（切档时已选行跟随换 wire index）；⌘1-9 快捷键
+按展示行计数。`ConfirmPane.vue` 渲染无间隙 token 轨道：当前边界前连续高亮，蓝点标识已提交
+档位，hover 只预览高亮，点击或左右键选档，`Reset` 回推荐档；长 token 单段省略、整条轨道
+横向滚动。样式在 `popup.css`（`.confirm-variant-*`）。历史视图不渲染 choices，无需处理。
 
 **测试（已完成）**：`multi_candidate_ladder_flattens_variants_with_recommended_default`、
 `recommended_candidate_prefers_two_tokens_then_escalates`、

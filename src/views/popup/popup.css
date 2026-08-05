@@ -261,47 +261,91 @@
 }
 /* 前缀档位选择器（D51） */
 .confirm-variant-bar {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.confirm-variant-heading {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 8px;
-  flex-wrap: wrap;
 }
 .confirm-variant-title {
   color: var(--text-secondary);
   font-size: 12px;
   flex-shrink: 0;
 }
-.confirm-variant-segments {
-  display: inline-flex;
+.confirm-variant-reset {
+  appearance: none;
+  border: 0;
+  padding: 1px 0;
+  color: var(--accent, #0a84ff);
+  background: transparent;
+  font-size: 11px;
+  cursor: pointer;
+}
+.confirm-variant-track {
+  display: flex;
+  flex-wrap: nowrap;
   gap: 0;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 7px;
   border: var(--hairline) solid var(--control-border);
-  border-radius: 7px;
-  overflow: hidden;
+  border-radius: 8px;
   background: var(--control-bg);
+  scrollbar-width: thin;
 }
 .confirm-variant-segment {
+  position: relative;
+  z-index: 0;
+  flex: 0 0 auto;
   appearance: none;
-  border: none;
-  background: transparent;
+  min-width: 28px;
+  max-width: 190px;
+  margin-left: -1px;
+  overflow: hidden;
+  border: var(--hairline) solid var(--control-border);
+  border-radius: 0;
+  padding: 4px 8px;
   color: var(--text-secondary);
-  padding: 3px 10px;
+  background: var(--control-bg);
   font-size: 12px;
   cursor: pointer;
-  max-width: 260px;
-  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.confirm-variant-segment + .confirm-variant-segment {
-  border-left: var(--hairline) solid var(--control-border);
+.confirm-variant-segment:first-child {
+  margin-left: 0;
+  border-radius: 6px 0 0 6px;
+}
+.confirm-variant-segment:last-child {
+  border-radius: 0 6px 6px 0;
 }
 .confirm-variant-segment code {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 11px;
 }
-.confirm-variant-segment.active {
+.confirm-variant-segment.in-prefix {
+  z-index: 1;
+  border-color: color-mix(in srgb, var(--accent, #0a84ff) 52%, var(--control-border));
   background: color-mix(in srgb, var(--accent, #0a84ff) 14%, var(--control-bg));
   color: var(--text-primary);
+}
+.confirm-variant-segment.boundary {
+  z-index: 2;
+  border-color: var(--accent, #0a84ff);
+}
+.confirm-variant-segment.committed::after {
+  content: "";
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent, #0a84ff);
 }
 .confirm-option {
   width: 100%;

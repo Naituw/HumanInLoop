@@ -30,6 +30,7 @@ export default {
     recommended: "推荐",
     permissionReason: "理由：",
     prefixLevel: "前缀档位",
+    resetPrefixLevel: "重置",
     permissionDiff: {
       title: "拟议变更",
       files: "{n} 个文件",
