@@ -1,6 +1,6 @@
 {
   "name": "@humaninloop/linux-x64",
-  "version": "0.11.4",
+  "version": "0.11.5",
   "description": "Linux x64 binary for humaninloop (AskHuman). Installed automatically as an optional dependency of `humaninloop`. GUI popup requires system WebKitGTK.",
   "license": "MIT",
   "author": "Naituw",
