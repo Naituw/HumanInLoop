@@ -295,7 +295,19 @@
   border: var(--hairline) solid var(--control-border);
   border-radius: 8px;
   background: var(--control-bg);
-  scrollbar-width: thin;
+}
+.confirm-variant-track::-webkit-scrollbar {
+  height: 5px;
+}
+.confirm-variant-track::-webkit-scrollbar-track {
+  background: transparent;
+}
+.confirm-variant-track::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-primary) 28%, transparent);
+}
+.confirm-variant-track::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--text-primary) 42%, transparent);
 }
 .confirm-variant-segment {
   position: relative;

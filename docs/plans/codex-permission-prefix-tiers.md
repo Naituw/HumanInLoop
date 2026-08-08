@@ -91,7 +91,8 @@ recommended }`。`segment_label` 是相对上一更短候选新增的完整 toke
 停在推荐档）、`selectConfirmVariantLevel`（切档时已选行跟随换 wire index）；⌘1-9 快捷键
 按展示行计数。`ConfirmPane.vue` 渲染无间隙 token 轨道：当前边界前连续高亮，蓝点标识已提交
 档位，hover 只预览高亮，点击或左右键选档，`Reset` 回推荐档；长 token 单段省略、整条轨道
-横向滚动。样式在 `popup.css`（`.confirm-variant-*`）。历史视图不渲染 choices，无需处理。
+横向滚动；短内容不显示滚动条，溢出时使用 5px 低对比度圆角滚动条，四边内边距保持 7px
+对称。样式在 `popup.css`（`.confirm-variant-*`）。历史视图不渲染 choices，无需处理。
 
 **测试（已完成）**：`multi_candidate_ladder_flattens_variants_with_recommended_default`、
 `recommended_candidate_prefers_two_tokens_then_escalates`、
