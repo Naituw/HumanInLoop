@@ -6,6 +6,7 @@ use crate::paths;
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use std::collections::HashSet;
 use std::path::Path;
 
 /// 把某个问题的图片落盘到 `temp/askhuman/<request_id>/q<question_index+1>/`，返回绝对路径列表。
@@ -26,16 +27,27 @@ pub fn save(
         tr(lang, "cli.createImageDirFailed").replace("{path}", &dir.display().to_string())
     })?;
 
+    save_into_dir(images, &dir, lang)
+}
+
+fn save_into_dir(images: &[ImageAttachment], dir: &Path, lang: Lang) -> Result<Vec<String>> {
+    let mut used_names = HashSet::with_capacity(images.len());
     let mut paths_out = Vec::with_capacity(images.len());
     for (index, img) in images.iter().enumerate() {
-        paths_out.push(save_one(img, index, &dir, lang)?);
+        paths_out.push(save_one(img, index, dir, &mut used_names, lang)?);
     }
     Ok(paths_out)
 }
 
-fn save_one(img: &ImageAttachment, index: usize, dir: &Path, lang: Lang) -> Result<String> {
+fn save_one(
+    img: &ImageAttachment,
+    index: usize,
+    dir: &Path,
+    used_names: &mut HashSet<String>,
+    lang: Lang,
+) -> Result<String> {
     let ext = extension_from_media_type(&img.media_type);
-    let filename = match img
+    let preferred_filename = match img
         .filename
         .as_deref()
         .map(str::trim)
@@ -44,12 +56,38 @@ fn save_one(img: &ImageAttachment, index: usize, dir: &Path, lang: Lang) -> Resu
         Some(name) => sanitize_filename(name, ext),
         None => format!("img-{}.{}", index + 1, ext),
     };
+    let filename = unique_filename(&preferred_filename, dir, used_names);
     let file_path = dir.join(&filename);
     let data = decode_image_data(&img.data, lang)?;
     std::fs::write(&file_path, &data).with_context(|| {
         tr(lang, "cli.writeImageFailed").replace("{path}", &file_path.display().to_string())
     })?;
     Ok(file_path.to_string_lossy().to_string())
+}
+
+/// Reserve a filename without overwriting an earlier attachment in the same answer.
+/// Case-folded comparison also keeps results portable to case-insensitive filesystems.
+fn unique_filename(preferred: &str, dir: &Path, used_names: &mut HashSet<String>) -> String {
+    let mut candidate = preferred.to_string();
+    let mut suffix = 2;
+    while used_names.contains(&candidate.to_lowercase()) || dir.join(&candidate).exists() {
+        candidate = filename_with_suffix(preferred, suffix);
+        suffix += 1;
+    }
+    used_names.insert(candidate.to_lowercase());
+    candidate
+}
+
+fn filename_with_suffix(filename: &str, suffix: usize) -> String {
+    let path = Path::new(filename);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename);
+    match path.extension().and_then(|s| s.to_str()) {
+        Some(ext) if !ext.is_empty() => format!("{stem}-{suffix}.{ext}"),
+        _ => format!("{stem}-{suffix}"),
+    }
 }
 
 fn extension_from_media_type(media_type: &str) -> &'static str {
@@ -123,5 +161,53 @@ mod tests {
     fn decode_handles_whitespace() {
         let bytes = decode_image_data("aGVs\nbG8=", Lang::En).unwrap();
         assert_eq!(bytes, b"hello");
+    }
+
+    #[test]
+    fn duplicate_filenames_are_saved_without_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let images = vec![
+            ImageAttachment {
+                data: B64.encode(b"first image"),
+                media_type: "image/png".to_string(),
+                filename: Some("image.png".to_string()),
+            },
+            ImageAttachment {
+                data: B64.encode(b"second image"),
+                media_type: "image/png".to_string(),
+                filename: Some("image.png".to_string()),
+            },
+        ];
+
+        let saved = save_into_dir(&images, dir.path(), Lang::En).unwrap();
+
+        assert_eq!(saved.len(), 2);
+        assert_eq!(Path::new(&saved[0]).file_name().unwrap(), "image.png");
+        assert_eq!(Path::new(&saved[1]).file_name().unwrap(), "image-2.png");
+        assert_eq!(std::fs::read(&saved[0]).unwrap(), b"first image");
+        assert_eq!(std::fs::read(&saved[1]).unwrap(), b"second image");
+    }
+
+    #[test]
+    fn filename_collisions_are_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let images = vec![
+            ImageAttachment {
+                data: B64.encode(b"upper"),
+                media_type: "image/png".to_string(),
+                filename: Some("IMAGE.PNG".to_string()),
+            },
+            ImageAttachment {
+                data: B64.encode(b"lower"),
+                media_type: "image/png".to_string(),
+                filename: Some("image.png".to_string()),
+            },
+        ];
+
+        let saved = save_into_dir(&images, dir.path(), Lang::En).unwrap();
+
+        assert_eq!(Path::new(&saved[0]).file_name().unwrap(), "IMAGE.PNG");
+        assert_eq!(Path::new(&saved[1]).file_name().unwrap(), "image-2.png");
+        assert_ne!(saved[0], saved[1]);
     }
 }
