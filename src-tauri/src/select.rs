@@ -45,6 +45,7 @@ pub enum SelectAction {
     TaskAgent,
     TaskPermission,
     TaskInputSource,
+    Fork,
     Watch,
     Status,
     Unwatch,
@@ -80,6 +81,7 @@ impl SelectAction {
             SelectAction::TaskAgent => "select.btnChoose",
             SelectAction::TaskPermission => "select.btnChoose",
             SelectAction::TaskInputSource => "select.btnChoose",
+            SelectAction::Fork => "select.btnFork",
             SelectAction::Watch => "select.btnWatch",
             SelectAction::Status => "select.btnStatus",
             SelectAction::Unwatch => "select.btnUnwatch",
@@ -160,6 +162,9 @@ pub fn title_watch(lang: Lang) -> String {
 }
 pub fn title_status(lang: Lang) -> String {
     i18n::tr(lang, "select.titleStatus").to_string()
+}
+pub fn title_fork(lang: Lang) -> String {
+    i18n::tr(lang, "select.titleFork").to_string()
 }
 pub fn title_unwatch(lang: Lang) -> String {
     i18n::tr(lang, "select.titleUnwatch").to_string()
@@ -275,6 +280,7 @@ fn option_from_record(
     watching: &HashSet<String>,
     now: u64,
     lang: Lang,
+    fork_parent: Option<String>,
 ) -> SelectOption {
     let dot = match rec.get("state").and_then(|v| v.as_str()) {
         Some("working") => Some(SelectDot::Working),
@@ -298,7 +304,7 @@ fn option_from_record(
         primary: primary_text(rec, lang),
         badge,
         elapsed,
-        secondary: Some(title_text(rec, lang)),
+        secondary: Some(title_text(rec, fork_parent.as_deref(), lang)),
     }
 }
 
@@ -335,13 +341,35 @@ fn primary_text(rec: &Value, lang: Lang) -> String {
 }
 
 /// 次行标题（缺省 → noTitle）。
-fn title_text(rec: &Value, lang: Lang) -> String {
-    rec.get("title")
+fn title_text(rec: &Value, fork_parent: Option<&str>, lang: Lang) -> String {
+    let title = rec
+        .get("title")
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
-        .unwrap_or_else(|| i18n::tr(lang, "autoChannel.noTitle").to_string())
+        .unwrap_or_else(|| i18n::tr(lang, "autoChannel.noTitle").to_string());
+    match fork_parent {
+        Some(parent) => format!(
+            "{} · {title}",
+            i18n::tr(lang, "watch.forkedFrom").replace("{id}", parent)
+        ),
+        None => title,
+    }
+}
+
+fn fork_parent_label(snapshot: &[Value], rec: &Value) -> Option<String> {
+    let parent_id = rec.get("forkedFromSessionId")?.as_str()?;
+    let parent_seq = snapshot.iter().find_map(|candidate| {
+        (candidate.get("sessionId").and_then(Value::as_str) == Some(parent_id))
+            .then(|| candidate.get("seq").and_then(Value::as_u64))
+            .flatten()
+    });
+    Some(
+        parent_seq
+            .map(|seq| format!("#{seq}"))
+            .unwrap_or_else(|| parent_id.chars().take(8).collect()),
+    )
 }
 
 /// 由注册表快照（`AgentRegistry::snapshot()` 的 Value 数组）组装 agent 选项：仅取「工作中 / 空闲」
@@ -370,7 +398,70 @@ pub fn agent_options(
         if sid.is_empty() {
             continue;
         }
-        bucket.push(option_from_record(rec, sid, watching, now, lang));
+        bucket.push(option_from_record(
+            rec,
+            sid,
+            watching,
+            now,
+            lang,
+            fork_parent_label(list, rec),
+        ));
+    }
+    working.extend(idle);
+    working
+}
+
+/// Native-fork candidates are active records whose Agent family passed the runtime capability
+/// probe and whose canonical working directory is still available.
+pub fn fork_options(
+    snapshot: &Value,
+    ready_kinds: &HashSet<crate::agents::AgentKind>,
+    now: u64,
+    lang: Lang,
+) -> Vec<SelectOption> {
+    let empty = Vec::new();
+    let list = snapshot.as_array().unwrap_or(&empty);
+    let mut working = Vec::new();
+    let mut idle = Vec::new();
+    for rec in list {
+        let bucket = match rec.get("state").and_then(Value::as_str) {
+            Some("working") => &mut working,
+            Some("idle") => &mut idle,
+            _ => continue,
+        };
+        let Some(kind) = rec
+            .get("kind")
+            .and_then(Value::as_str)
+            .and_then(crate::agents::AgentKind::parse)
+        else {
+            continue;
+        };
+        if !ready_kinds.contains(&kind) {
+            continue;
+        }
+        let Some(cwd) = rec.get("cwd").and_then(Value::as_str) else {
+            continue;
+        };
+        if !std::path::Path::new(cwd).is_dir() {
+            continue;
+        }
+        let sid = rec
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if sid.is_empty() || crate::agents::transcript_full::transcript_mtime(kind, &sid).is_none()
+        {
+            continue;
+        }
+        bucket.push(option_from_record(
+            rec,
+            sid,
+            &HashSet::new(),
+            now,
+            lang,
+            fork_parent_label(list, rec),
+        ));
     }
     working.extend(idle);
     working
@@ -399,7 +490,14 @@ pub fn watch_options(
         if sid.is_empty() {
             continue;
         }
-        out.push(option_from_record(rec, sid, watching, now, lang));
+        out.push(option_from_record(
+            rec,
+            sid,
+            watching,
+            now,
+            lang,
+            fork_parent_label(list, rec),
+        ));
     }
     out
 }
@@ -430,7 +528,14 @@ pub fn msg_options(
         if sid.is_empty() {
             continue;
         }
-        out.push(option_from_record(rec, sid, watching, now, lang));
+        out.push(option_from_record(
+            rec,
+            sid,
+            watching,
+            now,
+            lang,
+            fork_parent_label(list, rec),
+        ));
     }
     out
 }
@@ -448,7 +553,16 @@ pub fn agent_option_by_session(
         l.iter()
             .find(|r| r.get("sessionId").and_then(|v| v.as_str()) == Some(session_id))
     }) {
-        let mut opt = option_from_record(rec, session_id.to_string(), &HashSet::new(), now, lang);
+        let mut opt = option_from_record(
+            rec,
+            session_id.to_string(),
+            &HashSet::new(),
+            now,
+            lang,
+            snapshot
+                .as_array()
+                .and_then(|list| fork_parent_label(list, rec)),
+        );
         // 订阅侧的稳定展示编号优先（快照 seq 与订阅 seq 一致，缺省时兜底）。
         opt.seq = opt.seq.or(Some(seq));
         opt
@@ -481,7 +595,16 @@ pub fn yolo_option_by_session(
         l.iter()
             .find(|r| r.get("sessionId").and_then(|v| v.as_str()) == Some(session_id))
     }) {
-        let mut opt = option_from_record(rec, session_id.to_string(), &HashSet::new(), now, lang);
+        let mut opt = option_from_record(
+            rec,
+            session_id.to_string(),
+            &HashSet::new(),
+            now,
+            lang,
+            snapshot
+                .as_array()
+                .and_then(|list| fork_parent_label(list, rec)),
+        );
         opt.badge = badge;
         return opt;
     }
@@ -572,6 +695,26 @@ mod tests {
         assert_eq!(opts[1].elapsed, None);
         // 无徽标。
         assert!(opts[0].badge.is_none());
+    }
+
+    #[test]
+    fn agent_options_mark_forked_sessions_with_parent_sequence() {
+        let mut snapshot = snap();
+        snapshot.as_array_mut().unwrap().push(json!({
+            "seq": 4,
+            "kind": "codex",
+            "sessionId": "s-child",
+            "forkedFromSessionId": "s-work",
+            "state": "working",
+            "title": "忙着",
+            "cwd": "/tmp/api-server",
+            "activeElapsedSecs": 30
+        }));
+        let opts = agent_options(&snapshot, &HashSet::new(), NOW, Lang::Zh);
+        let child = opts.iter().find(|option| option.id == "s-child").unwrap();
+        assert_eq!(child.secondary.as_deref(), Some("从 #2 分叉 · 忙着"));
+        let parent = opts.iter().find(|option| option.id == "s-work").unwrap();
+        assert_eq!(parent.secondary.as_deref(), Some("忙着"));
     }
 
     #[test]

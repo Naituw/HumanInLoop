@@ -921,10 +921,9 @@ pub(super) async fn handle_watch_slack_action(
         handle_rewatch(state, "slack", &ts).await;
         return;
     }
-    let btn = if action_id == crate::slack::watch::ACTION_UNWATCH {
-        WatchBtn::Unwatch
-    } else {
-        WatchBtn::Refresh
+    let btn = match action_id.as_str() {
+        crate::slack::watch::ACTION_UNWATCH => WatchBtn::Unwatch,
+        _ => WatchBtn::Refresh,
     };
     apply_watch_action(state, "slack", &ts, btn).await;
 }
@@ -938,10 +937,9 @@ pub(super) async fn handle_watch_dd_action(state: &Arc<ServerState>, data: &serd
         handle_rewatch(state, "dingding", &otid).await;
         return;
     }
-    let btn = if action_id == crate::dingtalk::watch::ACTION_UNWATCH {
-        WatchBtn::Unwatch
-    } else {
-        WatchBtn::Refresh
+    let btn = match action_id.as_str() {
+        crate::dingtalk::watch::ACTION_UNWATCH => WatchBtn::Unwatch,
+        _ => WatchBtn::Refresh,
     };
     apply_watch_action(state, "dingding", &otid, btn).await;
 }
@@ -1402,16 +1400,26 @@ pub(super) fn register_pending_launch_watch(
         .unwrap()
         .push(PendingLaunchWatch {
             id: record.id.clone(),
-            channel: channel_id.to_string(),
+            channel: Some(channel_id.to_string()),
             kind: record.kind,
             cwd: record.cwd.clone(),
             task_sha256: record.task_sha256.clone(),
+            source_session_id: match &record.launch_mode {
+                crate::integrations::agent_launch::LaunchMode::New => None,
+                crate::integrations::agent_launch::LaunchMode::Fork { source_session_id } => {
+                    Some(source_session_id.clone())
+                }
+            },
             created_at: now_secs(),
         });
     let state = state.clone();
     let config = config.clone();
     let id = record.id.clone();
     let channel = channel_id.to_string();
+    let is_fork = matches!(
+        record.launch_mode,
+        crate::integrations::agent_launch::LaunchMode::Fork { .. }
+    );
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(60)).await;
         let expired = {
@@ -1421,9 +1429,11 @@ pub(super) fn register_pending_launch_watch(
             found
         };
         if expired {
-            let text = match lang {
-                Lang::Zh => "Agent 已启动，但 60 秒内未检测到可关注的会话；任务不会被终止。",
-                Lang::En => "The Agent was started, but no watchable session was detected within 60 seconds. The task was not stopped.",
+            let text = match (lang, is_fork) {
+                (Lang::Zh, true) => "Agent 已启动，但 60 秒内未匹配到分叉会话，无法记录父子关系或自动关注；任务不会被终止。",
+                (Lang::En, true) => "The Agent was started, but no forked session was matched within 60 seconds, so lineage and automatic watch could not be recorded. The task was not stopped.",
+                (Lang::Zh, false) => "Agent 已启动，但 60 秒内未检测到可关注的会话；任务不会被终止。",
+                (Lang::En, false) => "The Agent was started, but no watchable session was detected within 60 seconds. The task was not stopped.",
             };
             let _ = reply_channel_text(&channel, &config, text).await;
         }
@@ -1448,6 +1458,12 @@ pub(super) async fn match_pending_launch_watch(
         position.map(|index| pending.remove(index))
     };
     let Some(matched) = matched else { return };
+    if let Some(parent) = matched.source_session_id.as_deref() {
+        if state.agents.set_fork_parent(session_id, parent) {
+            state.agents.persist();
+            broadcast_agents_state(state);
+        }
+    }
     let snapshot = state.agents.snapshot();
     let seq = snapshot
         .as_array()
@@ -1458,8 +1474,36 @@ pub(super) async fn match_pending_launch_watch(
         })
         .and_then(|item| item.get("seq").and_then(|value| value.as_u64()));
     let Some(seq) = seq else { return };
+    let Some(channel) = matched.channel.as_deref() else {
+        return;
+    };
     let config = state.config_snapshot();
-    handle_watch_cmd(state, &matched.channel, Some(seq), &config, Lang::current()).await;
+    if let Some(parent) = matched.source_session_id.as_deref() {
+        let parent_seq = snapshot
+            .as_array()
+            .and_then(|items| {
+                items.iter().find(|item| {
+                    item.get("sessionId").and_then(|value| value.as_str()) == Some(parent)
+                })
+            })
+            .and_then(|item| item.get("seq").and_then(|value| value.as_u64()));
+        let text = match parent_seq {
+            Some(source_seq) => match Lang::current() {
+                Lang::Zh => format!("已分叉 #{source_seq} → #{seq}"),
+                Lang::En => format!("Forked #{source_seq} → #{seq}"),
+            },
+            None => match Lang::current() {
+                Lang::Zh => format!("已分叉 {} → #{seq}", short_session_id(parent)),
+                Lang::En => format!("Forked {} → #{seq}", short_session_id(parent)),
+            },
+        };
+        let _ = reply_channel_text(channel, &config, &text).await;
+    }
+    handle_watch_cmd(state, channel, Some(seq), &config, Lang::current()).await;
+}
+
+fn short_session_id(session_id: &str) -> String {
+    session_id.chars().take(8).collect()
 }
 
 #[cfg(test)]

@@ -92,6 +92,15 @@ function relativeTime(secs?: number | null): string {
 function rowTime(a: AgentRecord): string {
   return relativeTime(a.state === "ended" ? a.endedAt : a.lastActivity);
 }
+
+function forkParentLabel(a: AgentRecord): string {
+  const parentId = a.forkedFromSessionId;
+  if (!parentId) return "";
+  const parent = props.groups
+    .flatMap((group) => group.items)
+    .find((candidate) => candidate.sessionId === parentId);
+  return parent?.seq ? `#${parent.seq}` : parentId.slice(0, 8);
+}
 </script>
 
 <template>
@@ -138,6 +147,10 @@ function rowTime(a: AgentRecord): string {
           <span class="sess-main">
             <span class="sess-title">{{ a.title || t("agents.untitled") }}</span>
             <span class="sess-sub">
+              <span v-if="a.forkedFromSessionId" class="fork-mini">
+                {{ t("agents.forkedFrom", { id: forkParentLabel(a) }) }}
+              </span>
+              <span v-if="a.forkedFromSessionId" aria-hidden="true"> · </span>
               {{ kindLabel(a.kind) }} · {{ rowTime(a) }}
               <span v-if="a.pendingInterject" class="ij-mini" :title="t('agents.pendingInterject')">✉</span>
             </span>
@@ -341,6 +354,10 @@ function rowTime(a: AgentRecord): string {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.fork-mini {
+  color: var(--accent);
+  font-weight: 600;
 }
 .ij-mini {
   color: var(--accent);

@@ -146,7 +146,7 @@ Codex 完成时整条写入、Claude 渐进写入），**没有 token 级流**�
 
 | 维度 | 飞书（`card_view`+`build_watch_card`） | Telegram（`telegram/watch.rs`） | Slack（`slack/watch.rs`） | 钉钉（`dingtalk/watch.rs`） |
 |---|---|---|---|---|
-| 载体 | 卡片 JSON 2.0 | HTML 消息（`parse_mode=HTML`） | Block Kit（context/section/actions） | 互动卡片高级版**专用模板** + 11 个变量（模板 `docs/assets/dingtalk-watch-card-template.json`，默认 ID 内置） |
+| 载体 | 卡片 JSON 2.0 | HTML 消息（`parse_mode=HTML`） | Block Kit（context/section/actions） | 互动卡片高级版**专用模板** + 13 个变量（模板 `docs/assets/dingtalk-watch-card-template.json`，默认 ID 内置） |
 | 状态圆点 | `<font color>` 彩色 ● | ○ 进行中 / ● 已完成 / ✕ 失败（用户定案：无彩色字体的渠道不用 emoji） | 同 Telegram | 彩色 ●（`<font colorTokenV2>`，与飞书同款配色；**相邻 font 标签间空格会被吞，NBSP 须放标签内部**） |
 | 足迹步行 | `● **类别**: *参数*` | `○ <b>类别</b>: <i>参数</i>` | `○ *类别*: _参数_` | `● **类别**: *参数*`（整行包 h5 `sizeToken`，默认字号偏大） |
 | 「已省略 N 步」 | 灰字 `<font color='grey'>` | 斜体 `<i>` | 斜体 `_…_` | footnote 字号小灰字（`sizeToken`+`colorTokenV2`） |

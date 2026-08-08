@@ -288,6 +288,26 @@ export interface NewTaskProject {
   source: "workspace" | "todos" | string;
 }
 
+export interface ForkTaskSource {
+  sessionId: string;
+  seq: number;
+  kind: AgentKind;
+  title: string;
+  cwd: string;
+  state: AgentRunState;
+  forkedFromSessionId?: string | null;
+  /** Runtime-probed native Fork capability for this active source session. */
+  forkReady?: boolean;
+}
+
+export interface ForkTaskInit {
+  theme: ThemeMode;
+  lang: string;
+  popupSubmitKey: PopupSubmitKey;
+  permissionPrompt: "ask" | "agent-default" | "yolo" | string;
+  source: ForkTaskSource;
+}
+
 export interface Question {
   message: string;
   predefinedOptions: OptionItem[];
@@ -484,6 +504,10 @@ export interface AgentRecord {
   pid?: number | null;
   title?: string | null;
   cwd?: string | null;
+  /** Direct parent session for a branch created by AskHuman's native Fork flow. */
+  forkedFromSessionId?: string | null;
+  /** Runtime-probed native Fork capability for this active source session. */
+  forkReady?: boolean;
   startedAt: number;
   lastActivity: number;
   state: AgentRunState;

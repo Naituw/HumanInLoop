@@ -255,6 +255,7 @@ fn poc_frame(i: usize, started: u64) -> crate::watch::WatchFrame {
     crate::watch::WatchFrame {
         seq: 99,
         kind_label: "PoC".into(),
+        forked_from: None,
         title: Some("钉钉 watch 高频更新探针".into()),
         project: Some("HumanInLoop".into()),
         phase: crate::watch::WatchPhase::Working,

@@ -164,6 +164,36 @@ pub async fn activate_popup_slot() {
     }
 }
 
+/// Register a GUI-created launch with an already-running daemon. Fork sources necessarily came
+/// from that daemon, so failure simply means lineage correlation will be unavailable.
+pub async fn register_launch(record: &crate::integrations::agent_launch::LaunchRecord) {
+    let source_session_id = match &record.launch_mode {
+        crate::integrations::agent_launch::LaunchMode::New => None,
+        crate::integrations::agent_launch::LaunchMode::Fork { source_session_id } => {
+            Some(source_session_id.clone())
+        }
+    };
+    if let Ok((_reader, mut writer)) = connect_split().await {
+        let _ = ipc::write_msg(
+            &mut writer,
+            &ClientMsg::RegisterLaunch {
+                id: record.id.clone(),
+                kind: record.kind,
+                cwd: record.cwd.clone(),
+                task_sha256: record.task_sha256.clone(),
+                source_session_id,
+            },
+        )
+        .await;
+    }
+}
+
+pub async fn cancel_launch(id: String) {
+    if let Ok((_reader, mut writer)) = connect_split().await {
+        let _ = ipc::write_msg(&mut writer, &ClientMsg::CancelLaunch { id }).await;
+    }
+}
+
 /// 请求停止（force=false 为 graceful：有在途请求时 Daemon 排空后退出）；
 /// 收到 Stopping 回应返回 true，未运行返回 false。
 pub async fn request_stop(force: bool) -> bool {

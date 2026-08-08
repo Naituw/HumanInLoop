@@ -777,6 +777,13 @@ pub(super) async fn continue_task_picker(
     config: &AppConfig,
     lang: Lang,
 ) {
+    if matches!(
+        picker.kind,
+        PickerKind::ForkSource | PickerKind::ForkPermission
+    ) {
+        continue_fork_picker(state, channel_id, picker, selected_id, config, lang).await;
+        return;
+    }
     if picker.kind == PickerKind::TaskInputSource {
         let Some(source): Option<TaskInputSourcePayload> = picker
             .payload
@@ -1506,6 +1513,23 @@ pub(super) async fn handle_inbound(state: &Arc<ServerState>, channel_id: &str, t
                 let _ = reply_channel_text(channel_id, &config, &text).await;
             } else {
                 start_new_task_flow(state, channel_id, &config, lang).await;
+            }
+        }
+        Parsed::Command(Command::Fork {
+            sel,
+            has_invalid_args,
+        }) => {
+            if has_invalid_args {
+                let prefix = crate::autochannel::cmd_prefix(channel_id);
+                let text = match lang {
+                    Lang::Zh => format!("用法：{prefix}fork [编号]（分支指令请在后续输入卡中填写）"),
+                    Lang::En => format!(
+                        "Usage: {prefix}fork [number] (enter branch instructions in the following form)"
+                    ),
+                };
+                let _ = reply_channel_text(channel_id, &config, &text).await;
+            } else {
+                start_fork_flow(state, channel_id, sel, &config, lang).await;
             }
         }
         Parsed::Command(Command::Status(sel)) => {

@@ -1184,11 +1184,14 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             crate::commands::todos_projects_enriched,
             crate::commands::open_todos,
             crate::commands::open_new_task,
+            crate::commands::open_fork_task,
             crate::commands::new_task_init,
             crate::commands::new_task_projects,
             crate::commands::new_task_projects_refreshed,
             crate::commands::project_key_of,
             crate::commands::new_task_launch,
+            crate::commands::fork_task_init,
+            crate::commands::fork_task_launch,
         ])
         .on_window_event(|window, event| {
             match window.label() {
@@ -2530,6 +2533,50 @@ where
     #[cfg(target_os = "macos")]
     set_runtime_window_effect_with_bg(&win, window_effect, window_bg);
     watch_todos_file(win);
+    Ok(())
+}
+
+/// Create or retarget the global native-session Fork window. It is independent from `newtask`, so
+/// drafts in either workflow never overwrite the other.
+#[cfg(unix)]
+pub(crate) fn create_fork_task_window<R, M>(
+    manager: &M,
+    config: &AppConfig,
+    source_session_id: &str,
+    pin_above_popup: bool,
+) -> tauri::Result<()>
+where
+    R: tauri::Runtime,
+    M: Manager<R>,
+{
+    if let Some(window) = manager.get_webview_window("fork-task") {
+        use tauri::Emitter;
+        let _ = window.emit(
+            "forktask-goto",
+            serde_json::json!({ "session": source_session_id }),
+        );
+        let _ = window.set_focus();
+        return Ok(());
+    }
+    let theme = window_theme(config);
+    let window_bg = background_for(resolved_theme(config));
+    let mut url = String::from("index.html?view=forktask&session=");
+    url.push_str(&urlencode(source_session_id));
+    let window_effect = config.general.window_effect;
+    let effective_window_effect = effective_window_effect(window_effect);
+    append_window_effect_query(&mut url, effective_window_effect);
+    let lang = Lang::resolve(&config.general.language);
+    let builder = WebviewWindowBuilder::new(manager, "fork-task", WebviewUrl::App(url.into()))
+        .title(i18n::tr(lang, "title.forkTask"))
+        .inner_size(520.0, 560.0)
+        .min_inner_size(440.0, 480.0)
+        .center()
+        .always_on_top(pin_above_popup)
+        .theme(theme);
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    let window = apply_surface(builder, window_bg, effective_window_effect).build()?;
+    #[cfg(target_os = "macos")]
+    set_runtime_window_effect_with_bg(&window, window_effect, window_bg);
     Ok(())
 }
 

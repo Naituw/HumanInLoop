@@ -120,6 +120,8 @@ pub struct WatchFrame {
     pub seq: u64,
     /// 家族展示名（Cursor / Claude Code / …）。
     pub kind_label: String,
+    /// Short direct-parent session id for lightweight lineage display.
+    pub forked_from: Option<String>,
     /// 会话标题（无则 None）。
     pub title: Option<String>,
     /// 项目名（cwd 末段；无则 None）。
@@ -147,6 +149,7 @@ pub fn build_frame(seq: u64, rec: Option<&Value>, waiting: bool) -> WatchFrame {
         return WatchFrame {
             seq,
             kind_label: String::new(),
+            forked_from: None,
             title: None,
             project: None,
             phase: WatchPhase::Ended,
@@ -179,12 +182,18 @@ pub fn build_frame(seq: u64, rec: Option<&Value>, waiting: bool) -> WatchFrame {
         "working" => WatchPhase::Working,
         _ => WatchPhase::Idle,
     };
+    let forked_from = rec
+        .get("forkedFromSessionId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(8).collect());
     // 已结束的会话不再读 transcript（内容定格在结束前最后一帧的签名上无意义——终态卡会展示
     // 最后已知活动；这里仍解析一次，让终态卡带上收尾内容）。
     let parts = autochannel::activity_parts(rec);
     WatchFrame {
         seq,
         kind_label,
+        forked_from,
         title,
         project,
         phase,
@@ -250,7 +259,7 @@ pub fn signature(f: &WatchFrame) -> String {
     for td in &f.todos {
         let _ = write!(s, "{:?};{}\u{1f}", td.state, td.content);
     }
-    let _ = write!(s, "|{}", f.seq);
+    let _ = write!(s, "|{}|{}", f.seq, f.forked_from.as_deref().unwrap_or(""));
     s
 }
 
@@ -292,6 +301,10 @@ pub fn state_line_text(f: &WatchFrame, _now: u64, lang: Lang) -> String {
                     .replace("{t}", &fmt_duration(elapsed, lang)),
             );
         }
+    }
+    if let Some(parent) = f.forked_from.as_deref() {
+        state_line.push_str(" · ");
+        state_line.push_str(&i18n::tr(lang, "watch.forkedFrom").replace("{id}", parent));
     }
     state_line
 }
@@ -581,6 +594,20 @@ mod tests {
         // 内容变化仍触发。
         b.text = Some("新输出".into());
         assert_ne!(signature(&a), signature(&b));
+    }
+
+    #[test]
+    fn lineage_is_visible_and_part_of_the_card_signature() {
+        let mut child = rec("working");
+        child["forkedFromSessionId"] = Value::String("parent-session-123".into());
+        let frame = build_frame(3, Some(&child), false);
+        assert_eq!(frame.forked_from.as_deref(), Some("parent-s"));
+        assert_eq!(
+            state_line_text(&frame, 1_700_000_000, Lang::Zh),
+            "🟢 工作中 · 从 parent-s 分叉"
+        );
+        let without_parent = build_frame(3, Some(&rec("working")), false);
+        assert_ne!(signature(&frame), signature(&without_parent));
     }
 
     #[test]

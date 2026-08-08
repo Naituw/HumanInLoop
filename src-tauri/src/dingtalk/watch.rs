@@ -50,7 +50,7 @@ fn font(text: &str, size: Option<&str>, color: Option<&str>) -> String {
 /// 把 NBSP 放进**前一个标签内部**作为内容的一部分才能保住间距。
 const NBSP: char = '\u{00a0}';
 
-/// 组装 watch 卡【公有】`cardParamMap`（模板全部 11 个变量；值均为字符串，boolean 按钉钉约定
+/// 组装 watch 卡【公有】`cardParamMap`（模板全部 13 个变量；值均为字符串，boolean 按钉钉约定
 /// 以字符串下发）。创建与更新共用：更新走 `updateCardDataByKey`，全量下发幂等。
 pub fn build_watch_param_map(f: &WatchFrame, mode: CardMode, now: u64, lang: Lang) -> Value {
     let rewatchable = matches!(&mode, CardMode::Final(kind) if kind.is_rewatchable());
@@ -209,6 +209,7 @@ mod tests {
             }],
             active_elapsed_secs: None,
             at: Some(1_700_000_000),
+            forked_from: None,
         }
     }
 

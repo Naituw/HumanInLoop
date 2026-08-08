@@ -19,6 +19,7 @@ import {
   interjectPeek,
   newTaskProjects,
   openTodos,
+  openForkTask,
   todosProjects,
 } from "../lib/ipc";
 import { isFocusableTerminal } from "../lib/terminals";
@@ -232,6 +233,22 @@ async function onFocusTerminal(a: AgentRecord): Promise<void> {
 async function onOpenTodos(a: AgentRecord): Promise<void> {
   if (!a.cwd) return;
   await onOpenTodosPath(a.cwd);
+}
+
+async function onFork(a: AgentRecord): Promise<void> {
+  if (!a.forkReady) return;
+  try {
+    await openForkTask(a.sessionId);
+  } catch (err) {
+    console.warn("open fork task failed", err);
+  }
+}
+
+function forkParentLabel(a: AgentRecord): string {
+  const parentId = a.forkedFromSessionId;
+  if (!parentId) return "";
+  const parent = agents.value.find((candidate) => candidate.sessionId === parentId);
+  return parent?.seq ? `#${parent.seq}` : parentId.slice(0, 8);
 }
 
 /** 打开某项目的待办窗口（边栏项目头待办徽标 / 详情头待办按钮共用）。 */
@@ -516,6 +533,15 @@ onBeforeUnmount(() => {
               <span class="dt-title">{{ sel.title || t("agents.untitled") }}</span>
               <span class="spacer" />
               <button
+                v-if="sel.forkReady"
+                class="icon-btn"
+                :title="t('agents.fork')"
+                :aria-label="t('agents.fork')"
+                @click="onFork(sel)"
+              >
+                <svg viewBox="0 0 16 16"><path d="M4 3 V6.2 C4 8 5.5 9 7.2 9 H9.5 M8 4 L11 7 L8 10 M4 6.5 V13" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+              <button
                 v-if="canFocusTerminal(sel)"
                 class="icon-btn"
                 :title="t('agents.focusTerminal')"
@@ -548,6 +574,9 @@ onBeforeUnmount(() => {
               <span class="dt-state" :class="detailState">{{ stateLabel() }}</span>
               <span v-if="elapsedSecs !== null && elapsedSecs >= 60" class="dt-elapsed">
                 · {{ t("console.elapsed", { t: fmtDuration(elapsedSecs) }) }}
+              </span>
+              <span v-if="sel.forkedFromSessionId" class="dt-elapsed">
+                · {{ t("agents.forkedFrom", { id: forkParentLabel(sel) }) }}
               </span>
               <span class="spacer" />
               <span v-if="sel.cwd" class="dt-path" :title="sel.cwd">{{ sel.cwd }}</span>

@@ -951,6 +951,35 @@ pub fn open_new_task(
     }
 }
 
+#[tauri::command]
+pub fn open_fork_task(app: AppHandle, session: String) -> Result<(), String> {
+    let session = session.trim();
+    if session.is_empty() {
+        return Err("source session is required".into());
+    }
+    #[cfg(unix)]
+    {
+        route_open_window(
+            app,
+            crate::gui_host::WindowKind::ForkTask,
+            false,
+            None,
+            Some(crate::gui_host::InterjectTarget {
+                session: session.to_string(),
+                agent: None,
+                cwd: None,
+            }),
+            None,
+        );
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = app;
+        Err("unsupported".into())
+    }
+}
+
 /// 前端提交的作答内容（按问题顺序，每题一项）。
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1294,6 +1323,12 @@ fn route_open_window(
                     todo.as_deref(),
                     pin,
                 ),
+                WindowKind::ForkTask => match &target {
+                    Some(t) => {
+                        crate::app::create_fork_task_window(&fallback, &cfg, &t.session, pin)
+                    }
+                    None => Ok(()),
+                },
             };
         });
     });
@@ -2023,6 +2058,181 @@ pub async fn new_task_launch(
     #[cfg(unix)]
     tokio::spawn(crate::client::activate_popup_slot());
     Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkTaskSource {
+    session_id: String,
+    seq: u64,
+    kind: String,
+    title: String,
+    cwd: String,
+    state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    forked_from_session_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkTaskInit {
+    theme: String,
+    lang: String,
+    popup_submit_key: String,
+    permission_prompt: String,
+    source: ForkTaskSource,
+}
+
+fn fork_task_source(
+    snapshot: &serde_json::Value,
+    session_id: &str,
+    active_only: bool,
+) -> Result<ForkTaskSource, String> {
+    let record = snapshot
+        .as_array()
+        .and_then(|items| {
+            items.iter().find(|record| {
+                record.get("sessionId").and_then(serde_json::Value::as_str) == Some(session_id)
+            })
+        })
+        .ok_or_else(|| "source session is no longer tracked".to_string())?;
+    let state = record
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if active_only && !matches!(state, "working" | "idle") {
+        return Err("only working or idle sessions can be selected".into());
+    }
+    let kind = record
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .and_then(crate::agents::AgentKind::parse)
+        .ok_or_else(|| "unknown source Agent".to_string())?;
+    let cwd = record
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .filter(|cwd| std::path::Path::new(cwd).is_dir())
+        .ok_or_else(|| "source workspace is unavailable".to_string())?;
+    if crate::agents::transcript_full::transcript_mtime(kind, session_id).is_none() {
+        return Err("source session transcript is unavailable".into());
+    }
+    Ok(ForkTaskSource {
+        session_id: session_id.to_string(),
+        seq: record
+            .get("seq")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default(),
+        kind: kind.as_str().to_string(),
+        title: record
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        cwd: cwd.to_string(),
+        state: state.to_string(),
+        forked_from_session_id: record
+            .get("forkedFromSessionId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+#[tauri::command]
+pub async fn fork_task_init(session: String) -> Result<ForkTaskInit, String> {
+    if !crate::integrations::agent_launch::terminal_available() {
+        return Err("Terminal.app is unavailable".into());
+    }
+    #[cfg(unix)]
+    let snapshot = crate::client::agents_snapshot_if_running()
+        .await
+        .ok_or_else(|| "Agent daemon is unavailable".to_string())?;
+    #[cfg(not(unix))]
+    let snapshot = serde_json::Value::Array(Vec::new());
+    let source = fork_task_source(&snapshot, session.trim(), true)?;
+    let kind = crate::agents::AgentKind::parse(&source.kind).ok_or("unknown source Agent")?;
+    let readiness = tokio::task::spawn_blocking(move || {
+        crate::integrations::agent_launch::fork_readiness(kind)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    if !readiness.ready {
+        return Err(readiness.diagnostics.join("; "));
+    }
+    let config = AppConfig::load_without_secrets();
+    let permission_prompt = match config.agent_tasks.permission_prompt {
+        crate::config::AgentTaskPermission::Ask => "ask",
+        crate::config::AgentTaskPermission::AgentDefault => "agent-default",
+        crate::config::AgentTaskPermission::Yolo => "yolo",
+    };
+    Ok(ForkTaskInit {
+        theme: theme_str(config.general.theme),
+        lang: crate::i18n::Lang::resolve(&config.general.language)
+            .code()
+            .to_string(),
+        popup_submit_key: config.general.popup_submit_key.as_str().to_string(),
+        permission_prompt: permission_prompt.into(),
+        source,
+    })
+}
+
+#[tauri::command]
+pub async fn fork_task_launch(
+    session: String,
+    permission: String,
+    task: String,
+) -> Result<(), String> {
+    let permission = match permission.as_str() {
+        "agent-default" => crate::integrations::agent_launch::LaunchPermission::AgentDefault,
+        "yolo" => crate::integrations::agent_launch::LaunchPermission::Yolo,
+        _ => return Err("permission choice is required".into()),
+    };
+    if task.contains('\0') {
+        return Err("Fork instruction must not contain NUL characters".into());
+    }
+    let session = session.trim().to_string();
+    #[cfg(unix)]
+    let snapshot = crate::client::agents_snapshot_if_running()
+        .await
+        .ok_or_else(|| "Agent daemon is unavailable".to_string())?;
+    #[cfg(not(unix))]
+    let snapshot = serde_json::Value::Array(Vec::new());
+    // Re-resolve kind/cwd from the daemon's locked source identity. The source may have ended
+    // since the window opened, but renderer-provided adapter/path values are never trusted.
+    let locked_source = fork_task_source(&snapshot, &session, false)?;
+    let kind = crate::agents::AgentKind::parse(&locked_source.kind)
+        .ok_or_else(|| "unknown source Agent".to_string())?;
+    let cwd = locked_source.cwd;
+    let source = crate::integrations::agent_launch::LaunchSource {
+        channel: "gui".into(),
+        target: String::new(),
+    };
+    let record = tokio::task::spawn_blocking(move || {
+        crate::integrations::agent_launch::create_fork_record(
+            source,
+            std::path::Path::new(&cwd),
+            kind,
+            permission,
+            &session,
+            &task,
+        )
+        .map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    #[cfg(unix)]
+    crate::client::register_launch(&record).await;
+    let launch_id = record.id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::integrations::agent_launch::open_terminal(&record)
+            .map_err(|error| format!("{error:#}"))
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    if result.is_err() {
+        #[cfg(unix)]
+        crate::client::cancel_launch(launch_id).await;
+    }
+    result
 }
 
 /// Apply one secret's edit intent to the in-memory config field before persisting.

@@ -31,6 +31,7 @@ fn button_style(action: SelectAction) -> Option<&'static str> {
         | SelectAction::TaskAgent
         | SelectAction::TaskPermission
         | SelectAction::TaskInputSource
+        | SelectAction::Fork
         | SelectAction::Msg
         | SelectAction::MsgTarget
         | SelectAction::Stage

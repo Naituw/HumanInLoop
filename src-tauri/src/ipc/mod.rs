@@ -305,6 +305,9 @@ pub struct TrayAgentInfo {
     /// 会话标题（transcript 解析；空=未解析出）。
     #[serde(default)]
     pub title: String,
+    /// Direct parent sequence for an AskHuman fork, used to disambiguate inherited titles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from_seq: Option<u64>,
     /// 项目显示名（cwd basename；空=未知）。
     #[serde(default)]
     pub project_name: String,
@@ -319,6 +322,8 @@ pub struct TrayAgentInfo {
     /// 「聚焦终端」可用（有 pid 且所在终端受支持）。
     #[serde(default)]
     pub focusable: bool,
+    #[serde(default)]
+    pub forkable: bool,
     #[serde(default)]
     pub pid: Option<u32>,
 }
@@ -554,6 +559,18 @@ pub enum ClientMsg {
     /// GUI 启动新任务后把活跃槽切到 popup（spec gui-agent-task-launch G11）：人在电脑旁，
     /// 新 Agent 的提问默认弹窗。即发即走，无回包；旧 daemon 解析失败断连无副作用。
     ActivatePopupSlot,
+    /// GUI-created native fork waiting for lifecycle correlation. Unlike IM launches it has no
+    /// source channel and therefore records lineage without creating a watch subscription.
+    RegisterLaunch {
+        id: String,
+        kind: crate::agents::AgentKind,
+        cwd: String,
+        task_sha256: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_session_id: Option<String>,
+    },
+    /// Remove a GUI pending launch when Terminal.app rejected the request.
+    CancelLaunch { id: String },
 }
 
 /// 一次工具调用的实时上报（随 `AgentEvent` 的 activity 事件携带）。跨进程只传**原始工具名**与
@@ -1069,11 +1086,13 @@ mod tests {
                 seq: 3,
                 kind: "claude".to_string(),
                 title: "修复登录".to_string(),
+                forked_from_seq: Some(2),
                 project_name: "proj".to_string(),
                 cwd: Some("/w/proj".to_string()),
                 state: "working".to_string(),
                 pending_interject: true,
                 focusable: true,
+                forkable: false,
                 pid: Some(7),
             }],
             channel_issues: vec![ChannelIssueInfo {
@@ -1088,6 +1107,7 @@ mod tests {
         assert!(json.contains(r#""agents_working":2"#));
         assert!(json.contains(r#""preview":"deploy?""#));
         assert!(json.contains(r#""pendingInterject":true"#));
+        assert!(json.contains("\"forkedFromSeq\":2"));
         let back: ServerMsg = serde_json::from_str(&json).unwrap();
         match back {
             ServerMsg::TrayState {

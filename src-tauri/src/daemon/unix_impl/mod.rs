@@ -35,6 +35,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
 
 mod detect;
+mod fork;
 mod inbound;
 mod select;
 mod subs;
@@ -42,6 +43,7 @@ mod todo;
 mod watch;
 
 use detect::*;
+use fork::*;
 use inbound::*;
 use select::*;
 use subs::*;
@@ -282,10 +284,11 @@ fn update_popup_focus(
 #[derive(Clone)]
 struct PendingLaunchWatch {
     id: String,
-    channel: String,
+    channel: Option<String>,
     kind: AgentKind,
     cwd: String,
     task_sha256: String,
+    source_session_id: Option<String>,
     created_at: u64,
 }
 
@@ -466,6 +469,8 @@ enum PickerKind {
     TaskAgent,
     TaskPermission,
     TaskInputSource,
+    ForkSource,
+    ForkPermission,
     Watch,
     Status,
     Unwatch,
@@ -533,6 +538,17 @@ struct TaskPickerPayload {
     workspace: String,
     #[serde(default)]
     kind: String,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ForkPickerPayload {
+    source_session_id: String,
+    source_seq: u64,
+    cwd: String,
+    kind: AgentKind,
+    #[serde(default)]
+    title: String,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -1510,6 +1526,44 @@ async fn control_loop(
             // set_active_channel（自然获得旧 IM 反激活回执与 auto-end-watch 语义），无回包。
             ClientMsg::ActivatePopupSlot => {
                 let _ = set_active_channel(state, "popup").await;
+            }
+            ClientMsg::RegisterLaunch {
+                id,
+                kind,
+                cwd,
+                task_sha256,
+                source_session_id,
+            } => {
+                let cleanup_id = id.clone();
+                state
+                    .pending_launches
+                    .lock()
+                    .unwrap()
+                    .push(PendingLaunchWatch {
+                        id,
+                        channel: None,
+                        kind,
+                        cwd,
+                        task_sha256,
+                        source_session_id,
+                        created_at: now_secs(),
+                    });
+                let cleanup_state = state.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    cleanup_state
+                        .pending_launches
+                        .lock()
+                        .unwrap()
+                        .retain(|item| item.id != cleanup_id);
+                });
+            }
+            ClientMsg::CancelLaunch { id } => {
+                state
+                    .pending_launches
+                    .lock()
+                    .unwrap()
+                    .retain(|item| item.id != id);
             }
             // 托盘「待答」子菜单点击：聚焦/闪烁对应请求的弹窗（即发即走，无回包）。
             ClientMsg::FocusRequest { request_id } => {
@@ -4102,10 +4156,11 @@ mod tests {
     fn pending_launch_matches_id_or_prompt_hash_but_requires_kind_and_cwd() {
         let item = PendingLaunchWatch {
             id: "launch-1".into(),
-            channel: "feishu".into(),
+            channel: Some("feishu".into()),
             kind: AgentKind::Codex,
             cwd: "/tmp/project".into(),
             task_sha256: "hash-1".into(),
+            source_session_id: None,
             created_at: 1,
         };
         assert!(pending_launch_matches(

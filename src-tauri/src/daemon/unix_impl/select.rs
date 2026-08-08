@@ -283,6 +283,8 @@ pub(super) async fn send_agent_picker(
         PickerKind::TaskAgent => crate::select::SelectAction::TaskAgent,
         PickerKind::TaskPermission => crate::select::SelectAction::TaskPermission,
         PickerKind::TaskInputSource => crate::select::SelectAction::TaskInputSource,
+        PickerKind::ForkSource => crate::select::SelectAction::Fork,
+        PickerKind::ForkPermission => crate::select::SelectAction::TaskPermission,
         PickerKind::Watch => crate::select::SelectAction::Watch,
         PickerKind::Status => crate::select::SelectAction::Status,
         PickerKind::Unwatch => crate::select::SelectAction::Unwatch,
@@ -339,6 +341,8 @@ pub(super) async fn select_pick_task_flow(
         PickerKind::TaskAgent => crate::select::title_task_agent(lang),
         PickerKind::TaskPermission => crate::select::title_task_permission(lang),
         PickerKind::TaskInputSource => crate::select::title_task_input_source(lang),
+        PickerKind::ForkSource => crate::select::title_fork(lang),
+        PickerKind::ForkPermission => crate::select::title_task_permission(lang),
         _ => String::new(),
     };
     let label = match picker.kind {
@@ -355,6 +359,18 @@ pub(super) async fn select_pick_task_flow(
         .into(),
         PickerKind::TaskPermission => "YOLO".into(),
         PickerKind::TaskInputSource => task_input_source_label(picker, selected_id, lang),
+        PickerKind::ForkSource => picker
+            .options
+            .iter()
+            .position(|id| id == selected_id)
+            .map(|_| selected_id.chars().take(8).collect())
+            .unwrap_or_else(|| selected_id.to_string()),
+        PickerKind::ForkPermission if selected_id == "agent-default" => match lang {
+            Lang::Zh => "Agent 默认",
+            Lang::En => "Agent default",
+        }
+        .into(),
+        PickerKind::ForkPermission => "YOLO".into(),
         _ => selected_id.to_string(),
     };
     if channel_id == "feishu" {
@@ -971,7 +987,9 @@ pub(super) async fn handle_select_card_action(
         PickerKind::TaskWorkspace
         | PickerKind::TaskAgent
         | PickerKind::TaskPermission
-        | PickerKind::TaskInputSource => {
+        | PickerKind::TaskInputSource
+        | PickerKind::ForkSource
+        | PickerKind::ForkPermission => {
             select_pick_task_flow(
                 state,
                 channel_id,
@@ -1616,7 +1634,9 @@ pub(super) async fn handle_select_dd_action(state: &Arc<ServerState>, data: &ser
         PickerKind::TaskWorkspace
         | PickerKind::TaskAgent
         | PickerKind::TaskPermission
-        | PickerKind::TaskInputSource => {
+        | PickerKind::TaskInputSource
+        | PickerKind::ForkSource
+        | PickerKind::ForkPermission => {
             select_pick_task_flow(
                 state,
                 "dingding",
@@ -2338,7 +2358,9 @@ pub(super) async fn dispatch_select_pick(
         PickerKind::TaskWorkspace
         | PickerKind::TaskAgent
         | PickerKind::TaskPermission
-        | PickerKind::TaskInputSource => {
+        | PickerKind::TaskInputSource
+        | PickerKind::ForkSource
+        | PickerKind::ForkPermission => {
             select_pick_task_flow(
                 state,
                 channel_id,

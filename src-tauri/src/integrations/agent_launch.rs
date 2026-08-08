@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const RECORD_TTL_SECS: u64 = 5 * 60;
@@ -27,6 +28,22 @@ pub const LAUNCH_ID_ENV: &str = "ASKHUMAN_AGENT_TASK_LAUNCH_ID";
 pub enum LaunchPermission {
     AgentDefault,
     Yolo,
+}
+
+/// The one-time launch protocol is shared by fresh tasks and native session forks. Missing fields
+/// in records written by older AskHuman versions deserialize as `New`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(
+    tag = "type",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
+pub enum LaunchMode {
+    #[default]
+    New,
+    Fork {
+        source_session_id: String,
+    },
 }
 
 impl TryFrom<AgentTaskPermission> for LaunchPermission {
@@ -68,6 +85,16 @@ pub struct LaunchRecord {
     pub permission: LaunchPermission,
     pub executable: String,
     pub askhuman_executable: String,
+    #[serde(default)]
+    pub launch_mode: LaunchMode,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkReadiness {
+    pub kind: AgentKind,
+    pub ready: bool,
+    pub diagnostics: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -172,6 +199,82 @@ pub fn all_readiness() -> Vec<AgentReadiness> {
     })
 }
 
+/// Native fork capability is probed against the exact executable that will be stored in the
+/// launch record. Cursor Agent CLI has no supported fork surface in V1.
+pub fn fork_readiness(kind: AgentKind) -> ForkReadiness {
+    const CACHE_TTL: Duration = Duration::from_secs(60);
+    static CACHE: OnceLock<
+        Mutex<std::collections::HashMap<AgentKind, (std::time::Instant, ForkReadiness)>>,
+    > = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Some((at, value)) = cache.lock().unwrap().get(&kind) {
+        if at.elapsed() < CACHE_TTL {
+            return value.clone();
+        }
+    }
+    let value = fork_readiness_uncached(kind);
+    cache
+        .lock()
+        .unwrap()
+        .insert(kind, (std::time::Instant::now(), value.clone()));
+    value
+}
+
+fn fork_readiness_uncached(kind: AgentKind) -> ForkReadiness {
+    if kind == AgentKind::Cursor {
+        return ForkReadiness {
+            kind,
+            ready: false,
+            diagnostics: vec!["Cursor Agent CLI does not support native session fork".into()],
+        };
+    }
+    let base = readiness(kind);
+    if !base.ready {
+        return ForkReadiness {
+            kind,
+            ready: false,
+            diagnostics: base.diagnostics,
+        };
+    }
+    let Some(executable) = base.executable else {
+        return ForkReadiness {
+            kind,
+            ready: false,
+            diagnostics: vec!["Agent executable is unavailable".into()],
+        };
+    };
+    let probe = match kind {
+        AgentKind::Claude | AgentKind::Grok => {
+            probe_help(&executable, &["--help"]).is_some_and(|text| text.contains("--fork-session"))
+        }
+        AgentKind::Codex => probe_help(&executable, &["fork", "--help"]).is_some_and(|text| {
+            text.contains("SESSION_ID") && text.to_ascii_lowercase().contains("fork")
+        }),
+        AgentKind::Cursor => false,
+    };
+    ForkReadiness {
+        kind,
+        ready: probe,
+        diagnostics: (!probe)
+            .then(|| format!("{} CLI does not expose native session fork", kind.label()))
+            .into_iter()
+            .collect(),
+    }
+}
+
+pub fn all_fork_readiness() -> Vec<ForkReadiness> {
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = AgentKind::ALL
+            .into_iter()
+            .map(|kind| scope.spawn(move || fork_readiness(kind)))
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok())
+            .collect()
+    })
+}
+
 pub fn terminal_available() -> bool {
     cfg!(target_os = "macos")
         && [
@@ -220,6 +323,55 @@ pub fn create_record_with_files(
     files: &[String],
     warnings: &[String],
 ) -> Result<LaunchRecord> {
+    create_record_internal(
+        source,
+        cwd,
+        kind,
+        permission,
+        task,
+        files,
+        warnings,
+        LaunchMode::New,
+    )
+}
+
+pub fn create_fork_record(
+    source: LaunchSource,
+    cwd: &Path,
+    kind: AgentKind,
+    permission: LaunchPermission,
+    source_session_id: &str,
+    task: &str,
+) -> Result<LaunchRecord> {
+    validate_source_session_id(source_session_id)?;
+    if crate::agents::transcript_full::transcript_mtime(kind, source_session_id).is_none() {
+        return Err(anyhow!("source session transcript is unavailable"));
+    }
+    create_record_internal(
+        source,
+        cwd,
+        kind,
+        permission,
+        task,
+        &[],
+        &[],
+        LaunchMode::Fork {
+            source_session_id: source_session_id.to_string(),
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_record_internal(
+    source: LaunchSource,
+    cwd: &Path,
+    kind: AgentKind,
+    permission: LaunchPermission,
+    task: &str,
+    files: &[String],
+    warnings: &[String],
+    launch_mode: LaunchMode,
+) -> Result<LaunchRecord> {
     let task = task.trim();
     if task.is_empty() {
         return Err(anyhow!("task must not be empty"));
@@ -250,6 +402,12 @@ pub fn create_record_with_files(
     let executable = status
         .executable
         .ok_or_else(|| anyhow!("Agent executable unavailable"))?;
+    if matches!(launch_mode, LaunchMode::Fork { .. }) {
+        let fork = fork_readiness(kind);
+        if !fork.ready {
+            return Err(anyhow!(fork.diagnostics.join("; ")));
+        }
+    }
     let askhuman_executable = std::env::current_exe()
         .context("failed to resolve AskHuman executable")?
         .to_string_lossy()
@@ -264,12 +422,13 @@ pub fn create_record_with_files(
         task_sha256: sha256(task.as_bytes()),
         files: files.to_vec(),
         warnings: warnings.to_vec(),
-        payload_sha256: payload_sha256(task, files, warnings),
+        payload_sha256: payload_sha256(task, files, warnings, &launch_mode),
         cwd: cwd.to_string_lossy().to_string(),
         kind,
         permission,
         executable,
         askhuman_executable,
+        launch_mode,
     };
     write_private_record(&record)?;
     Ok(record)
@@ -284,9 +443,18 @@ pub fn open_terminal(record: &LaunchRecord) -> Result<()> {
         shell_quote(&record.askhuman_executable),
         shell_quote(&record.id)
     );
+    // `do script <command>` can inject before a newly created login shell has finished enabling
+    // job control. A long-running TUI may then be treated as a background job and receive SIGTTOU
+    // on its first terminal write. Create the tab first and wait for its startup command to become
+    // idle before sending the one-time helper command.
     let script = r#"on run argv
 tell application "Terminal"
-  do script (item 1 of argv)
+  set launchTab to do script ""
+  repeat while busy of launchTab
+    delay 0.05
+  end repeat
+  delay 0.1
+  do script (item 1 of argv) in launchTab
 end tell
 end run"#;
     let status = Command::new("/usr/bin/osascript")
@@ -318,13 +486,11 @@ pub fn run_helper(args: &[String]) -> Result<()> {
     std::env::set_current_dir(&record.cwd).context("failed to enter workspace")?;
     let mut command = Command::new(&record.executable);
     command.env(LAUNCH_ID_ENV, &record.id);
-    if record.permission == LaunchPermission::Yolo {
-        command.arg(yolo_flag(record.kind));
-    }
-    command.arg(task_with_attachments(
-        &record.task,
-        &record.files,
-        &record.warnings,
+    command.args(agent_args(
+        record.kind,
+        record.permission,
+        &record.launch_mode,
+        &task_with_attachments(&record.task, &record.files, &record.warnings),
     ));
     use std::os::unix::process::CommandExt;
     Err(command.exec()).context("failed to start Agent")
@@ -359,10 +525,31 @@ fn validate_claim(record: &LaunchRecord, token: &str) -> Result<()> {
     if sha256(record.task.as_bytes()) != record.task_sha256 {
         return Err(anyhow!("launch record task hash mismatch"));
     }
-    if !record.payload_sha256.is_empty()
-        && payload_sha256(&record.task, &record.files, &record.warnings) != record.payload_sha256
-    {
-        return Err(anyhow!("launch record attachment payload hash mismatch"));
+    if !record.payload_sha256.is_empty() {
+        let expected = payload_sha256(
+            &record.task,
+            &record.files,
+            &record.warnings,
+            &record.launch_mode,
+        );
+        let legacy = legacy_payload_sha256(&record.task, &record.files, &record.warnings);
+        if record.payload_sha256 != expected
+            && !(record.launch_mode == LaunchMode::New && record.payload_sha256 == legacy)
+        {
+            return Err(anyhow!("launch record payload hash mismatch"));
+        }
+    }
+    if let LaunchMode::Fork { source_session_id } = &record.launch_mode {
+        validate_source_session_id(source_session_id)?;
+        if crate::agents::transcript_full::transcript_mtime(record.kind, source_session_id)
+            .is_none()
+        {
+            return Err(anyhow!("source session transcript is unavailable"));
+        }
+        let fork = fork_readiness(record.kind);
+        if !fork.ready {
+            return Err(anyhow!(fork.diagnostics.join("; ")));
+        }
     }
     let cwd = fs::canonicalize(&record.cwd).context("workspace is no longer available")?;
     if cwd.to_string_lossy() != record.cwd {
@@ -384,9 +571,120 @@ fn validate_claim(record: &LaunchRecord, token: &str) -> Result<()> {
     Ok(())
 }
 
-fn payload_sha256(task: &str, files: &[String], warnings: &[String]) -> String {
+fn payload_sha256(
+    task: &str,
+    files: &[String],
+    warnings: &[String],
+    launch_mode: &LaunchMode,
+) -> String {
+    let payload = serde_json::to_vec(&(task, files, warnings, launch_mode)).unwrap_or_default();
+    sha256(&payload)
+}
+
+fn legacy_payload_sha256(task: &str, files: &[String], warnings: &[String]) -> String {
     let payload = serde_json::to_vec(&(task, files, warnings)).unwrap_or_default();
     sha256(&payload)
+}
+
+fn validate_source_session_id(session_id: &str) -> Result<()> {
+    if session_id.is_empty()
+        || session_id.len() > 256
+        || session_id
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control())
+    {
+        return Err(anyhow!("invalid source session id"));
+    }
+    Ok(())
+}
+
+fn agent_args(
+    kind: AgentKind,
+    permission: LaunchPermission,
+    mode: &LaunchMode,
+    prompt: &str,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    match mode {
+        LaunchMode::New => {
+            if permission == LaunchPermission::Yolo {
+                args.push(yolo_flag(kind).into());
+            }
+            args.push(prompt.into());
+        }
+        LaunchMode::Fork { source_session_id } => match kind {
+            AgentKind::Claude | AgentKind::Grok => {
+                if permission == LaunchPermission::Yolo {
+                    args.push(yolo_flag(kind).into());
+                }
+                args.extend([
+                    "--resume".into(),
+                    source_session_id.clone(),
+                    "--fork-session".into(),
+                    "--".into(),
+                    prompt.into(),
+                ]);
+            }
+            AgentKind::Codex => {
+                args.push("fork".into());
+                if permission == LaunchPermission::Yolo {
+                    args.push(yolo_flag(kind).into());
+                }
+                args.extend(["--".into(), source_session_id.clone(), prompt.into()]);
+            }
+            AgentKind::Cursor => {
+                // Creation rejects this mode through `fork_readiness`; keep helper fail-closed.
+            }
+        },
+    }
+    args
+}
+
+fn probe_help(executable: &str, args: &[&str]) -> Option<String> {
+    // GUI hosts often have a sparse PATH. Homebrew/npm Agent entrypoints may be scripts with an
+    // `#!/usr/bin/env node` shebang, so probing the canonical script directly can fail even though
+    // the login shell can launch it. Only the previously resolved executable and fixed help args
+    // enter this shell; source session ids and user prompts never use this path.
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|value| Path::new(value).is_absolute())
+        .unwrap_or_else(|| "/bin/zsh".to_string());
+    let command = std::iter::once(executable)
+        .chain(args.iter().copied())
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut child = Command::new(shell)
+        // Login startup restores GUI hosts' sparse PATH; remaining non-interactive avoids job
+        // control and arbitrary interactive prompt behavior inside the Terminal launch helper.
+        .args(["-lc", &command])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = child.wait_with_output().ok()?;
+                if !status.success() {
+                    return None;
+                }
+                let mut bytes = output.stdout;
+                bytes.extend(output.stderr);
+                return String::from_utf8(bytes).ok();
+            }
+            Ok(None) if started.elapsed() < RESOLVE_TIMEOUT => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 pub fn task_with_attachments(task: &str, files: &[String], warnings: &[String]) -> String {
@@ -555,6 +853,70 @@ mod tests {
     }
 
     #[test]
+    fn fork_arguments_are_fixed_and_keep_prompt_as_one_argv() {
+        let prompt = "-$(touch /tmp/never)\nsecond line";
+        let fork = LaunchMode::Fork {
+            source_session_id: "source-123".into(),
+        };
+        assert_eq!(
+            agent_args(
+                AgentKind::Claude,
+                LaunchPermission::AgentDefault,
+                &fork,
+                prompt
+            ),
+            vec!["--resume", "source-123", "--fork-session", "--", prompt]
+        );
+        assert_eq!(
+            agent_args(AgentKind::Codex, LaunchPermission::Yolo, &fork, prompt),
+            vec![
+                "fork",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--",
+                "source-123",
+                prompt,
+            ]
+        );
+        assert_eq!(
+            agent_args(AgentKind::Grok, LaunchPermission::Yolo, &fork, prompt),
+            vec![
+                "--always-approve",
+                "--resume",
+                "source-123",
+                "--fork-session",
+                "--",
+                prompt,
+            ]
+        );
+        assert!(agent_args(
+            AgentKind::Cursor,
+            LaunchPermission::AgentDefault,
+            &fork,
+            prompt
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn legacy_launch_record_defaults_to_new_mode() {
+        let value = serde_json::json!({
+            "id": "4f37c6d8-7397-458c-8203-65a165395dae",
+            "createdAt": 1,
+            "expiresAt": 2,
+            "source": { "channel": "popup", "target": "" },
+            "task": "continue",
+            "taskSha256": "hash",
+            "cwd": "/tmp",
+            "kind": "claude",
+            "permission": "agent-default",
+            "executable": "/usr/bin/claude",
+            "askhumanExecutable": "/usr/bin/AskHuman"
+        });
+        let record: LaunchRecord = serde_json::from_value(value).unwrap();
+        assert_eq!(record.launch_mode, LaunchMode::New);
+    }
+
+    #[test]
     fn shell_quote_handles_apostrophes() {
         assert_eq!(shell_quote("/tmp/it's"), "'/tmp/it'\\''s'");
     }
@@ -669,5 +1031,16 @@ mod tests {
             true,
             true,
         ));
+    }
+
+    /// Local installation contract probe. Ignored in CI because the Codex binary/integration is
+    /// optional; run explicitly when diagnosing a reported `forkReady=false`.
+    #[test]
+    #[ignore]
+    fn real_codex_fork_help_when_available() {
+        let executable = resolve_login_shell_executable("codex").expect("Codex is not installed");
+        let help =
+            probe_help(&executable, &["fork", "--help"]).expect("Codex fork help probe failed");
+        assert!(help.contains("SESSION_ID"), "{help}");
     }
 }

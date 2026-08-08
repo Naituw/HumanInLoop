@@ -60,6 +60,9 @@ pub struct AgentRecord {
     pub title: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Direct parent session when this record was created by AskHuman's native Fork flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from_session_id: Option<String>,
     pub started_at: u64,
     pub last_activity: u64,
     /// Completed active intervals for this session, excluding time spent in the Idle state.
@@ -380,6 +383,7 @@ impl AgentRegistry {
                         pid,
                         title: None,
                         cwd,
+                        forked_from_session_id: None,
                         started_at: now,
                         last_activity: now,
                         active_elapsed_secs: 0,
@@ -582,6 +586,7 @@ impl AgentRegistry {
                 pid,
                 title: None,
                 cwd,
+                forked_from_session_id: None,
                 started_at: now,
                 last_activity: now,
                 active_elapsed_secs: 0,
@@ -754,6 +759,29 @@ impl AgentRegistry {
             .any(|record| record.kind == kind && record.session_id == session_id)
     }
 
+    /// Persist the direct parent of a newly matched fork. The child may have already ended by the
+    /// time the lifecycle event is processed, so both active and retained ended records are valid.
+    pub fn set_fork_parent(&self, session_id: &str, parent_session_id: &str) -> bool {
+        if session_id.is_empty() || parent_session_id.is_empty() || session_id == parent_session_id
+        {
+            return false;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        let Inner { active, ended, .. } = &mut *inner;
+        let Some(record) = active
+            .iter_mut()
+            .chain(ended.iter_mut())
+            .find(|record| record.session_id == session_id)
+        else {
+            return false;
+        };
+        if record.forked_from_session_id.as_deref() == Some(parent_session_id) {
+            return false;
+        }
+        record.forked_from_session_id = Some(parent_session_id.to_string());
+        true
+    }
+
     /// 权限授权管理面板的分组增强（spec codex-permission-remember §6.3）：按 session_id 在
     /// 活动与已结束记录中查标题 / 项目名（标题惰性解析并缓存）。不在册返回 None，面板回退
     /// 显示缩短的 session id。
@@ -795,7 +823,13 @@ impl AgentRegistry {
                 }
             }
         }
-        let mut list: Vec<&AgentRecord> = inner.active.iter().collect();
+        let mut list: Vec<AgentRecord> = inner.active.clone();
+        let session_seqs: std::collections::HashMap<String, u64> = inner
+            .active
+            .iter()
+            .chain(inner.ended.iter())
+            .map(|record| (record.session_id.clone(), record.seq))
+            .collect();
         list.sort_by(|a, b| {
             let rank = |r: &AgentRecord| match r.state {
                 AgentState::Working => 0u8,
@@ -805,12 +839,17 @@ impl AgentRegistry {
                 .cmp(&rank(b))
                 .then(b.last_activity.cmp(&a.last_activity))
         });
+        drop(inner);
         list.into_iter()
             .map(|r| crate::ipc::TrayAgentInfo {
                 session_id: r.session_id.clone(),
                 seq: r.seq,
                 kind: r.kind.as_str().to_string(),
                 title: r.title.clone().unwrap_or_default(),
+                forked_from_seq: r
+                    .forked_from_session_id
+                    .as_ref()
+                    .and_then(|parent_id| session_seqs.get(parent_id).copied()),
                 project_name: r
                     .cwd
                     .as_deref()
@@ -829,6 +868,13 @@ impl AgentRegistry {
                         r.terminal.as_deref(),
                         Some("apple-terminal") | Some("iterm2")
                     ),
+                forkable: r
+                    .cwd
+                    .as_deref()
+                    .is_some_and(|cwd| std::path::Path::new(cwd).is_dir())
+                    && crate::integrations::agent_launch::fork_readiness(r.kind).ready
+                    && crate::agents::transcript_full::transcript_mtime(r.kind, &r.session_id)
+                        .is_some(),
                 pid: r.pid,
             })
             .collect()
@@ -862,6 +908,7 @@ impl AgentRegistry {
         for r in inner.ended.iter() {
             list.push(r.clone());
         }
+        drop(inner);
         // Inject transient turn/tool state and replace persisted completed time with the effective
         // cumulative value for the current snapshot.
         let now = now_secs();
@@ -886,6 +933,17 @@ impl AgentRegistry {
                     if let Some(ts) = r.turn_started_at {
                         obj.insert("turnStartedAt".to_string(), serde_json::json!(ts));
                     }
+                    let fork_ready = r.state != AgentState::Ended
+                        && r.cwd
+                            .as_deref()
+                            .is_some_and(|cwd| std::path::Path::new(cwd).is_dir())
+                        && crate::integrations::agent_launch::fork_readiness(r.kind).ready
+                        && crate::agents::transcript_full::transcript_mtime(
+                            r.kind,
+                            &r.session_id,
+                        )
+                        .is_some();
+                    obj.insert("forkReady".to_string(), serde_json::json!(fork_ready));
                 }
                 v
             })
@@ -1452,6 +1510,7 @@ mod tests {
             pid: None,
             title: None,
             cwd: None,
+            forked_from_session_id: None,
             started_at: started,
             last_activity: ended_at,
             active_elapsed_secs: elapsed,
@@ -1535,6 +1594,27 @@ mod tests {
             1,
         );
         assert!(r.touch_activity(AgentKind::Claude, "s1", Some(9)));
+    }
+
+    #[test]
+    fn fork_parent_is_persisted_in_child_snapshot() {
+        let r = reg();
+        r.apply_event(
+            AgentKind::Claude,
+            LifecycleEvent::TurnStart,
+            "child-session",
+            None,
+            None,
+            1,
+        );
+        assert!(r.set_fork_parent("child-session", "parent-session"));
+        assert!(!r.set_fork_parent("child-session", "parent-session"));
+        assert!(!r.set_fork_parent("child-session", "child-session"));
+        let snapshot = r.snapshot();
+        assert_eq!(
+            snapshot[0]["forkedFromSessionId"],
+            serde_json::json!("parent-session")
+        );
     }
 
     #[test]

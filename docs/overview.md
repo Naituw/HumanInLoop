@@ -44,13 +44,15 @@ AskHuman/
   src/                       Vue 前端（Vite 根目录）
     index.html               前端入口、首帧关键样式与平台探测
     main.ts                  挂载 App、引入全局样式
-    App.vue                  按 URL 路由 popup/settings/history/agents/interject/todos
+    App.vue                  按 URL 路由 popup/settings/history/agents/interject/todos/newtask/forktask
     views/PopupView.vue      提问与回答弹窗（编排层；状态与区块组件在 views/popup/）
     views/AgentsView.vue     Agent 控制台（双栏：边栏+详情；spec gui-agent-console）
     views/console/           控制台子组件（边栏/指示器/Watch 帧/完整会话/diff 条/交互区/内嵌任务）
     views/InterjectView.vue  Agent 插话编辑器
     views/TodosView.vue      项目待办窗口（项目选择 + 增删清空）
     views/NewTaskView.vue    新建 Agent 任务窗口壳（表单主体在 views/newtask/NewTaskForm.vue，与控制台内嵌版共用）
+    views/ForkTaskView.vue   原生会话 Fork 独立窗口（固定源会话 + 权限 + 分支指令）
+    views/newtask/LaunchPermission.vue  新建/Fork 共用权限控件
     views/SettingsView.vue   设置页（编排层；各 tab 组件与域逻辑在 views/settings/）
     views/HistoryView.vue    回复历史列表、搜索与筛选
     components/HistoryDetail.vue  单条历史的只读详情
@@ -113,6 +115,7 @@ AskHuman/
       dingtalk/confirm.rs    钉钉双动作确认卡
       sound.rs               跨平台弹窗提示音
       commands.rs            前端调用的 Tauri command 集合
+      integrations/agent_launch.rs  新建/Fork 共用一次性 LaunchRecord、readiness 与固定 argv adapter
 
       app/
         mod.rs               Tauri 运行时与各类窗口创建
@@ -190,6 +193,7 @@ AskHuman/
           watch.rs           watch 订阅持久化、tick 刷新与卡片回调
           select.rs          跨渠道单选卡发送、路由与回调分发
           inbound.rs         IM 入站命令层与共享命令处理
+          fork.rs            IM /fork 选择、权限、指令与启动流程
           todo.rs            IM /todo·/todo-rm·/todo-auto 命令与待办管理卡
           subs.rs            GUI/托盘/Agent 订阅广播与 Interject 连接
           detect.rs          渠道自动识别流程
@@ -265,9 +269,10 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 四种 IM 共用 Daemon 内的入站命令层，平台模块只负责传输、渲染和回调；Daemon 存活时即持续监听消息，不要求已有提问。详细能力与代码入口见 `docs/overview-im-commands.md`。
 
 - `channels.autoActivation` 关闭时向所有启用 IM 投放，开启时以当前活跃槽为主；切槽会补推在途请求，watch 渠道仍会加入对应 Agent 新提问的投放并集。
-- 共享命令包括 `/new`、`/help`、`/here`、`/status`、`/watch`、`/unwatch`、`/msg`、`/msg-clear`、`/yolo`、`/diff`、`/stage`、`/transcript`、`/todo`、`/todo-rm` 和 `/todo-auto`；Slack 使用 `!` 作为可输入的备用前缀。
+- 共享命令包括 `/new`、`/fork`、`/help`、`/here`、`/status`、`/watch`、`/unwatch`、`/msg`、`/msg-clear`、`/yolo`、`/diff`、`/stage`、`/transcript`、`/todo`、`/todo-rm` 和 `/todo-auto`；Slack 使用 `!` 作为可输入的备用前缀。
 - macOS 开启 `agentTasks` 后，`/new` 依次选择 workspace、已就绪 Agent 与权限，在新的 Terminal.app 窗口启动真实交互会话；Daemon 只负责启动前流程，之后复用 lifecycle/watch。
 - macOS 本地 GUI 亦可创建任务（不要求开启 `agentTasks`）：待办窗口行内按钮与托盘「新建 Agent 任务」打开统一的新建任务窗口，就绪判定与启动链路与 `/new` 相同；见 `docs/specs/gui-agent-task-launch.md`。
+- Claude Code、Codex、Grok 的 Working/Idle 原生会话可通过 IM `/fork`、Agent 控制台或托盘立即分叉；源会话继续运行，新分支共用 cwd。继承标题的子会话在控制台、托盘和 IM 选择列表中前置显示直接父序号；watch 卡不增加 Fork 按钮，Cursor CLI 不支持；详见 `docs/specs/agent-session-fork.md`。
 - Agent 数字编号在 daemon 生命周期内稳定，供状态、关注、插话和 Git/会话导出共用；无参目标选择复用跨渠道单选卡模型。
 - Watch 订阅持久化并就地更新原卡；`/stage` 必须经过跨渠道 Confirm，不能直接执行暂存。
 
@@ -313,7 +318,8 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 - 入口为设置「高级」Tab、`AskHuman agents monitor` 和 `agents/registry.rs`；状态窗口由 GUI Host 承载并订阅 Daemon 快照。
 - 状态窗口已改版为双栏「Agent 控制台」（spec `docs/specs/gui-agent-console.md`）：边栏项目分组会话
   + 详情区 Watch 帧（agents 订阅上的焦点会话子订阅复用 IM Watch 引擎推帧）+ 完整会话分页 +
-  项目 diff 状态条 + 插话输入 + 内嵌新建任务；快照对 GUI 额外注入 `waitingRequestId`/`waitingPreview`。
+  项目 diff 状态条 + 插话输入 + 内嵌新建任务 + 原生 Fork 入口；快照对 GUI 额外注入
+  `waitingRequestId`/`waitingPreview`/`forkReady`，Fork 子会话持久化直接父 `forkedFromSessionId`。
 
 ## Agent 插话（Interject，Unix）
 

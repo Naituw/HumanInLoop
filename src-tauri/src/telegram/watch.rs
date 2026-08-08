@@ -134,6 +134,7 @@ mod tests {
             }],
             active_elapsed_secs: None,
             at: Some(1_700_000_000),
+            forked_from: None,
         }
     }
 

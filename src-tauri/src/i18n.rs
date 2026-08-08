@@ -110,6 +110,7 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "title.interject" => pick(lang, "Message to Agent", "给 Agent 发消息"),
         "title.todos" => pick(lang, "AskHuman Todos", "AskHuman 待办"),
         "title.newTask" => pick(lang, "New Agent Task", "新建 Agent 任务"),
+        "title.forkTask" => pick(lang, "Fork Agent Session", "Fork Agent 会话"),
 
         // —— macOS 附件右键菜单 ——
         "menu.open" => pick(lang, "Open", "打开"),
@@ -576,6 +577,12 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
             "Create a new Agent task on your computer",
             "在电脑上创建新的 Agent 任务",
         ),
+        "autoChannel.helpDescFork" => pick(
+            lang,
+            "Fork a working or idle Agent session",
+            "从工作中或空闲的 Agent 会话分叉",
+        ),
+        "autoChannel.helpPhraseFork" => pick(lang, "fork", "分叉会话"),
         "autoChannel.helpDescWatch" => pick(
             lang,
             "Follow an agent with a live status card",
@@ -777,6 +784,7 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         // 卡片按钮。
         "watch.btnUnwatch" => pick(lang, "Unwatch", "取消关注"),
         "watch.btnRefresh" => pick(lang, "Refresh", "立即刷新"),
+        "watch.forkedFrom" => pick(lang, "forked from {id}", "从 {id} 分叉"),
         // 终态按钮（禁用）。
         "watch.btnEnded" => pick(lang, "Ended · auto-unwatched", "已结束 · 已自动取消关注"),
         "watch.btnCancelled" => pick(lang, "Unwatched", "已取消关注"),
@@ -813,6 +821,8 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         ),
         // 每行触发按钮文案（按动作种类）。
         "select.btnWatch" => pick(lang, "Watch", "关注"),
+        "select.btnFork" => pick(lang, "Fork", "分叉"),
+        "select.titleFork" => pick(lang, "Choose a session to fork", "选择要分叉的会话"),
         "select.btnStatus" => pick(lang, "View", "查看"),
         "select.btnUnwatch" => pick(lang, "Unwatch", "取消"),
         "select.btnMsg" => pick(lang, "Send", "发送"),
@@ -1312,6 +1322,7 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
             "工作中 {w} · 空闲 {i}",
         ),
         "tray.agentOpenConsole" => pick(lang, "View in Console", "在控制台查看"),
+        "tray.agentFork" => pick(lang, "Fork session", "Fork 会话"),
         "tray.agentSendMessage" => pick(lang, "Send Message…", "发送消息…"),
         "tray.agentSendMessagePending" => pick(
             lang,

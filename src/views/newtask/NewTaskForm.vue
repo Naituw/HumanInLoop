@@ -25,6 +25,7 @@ import type {
   TodoEntry,
 } from "../../lib/types";
 import { AGENT_INSTALL_DOCS } from "../settings/useAgentTasks";
+import LaunchPermission from "./LaunchPermission.vue";
 
 const { t } = useI18n();
 
@@ -565,47 +566,10 @@ onBeforeUnmount(() => {
           </div>
         </section>
 
-        <!-- 权限（G6）：ask 单选（不预选）；固定模式只读展示 -->
-        <section class="nt-section">
-          <span class="nt-label">{{ t("newTask.permissionLabel") }}</span>
-          <div v-if="permissionPrompt === 'ask'" class="nt-choices">
-            <button
-              type="button"
-              class="nt-choice"
-              :class="{ active: permissionChoice === 'agent-default' }"
-              @click="permissionChoice = 'agent-default'"
-            >
-              <span class="nt-radio" :class="{ on: permissionChoice === 'agent-default' }" />
-              <span class="nt-choice-text">
-                {{ t("newTask.permissionAgentDefault") }}
-                <span class="nt-choice-sub">{{ t("newTask.permissionAgentDefaultDesc") }}</span>
-              </span>
-            </button>
-            <button
-              type="button"
-              class="nt-choice danger"
-              :class="{ active: permissionChoice === 'yolo' }"
-              @click="permissionChoice = 'yolo'"
-            >
-              <span class="nt-radio" :class="{ on: permissionChoice === 'yolo' }" />
-              <span class="nt-choice-text">
-                {{ t("newTask.permissionYolo") }}
-                <span class="nt-badge-danger">{{ t("newTask.permissionYoloBadge") }}</span>
-                <span class="nt-choice-sub">{{ t("newTask.permissionYoloDesc") }}</span>
-              </span>
-            </button>
-          </div>
-          <p v-else class="nt-permission-fixed">
-            {{
-              permissionPrompt === "yolo"
-                ? t("newTask.permissionYolo")
-                : t("newTask.permissionAgentDefault")
-            }}
-            <span v-if="permissionPrompt === 'yolo'" class="nt-badge-danger">
-              {{ t("newTask.permissionYoloBadge") }}
-            </span>
-          </p>
-        </section>
+        <LaunchPermission
+          v-model="permissionChoice"
+          :permission-prompt="permissionPrompt"
+        />
       </template>
     </div>
 

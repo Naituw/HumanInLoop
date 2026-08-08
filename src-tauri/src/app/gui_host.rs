@@ -534,21 +534,24 @@ fn menu_signature(
         .map(|i| format!("{}={}@{}", i.channel, i.message, fmt_ago(i.at_ms, lang)))
         .collect::<Vec<_>>()
         .join(";");
-    // Agent 子菜单内容也入签名：会话增删 / 标题 / 状态 / 待送达 / 可聚焦变化即触发 diff。
+    // Include Agent identity, lineage, state, and action capabilities so every visible menu change
+    // triggers a diff refresh.
     let agents: String = data
         .agents
         .iter()
         .map(|a| {
             format!(
-                "{}:{}:{}:{}:{}:{}:{}:{}",
+                "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
                 a.session_id,
                 a.seq,
                 a.kind,
                 a.title,
+                a.forked_from_seq.unwrap_or_default(),
                 a.project_name,
                 a.state,
                 a.pending_interject as u8,
-                a.focusable as u8
+                a.focusable as u8,
+                a.forkable as u8
             )
         })
         .collect::<Vec<_>>()
@@ -832,10 +835,21 @@ fn build_specs(
                 } else {
                     truncate_chars(a.title.trim(), AGENT_TITLE_MAX_CHARS)
                 };
+                let fork_prefix = a
+                    .forked_from_seq
+                    .map(|parent_seq| {
+                        format!(
+                            "{} · ",
+                            i18n::tr(lang, "watch.forkedFrom")
+                                .replace("{id}", &format!("#{parent_seq}"))
+                        )
+                    })
+                    .unwrap_or_default();
                 let title = format!(
-                    "{} · [{}] {} — {}（{}）",
+                    "{} · [{}] {}{} — {}（{}）",
                     agent_state_label(&a.state, lang),
                     a.seq,
+                    fork_prefix,
                     agent_kind_label(&a.kind),
                     session_title,
                     project
@@ -847,6 +861,13 @@ fn build_specs(
                     i18n::tr(lang, "tray.agentOpenConsole").to_string(),
                     true,
                 ));
+                if a.forkable {
+                    sub.push(Node::item(
+                        format!("fork:{}", a.session_id),
+                        i18n::tr(lang, "tray.agentFork").to_string(),
+                        true,
+                    ));
+                }
                 // 「发送消息」：grok 无可靠传话通道（首期排除，spec agent-interject D1），且仅「工作中」
                 // 才显示——插话在 agent 下一次工具调用时送达，对空闲无意义（用户定案）。
                 if a.kind != "grok" && a.state == "working" {
@@ -1140,6 +1161,22 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
         open_window(app, WindowKind::Todos, false, project, None, None, None);
         return;
     }
+    if let Some(session_id) = id.strip_prefix("fork:") {
+        open_window(
+            app,
+            WindowKind::ForkTask,
+            false,
+            None,
+            Some(crate::gui_host::InterjectTarget {
+                session: session_id.to_string(),
+                agent: None,
+                cwd: None,
+            }),
+            None,
+            None,
+        );
+        return;
+    }
     // Agent 子菜单「聚焦终端」：AppleScript 可能阻塞（授权弹窗等），放后台线程。
     if let Some(session_id) = id.strip_prefix("term:") {
         let pid = app.try_state::<HostState>().and_then(|s| {
@@ -1317,6 +1354,10 @@ pub(crate) fn open_window(
             todo.as_deref(),
             pin_above_popup,
         ),
+        WindowKind::ForkTask => match &target {
+            Some(t) => crate::app::create_fork_task_window(app, &cfg, &t.session, pin_above_popup),
+            None => return,
+        },
     };
     if r.is_ok() {
         // 宿主是 accessory app（不自动激活）：新建窗口需显式聚焦，才能前置到置顶弹窗之上并接收键盘。
@@ -1326,6 +1367,7 @@ pub(crate) fn open_window(
             WindowKind::Agents => "agents".to_string(),
             WindowKind::Todos => "todos".to_string(),
             WindowKind::NewTask => "newtask".to_string(),
+            WindowKind::ForkTask => "fork-task".to_string(),
             WindowKind::Interject => target
                 .as_ref()
                 .map(|t| crate::gui_host::interject_label(&t.session))
@@ -1918,6 +1960,50 @@ mod tests {
             Node::Item { key: node_key, .. } => node_key == key,
             _ => false,
         })
+    }
+
+    #[test]
+    fn tray_agent_title_marks_fork_parent_sequence() {
+        let nodes = build_specs(
+            true,
+            Lang::Zh,
+            &TrayData {
+                running: true,
+                agents_working: 1,
+                agents: vec![ipc::TrayAgentInfo {
+                    session_id: "child".to_string(),
+                    seq: 6,
+                    kind: "codex".to_string(),
+                    title: "同一个标题".to_string(),
+                    forked_from_seq: Some(5),
+                    project_name: "HumanInLoop".to_string(),
+                    cwd: Some("/tmp/HumanInLoop".to_string()),
+                    state: "working".to_string(),
+                    pending_interject: false,
+                    focusable: true,
+                    forkable: true,
+                    pid: Some(42),
+                }],
+                ..Default::default()
+            },
+            &[],
+            true,
+            false,
+            &UpdateActionState::Idle,
+        );
+        let agent_title = nodes
+            .iter()
+            .find_map(|node| match node {
+                Node::Submenu { key, children, .. } if key == "agents_menu" => {
+                    children.iter().find_map(|child| match child {
+                        Node::Submenu { key, text, .. } if key == "agent:child" => Some(text),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .expect("forked agent submenu");
+        assert!(agent_title.contains("[6] 从 #5 分叉 · Codex"));
     }
 
     #[test]

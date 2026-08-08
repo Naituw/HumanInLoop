@@ -23,6 +23,8 @@ pub enum WindowKind {
     /// 「新建 Agent 任务」窗口（spec gui-agent-task-launch）：全局唯一；
     /// `project` 为预选项目 key、`todo` 为预选待办 id（均可空）。
     NewTask,
+    /// Native session Fork form; global singleton retargeted by `session`.
+    ForkTask,
 }
 
 /// Exact reply-history filter requested by a popup. Native Agent sessions are globally scoped;

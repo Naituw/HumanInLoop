@@ -26,6 +26,7 @@ import type {
   LifecycleStatus,
   NewTaskInit,
   NewTaskProject,
+  ForkTaskInit,
   PopupInit,
   PermissionDiffModel,
   PopupSoundSupport,
@@ -591,3 +592,17 @@ export const newTaskLaunch = (payload: {
     todoId: payload.todoId ?? null,
     todoAttachments: payload.todoAttachments ?? [],
   });
+
+// ===== Native Agent session Fork =====
+
+export const openForkTask = (session: string) =>
+  invoke<void>("open_fork_task", { session });
+
+export const forkTaskInit = (session: string) =>
+  invoke<ForkTaskInit>("fork_task_init", { session });
+
+export const forkTaskLaunch = (payload: {
+  session: string;
+  permission: "agent-default" | "yolo";
+  task: string;
+}) => invoke<void>("fork_task_launch", payload);

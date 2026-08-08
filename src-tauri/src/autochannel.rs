@@ -53,6 +53,11 @@ pub enum Command {
     /// `/new`、`/新任务`：从 IM 选择工作区和 Agent，并在电脑上打开可接续的终端任务。
     /// 带任何参数均由调用方作为用法错误处理。
     New { has_args: bool },
+    /// `/fork [编号]`：从活动/空闲原生会话立即分叉；除可选编号外不接受内联指令。
+    Fork {
+        sel: Option<u64>,
+        has_invalid_args: bool,
+    },
     /// `/here`、`/这里`：把此渠道设为活跃槽 + 补推在途 + 必回执。
     Here,
     /// `/status`、`/状态`：`None` 返回工作中/空闲 agent 列表；`Some(编号)` 返回该 agent 的当前活动详情。
@@ -125,6 +130,7 @@ pub enum Parsed {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PhraseKind {
     New,
+    Fork,
     Here,
     Help,
     Status,
@@ -161,6 +167,12 @@ const COMMAND_PHRASES: &[(&str, PhraseKind)] = &[
     ("createnewsession", PhraseKind::New),
     ("createnewtask", PhraseKind::New),
     ("startanewtask", PhraseKind::New),
+    // /fork
+    ("fork", PhraseKind::Fork),
+    ("分叉", PhraseKind::Fork),
+    ("分叉会话", PhraseKind::Fork),
+    ("会话分叉", PhraseKind::Fork),
+    ("forksession", PhraseKind::Fork),
     // /here
     ("here", PhraseKind::Here),
     ("这里", PhraseKind::Here),
@@ -266,6 +278,10 @@ const COMMAND_PHRASES: &[(&str, PhraseKind)] = &[
 fn phrase_kind_to_command(kind: PhraseKind) -> Command {
     match kind {
         PhraseKind::New => Command::New { has_args: false },
+        PhraseKind::Fork => Command::Fork {
+            sel: None,
+            has_invalid_args: false,
+        },
         PhraseKind::Here => Command::Here,
         PhraseKind::Help => Command::Help,
         PhraseKind::Status => Command::Status(None),
@@ -337,6 +353,14 @@ fn classify_prefixed(trimmed: &str) -> Parsed {
         "new" | "新任务" => Parsed::Command(Command::New {
             has_args: !rest.trim().is_empty(),
         }),
+        "fork" | "分叉" => {
+            let values: Vec<&str> = tokens.collect();
+            let sel = values.first().and_then(|value| value.parse::<u64>().ok());
+            Parsed::Command(Command::Fork {
+                sel,
+                has_invalid_args: values.len() > 1 || (values.len() == 1 && sel.is_none()),
+            })
+        }
         "here" | "这里" => Parsed::Command(Command::Here),
         "status" | "状态" => {
             let sel = tokens.next().and_then(|s| s.parse::<u64>().ok());
@@ -565,6 +589,13 @@ pub fn help_view(
             "",
             "autoChannel.helpDescNew",
             Some("autoChannel.helpPhraseNew"),
+        ),
+        command(
+            "fork",
+            " [n]",
+            " [编号]",
+            "autoChannel.helpDescFork",
+            Some("autoChannel.helpPhraseFork"),
         ),
     ];
     if watch {
@@ -1600,6 +1631,38 @@ mod tests {
     }
 
     #[test]
+    fn classify_fork_accepts_only_an_optional_session_number() {
+        assert_eq!(
+            classify("/fork"),
+            Parsed::Command(Command::Fork {
+                sel: None,
+                has_invalid_args: false,
+            })
+        );
+        assert_eq!(
+            classify("!fork 12"),
+            Parsed::Command(Command::Fork {
+                sel: Some(12),
+                has_invalid_args: false,
+            })
+        );
+        assert_eq!(
+            classify("/分叉 3 continue here"),
+            Parsed::Command(Command::Fork {
+                sel: Some(3),
+                has_invalid_args: true,
+            })
+        );
+        assert_eq!(
+            classify("/fork current"),
+            Parsed::Command(Command::Fork {
+                sel: None,
+                has_invalid_args: true,
+            })
+        );
+    }
+
+    #[test]
     fn classify_todo_and_todo_rm() {
         // `/todo`（无参）→ 选项目管理；非数字文本 → 选项目新增；数字入口保持向后兼容。
         assert_eq!(
@@ -1727,12 +1790,13 @@ mod tests {
             .flat_map(|section| section.commands.iter())
             .map(|command| command.syntax.as_str())
             .collect();
-        assert_eq!(syntaxes.len(), 15);
+        assert_eq!(syntaxes.len(), 16);
         assert_eq!(
             syntaxes,
             vec![
                 "/status [编号]",
                 "/new",
+                "/fork [编号]",
                 "/watch [编号]",
                 "/unwatch [编号|all]",
                 "/msg [编号] [内容]",
@@ -1749,7 +1813,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            view.sections[0].commands[5].phrase, None,
+            view.sections[0].commands[6].phrase, None,
             "/msg-clear must not advertise an unsupported bare phrase"
         );
     }
