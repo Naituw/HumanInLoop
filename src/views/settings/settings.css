@@ -305,6 +305,270 @@
 .workspace-panel-result {
   margin: 12px 0 0;
 }
+
+/* Codex conversation grants: the settings card stays compact while this sheet owns the list. */
+.permission-panel {
+  width: min(680px, 100%);
+  height: min(620px, calc(100vh - 56px));
+}
+.permission-panel-content {
+  padding: 16px;
+}
+.permission-panel-state {
+  min-height: 360px;
+}
+.permission-state-spinner {
+  width: 22px;
+  height: 22px;
+  margin-bottom: 10px;
+  border: 2px solid color-mix(in srgb, var(--text-secondary) 24%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: permission-spin 0.8s linear infinite;
+}
+@keyframes permission-spin {
+  to { transform: rotate(360deg); }
+}
+.permission-empty-icon svg {
+  fill: color-mix(in srgb, var(--accent) 10%, transparent);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.permission-panel-error {
+  margin: 0 0 12px;
+}
+.permission-list {
+  overflow: visible;
+  border: var(--hairline) solid var(--border);
+  border-radius: 11px;
+  background: var(--card-bg);
+}
+.permission-list-row {
+  position: relative;
+  min-height: 76px;
+}
+.permission-row-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 42px;
+  align-items: center;
+  min-height: 76px;
+  transition: background-color 100ms ease;
+}
+.permission-list-row + .permission-list-row {
+  border-top: var(--hairline) solid var(--border);
+}
+.permission-list-row:first-child > .permission-row-main {
+  border-radius: 10px 10px 0 0;
+}
+.permission-list-row:last-child:not(.is-expanded) > .permission-row-main {
+  border-radius: 0 0 10px 10px;
+}
+.permission-list-row:only-child:not(.is-expanded) > .permission-row-main {
+  border-radius: 10px;
+}
+.permission-list-row.has-yolo > .permission-row-main {
+  background: color-mix(in srgb, #ff453a 3.5%, transparent);
+}
+.permission-row-main:has(.permission-row-disclosure:hover) {
+  background: color-mix(in srgb, var(--text-primary) 4.5%, transparent);
+}
+.permission-row-main:has(.permission-row-disclosure:focus-visible) {
+  box-shadow: inset var(--focus-ring);
+}
+.permission-row-disclosure {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  gap: 11px;
+  min-width: 0;
+  padding: 11px 4px 11px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+.permission-row-disclosure:focus-visible {
+  outline: none;
+}
+.permission-row-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  color: var(--accent);
+}
+.permission-row-icon.global {
+  background: color-mix(in srgb, #30b0c7 14%, transparent);
+  color: #30b0c7;
+}
+.permission-row-icon.danger {
+  background: color-mix(in srgb, #ff453a 13%, transparent);
+  color: #ff453a;
+}
+.permission-row-icon svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.55;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.permission-row-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+}
+.permission-row-title {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 5px;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.permission-row-title > span:first-child {
+  min-width: 68px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.permission-scope-badge {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 9.5px;
+  font-weight: 550;
+  line-height: 17px;
+}
+.permission-scope-badge.warning {
+  background: color-mix(in srgb, #ff9f0a 14%, transparent);
+  color: #ff9f0a;
+}
+.permission-scope-badge.danger {
+  background: color-mix(in srgb, #ff453a 14%, transparent);
+  color: #ff453a;
+}
+.permission-row-meta,
+.permission-session-id {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.permission-session-id {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10px;
+  opacity: 0.72;
+}
+.permission-disclosure-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  color: var(--text-secondary);
+  opacity: 0.72;
+  transition: transform 130ms ease;
+}
+.permission-disclosure-chevron.expanded {
+  transform: rotate(90deg);
+}
+.permission-disclosure-chevron svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.permission-row-menu {
+  justify-self: center;
+  z-index: 114;
+}
+.permission-menu-pop {
+  min-width: 170px;
+}
+.permission-rule-list {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0 12px 11px 57px;
+  overflow: hidden;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: 0 7px 7px 0;
+  background: color-mix(in srgb, var(--bg-elevated) 58%, transparent);
+}
+.permission-rule-row {
+  display: grid;
+  grid-template-columns: 108px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 5px 9px;
+}
+.permission-rule-row + .permission-rule-row {
+  border-top: var(--hairline) solid var(--border);
+}
+.permission-rule-kind {
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 600;
+}
+.permission-rule-value {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.permission-rule-expiry {
+  color: var(--text-secondary);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.permission-rule-loading {
+  margin: 0;
+  padding: 9px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.permission-confirm-backdrop {
+  z-index: 130;
+  background: rgba(0, 0, 0, 0.32);
+}
+.permission-reset-dialog {
+  width: min(430px, 100%);
+}
+.permission-reset-dialog .confirm-intro {
+  line-height: 1.5;
+}
+.btn-danger {
+  border-color: transparent;
+  background: #ff453a;
+  color: #fff;
+}
+.btn-danger:hover {
+  background: #e23b31;
+}
 /* 实验区：标签 + 说明纵向堆叠的行内列 */
 .row .col {
   display: flex;

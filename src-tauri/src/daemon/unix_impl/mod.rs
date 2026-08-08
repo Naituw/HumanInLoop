@@ -1081,10 +1081,21 @@ fn permission_rules_op(
             let sessions = store::session_summaries()
                 .into_iter()
                 .map(|summary| {
-                    let (title, project_name) = state
+                    let (mut title, project_name) = state
                         .agents
                         .session_display(&summary.session_id)
                         .unwrap_or_default();
+                    // The registry intentionally retains only active and recent-ended sessions,
+                    // while permission grants can remain valid for 30 days. Resolve older Codex
+                    // titles from their exact rollout on panel open so the list does not degrade
+                    // into opaque session-id prefixes.
+                    if title.is_empty() {
+                        title = crate::agents::title::resolve_title(
+                            crate::agents::AgentKind::Codex,
+                            &summary.session_id,
+                        )
+                        .unwrap_or_default();
+                    }
                     ipc::PermissionSessionGroup {
                         summary,
                         title,

@@ -1,7 +1,6 @@
 <script setup lang="ts">
-// 「高级」tab 最后一张卡：Codex 会话授权管理（spec codex-permission-remember §6.3）。
-// 渐进加载：卡片本身全静态，点「管理」才连 daemon 取摘要，展开分组才取该组规则详情。
-// 顶部附宽松模式全局开关（D52）。
+// Codex permission preferences stay in the Advanced tab; remembered grants are managed in a
+// separate macOS-style sheet so a growing session list never expands the settings page itself.
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { permissionRulesPanel } from "../../lib/ipc";
@@ -14,11 +13,21 @@ import type {
 const { t } = useI18n();
 const ctx = useSettingsContext();
 const { persist } = ctx;
-// 父组件仅在 config 加载后渲染本卡，这里可安全断言非空。
 const config = computed(() => ctx.config.value!);
 
-/** 跨会话授权分组在本组件内部使用的伪 id（不会与 Codex session id 冲突）。 */
 const GLOBAL_ID = "__global__";
+
+type ScopeBadge = {
+  text: string;
+  tone?: "danger" | "warning";
+};
+
+type ResetTarget = {
+  id: string;
+  title: string;
+  count: number;
+  global: boolean;
+};
 
 const opened = ref(false);
 const loading = ref(false);
@@ -26,16 +35,16 @@ const error = ref("");
 const sessions = ref<PermissionSessionGroup[]>([]);
 const globalCount = ref(0);
 const details = ref<Record<string, PermissionRuleInfo[] | "loading">>({});
-const armedReset = ref<string | null>(null);
-const resetBusy = ref<string | null>(null);
+const menuId = ref<string | null>(null);
+const resetTarget = ref<ResetTarget | null>(null);
+const resetBusy = ref(false);
 const yoloBusy = ref<string | null>(null);
-let disarmTimer: number | undefined;
 
 async function load() {
   loading.value = true;
   error.value = "";
   details.value = {};
-  armedReset.value = null;
+  menuId.value = null;
   try {
     const result = await permissionRulesPanel({ op: "summaries" });
     if (result.kind === "summaries") {
@@ -54,13 +63,21 @@ function openPanel() {
   void load();
 }
 
+function closePanel() {
+  menuId.value = null;
+  resetTarget.value = null;
+  opened.value = false;
+}
+
 async function toggleDetail(id: string) {
+  menuId.value = null;
   if (details.value[id] && details.value[id] !== "loading") {
     const next = { ...details.value };
     delete next[id];
     details.value = next;
     return;
   }
+  if (details.value[id] === "loading") return;
   details.value = { ...details.value, [id]: "loading" };
   try {
     const result = await permissionRulesPanel(
@@ -79,70 +96,64 @@ async function toggleDetail(id: string) {
   }
 }
 
-/** 两段式重置：第一次点击进入「确认重置？」，3 秒内再点才执行。 */
-function requestReset(id: string) {
-  if (armedReset.value !== id) {
-    armedReset.value = id;
-    window.clearTimeout(disarmTimer);
-    disarmTimer = window.setTimeout(() => {
-      armedReset.value = null;
-    }, 3000);
-    return;
-  }
-  window.clearTimeout(disarmTimer);
-  armedReset.value = null;
-  void doReset(id);
+function toggleMenu(id: string) {
+  menuId.value = menuId.value === id ? null : id;
 }
 
-async function doReset(id: string) {
-  resetBusy.value = id;
+function askReset(id: string, title: string, count: number, global = false) {
+  menuId.value = null;
+  resetTarget.value = { id, title, count, global };
+}
+
+async function confirmReset() {
+  const target = resetTarget.value;
+  if (!target || resetBusy.value) return;
+  resetBusy.value = true;
+  error.value = "";
+  let succeeded = false;
   try {
     await permissionRulesPanel(
-      id === GLOBAL_ID
+      target.global
         ? { op: "resetGlobal" }
-        : { op: "resetSession", sessionId: id },
+        : { op: "resetSession", sessionId: target.id },
     );
-    // Daemon 已原子落盘：本地移除该分组即可，无需整表刷新。
-    if (id === GLOBAL_ID) {
+    if (target.global) {
       globalCount.value = 0;
     } else {
       sessions.value = sessions.value.filter(
-        (g) => g.summary.sessionId !== id,
+        (group) => group.summary.sessionId !== target.id,
       );
     }
     const next = { ...details.value };
-    delete next[id];
+    delete next[target.id];
     details.value = next;
+    succeeded = true;
   } catch (e) {
     error.value = String(e);
   } finally {
-    resetBusy.value = null;
+    resetBusy.value = false;
+    if (succeeded) resetTarget.value = null;
   }
 }
 
-function groupTitle(group: PermissionSessionGroup): string {
-  if (group.title) return group.title;
-  if (group.projectName) return group.projectName;
-  return t("settings.permissionRules.sessionFallback", {
-    id: shortId(group.summary.sessionId),
-  });
-}
-
-function shortId(id: string): string {
-  return id.length > 12 ? `${id.slice(0, 8)}…` : id;
-}
-
-/** 只关 YOLO（D53）：不动该会话其它授权；成功后本地改摘要即可。 */
-async function disableYolo(id: string) {
+async function disableYolo(group: PermissionSessionGroup) {
+  const id = group.summary.sessionId;
+  menuId.value = null;
   yoloBusy.value = id;
+  error.value = "";
   try {
     await permissionRulesPanel({ op: "disableYolo", sessionId: id });
-    const group = sessions.value.find((g) => g.summary.sessionId === id);
-    if (group) {
-      group.summary.yolo = false;
-      group.summary.ruleCount = Math.max(0, group.summary.ruleCount - 1);
+    group.summary.yolo = false;
+    group.summary.ruleCount = Math.max(0, group.summary.ruleCount - 1);
+    if (group.summary.ruleCount === 0) {
+      sessions.value = sessions.value.filter(
+        (candidate) => candidate.summary.sessionId !== id,
+      );
+      const next = { ...details.value };
+      delete next[id];
+      details.value = next;
+      return;
     }
-    // 详情已展开时刷新该组规则列表。
     if (details.value[id] && details.value[id] !== "loading") {
       const result = await permissionRulesPanel({
         op: "sessionDetail",
@@ -159,30 +170,67 @@ async function disableYolo(id: string) {
   }
 }
 
-function scopeText(group: PermissionSessionGroup): string {
-  const s = group.summary;
-  const parts: string[] = [];
-  if (s.yolo) parts.push(t("settings.permissionRules.scopeYolo"));
-  if (s.fileExactCount > 0)
-    parts.push(t("settings.permissionRules.scopeFiles", { n: s.fileExactCount }));
-  for (const root of s.projectRoots)
-    parts.push(t("settings.permissionRules.scopeProject", { root: shortPath(root) }));
-  if (s.fullDisk) parts.push(t("settings.permissionRules.scopeDisk"));
-  if (s.shellCount > 0)
-    parts.push(t("settings.permissionRules.scopeShell", { n: s.shellCount }));
-  if (s.networkCount > 0)
-    parts.push(t("settings.permissionRules.scopeNetwork", { n: s.networkCount }));
-  if (s.mcpCount > 0)
-    parts.push(t("settings.permissionRules.scopeMcp", { n: s.mcpCount }));
-  const meta = [
-    t("settings.permissionRules.lastUsed", { time: formatMs(s.lastUsedAtMs) }),
-  ];
-  return [parts.join(" · "), meta.join(" · ")].filter(Boolean).join(" — ");
+function groupTitle(group: PermissionSessionGroup): string {
+  if (group.title) return group.title;
+  if (group.projectName) return group.projectName;
+  return t("settings.permissionRules.untitled");
 }
 
-function shortPath(path: string): string {
-  const parts = path.split("/").filter(Boolean);
-  return parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : path;
+function shortId(id: string): string {
+  return id.length > 12 ? `${id.slice(0, 8)}…` : id;
+}
+
+function groupBadges(group: PermissionSessionGroup): ScopeBadge[] {
+  const summary = group.summary;
+  const badges: ScopeBadge[] = [];
+  if (summary.yolo) {
+    badges.push({
+      text: t("settings.permissionRules.badgeYolo"),
+      tone: "danger",
+    });
+  }
+  if (summary.fullDisk) {
+    badges.push({
+      text: t("settings.permissionRules.badgeDisk"),
+      tone: "warning",
+    });
+  }
+  if (summary.fileExactCount > 0) {
+    badges.push({
+      text: t("settings.permissionRules.badgeFiles", {
+        n: summary.fileExactCount,
+      }),
+    });
+  }
+  if (summary.projectRoots.length > 0) {
+    badges.push({
+      text: t("settings.permissionRules.badgeProjects", {
+        n: summary.projectRoots.length,
+      }),
+    });
+  }
+  if (summary.shellCount > 0) {
+    badges.push({
+      text: t("settings.permissionRules.badgeShell", {
+        n: summary.shellCount,
+      }),
+    });
+  }
+  if (summary.networkCount > 0) {
+    badges.push({
+      text: t("settings.permissionRules.badgeNetwork", {
+        n: summary.networkCount,
+      }),
+    });
+  }
+  if (summary.mcpCount > 0) {
+    badges.push({
+      text: t("settings.permissionRules.badgeMcp", {
+        n: summary.mcpCount,
+      }),
+    });
+  }
+  return badges;
 }
 
 function formatMs(ms: number): string {
@@ -193,13 +241,23 @@ function kindLabel(kind: PermissionRuleInfo["kind"]): string {
   const key = `settings.permissionRules.kind${kind.charAt(0).toUpperCase()}${kind.slice(1)}`;
   return t(key);
 }
+
+const resetDescription = computed(() => {
+  const target = resetTarget.value;
+  if (!target) return "";
+  return target.global
+    ? t("settings.permissionRules.resetGlobalDesc", { n: target.count })
+    : t("settings.permissionRules.resetSessionDesc", {
+        title: target.title,
+        n: target.count,
+      });
+});
 </script>
 
 <template>
-  <div class="card">
+  <div class="card permission-rules-card">
     <p class="card-title">{{ t("settings.permissionRules.title") }}</p>
     <p class="card-desc">{{ t("settings.permissionRules.desc") }}</p>
-    <!-- 宽松模式全局开关（D52）：会话级开关在权限弹窗里。 -->
     <div class="row">
       <span class="label">{{ t("settings.permissionRules.relaxedTitle") }}</span>
       <span class="spacer"></span>
@@ -215,148 +273,280 @@ function kindLabel(kind: PermissionRuleInfo["kind"]): string {
     <p class="card-desc">{{ t("settings.permissionRules.relaxedDesc") }}</p>
     <hr class="divider" />
     <div class="row">
+      <div class="col">
+        <span class="label">{{ t("settings.permissionRules.savedTitle") }}</span>
+        <span class="card-desc">{{ t("settings.permissionRules.manageHint") }}</span>
+      </div>
       <span class="spacer"></span>
-      <button
-        class="btn"
-        type="button"
-        :disabled="loading"
-        @click="opened ? load() : openPanel()"
-      >
-        {{
-          opened
-            ? t("settings.permissionRules.refresh")
-            : t("settings.permissionRules.manage")
-        }}
+      <button class="btn" type="button" @click="openPanel">
+        {{ t("settings.permissionRules.manage") }}
       </button>
     </div>
-
-    <template v-if="opened">
-      <hr class="divider" />
-      <p v-if="loading" class="card-desc">
-        {{ t("settings.permissionRules.loading") }}
-      </p>
-      <p v-else-if="error" class="card-desc err">{{ error }}</p>
-      <p
-        v-else-if="sessions.length === 0 && globalCount === 0"
-        class="card-desc"
-      >
-        {{ t("settings.permissionRules.empty") }}
-      </p>
-      <template v-else>
-        <!-- 跨会话授权（D41）：单独分组，不属于任何对话。 -->
-        <template v-if="globalCount > 0">
-          <div class="row">
-            <div class="col">
-              <span class="label">{{
-                t("settings.permissionRules.globalGroup")
-              }}</span>
-              <p class="card-desc">
-                {{ t("settings.permissionRules.scopeMcp", { n: globalCount }) }}
-              </p>
-            </div>
-            <span class="spacer"></span>
-            <button class="btn" type="button" @click="toggleDetail(GLOBAL_ID)">
-              {{
-                details[GLOBAL_ID] && details[GLOBAL_ID] !== "loading"
-                  ? t("settings.permissionRules.collapse")
-                  : t("settings.permissionRules.detail")
-              }}
-            </button>
-            <button
-              class="btn"
-              type="button"
-              :disabled="resetBusy === GLOBAL_ID"
-              @click="requestReset(GLOBAL_ID)"
-            >
-              {{
-                armedReset === GLOBAL_ID
-                  ? t("settings.permissionRules.confirmReset")
-                  : t("settings.permissionRules.reset")
-              }}
-            </button>
-          </div>
-          <div
-            v-if="details[GLOBAL_ID] && details[GLOBAL_ID] !== 'loading'"
-            class="sub-setting"
-          >
-            <p
-              v-for="(rule, i) in details[GLOBAL_ID] as PermissionRuleInfo[]"
-              :key="i"
-              class="card-desc"
-            >
-              {{ kindLabel(rule.kind) }}
-              <template v-if="rule.display"> · {{ rule.display }}</template>
-              · {{ t("settings.permissionRules.expires", { time: formatMs(rule.expiresAtMs) }) }}
-            </p>
-          </div>
-          <hr class="divider" />
-        </template>
-
-        <!-- 按 Codex 对话分组，最近使用在前。 -->
-        <template
-          v-for="(group, index) in sessions"
-          :key="group.summary.sessionId"
-        >
-          <hr v-if="index > 0" class="divider" />
-          <div class="row">
-            <div class="col">
-              <span class="label">{{ groupTitle(group) }}</span>
-              <p class="card-desc">{{ scopeText(group) }}</p>
-            </div>
-            <span class="spacer"></span>
-            <button
-              v-if="group.summary.yolo"
-              class="btn"
-              type="button"
-              :disabled="yoloBusy === group.summary.sessionId"
-              @click="disableYolo(group.summary.sessionId)"
-            >
-              {{ t("settings.permissionRules.yoloOff") }}
-            </button>
-            <button
-              class="btn"
-              type="button"
-              @click="toggleDetail(group.summary.sessionId)"
-            >
-              {{
-                details[group.summary.sessionId] &&
-                details[group.summary.sessionId] !== "loading"
-                  ? t("settings.permissionRules.collapse")
-                  : t("settings.permissionRules.detail")
-              }}
-            </button>
-            <button
-              class="btn"
-              type="button"
-              :disabled="resetBusy === group.summary.sessionId"
-              @click="requestReset(group.summary.sessionId)"
-            >
-              {{
-                armedReset === group.summary.sessionId
-                  ? t("settings.permissionRules.confirmReset")
-                  : t("settings.permissionRules.reset")
-              }}
-            </button>
-          </div>
-          <div
-            v-if="
-              details[group.summary.sessionId] &&
-              details[group.summary.sessionId] !== 'loading'
-            "
-            class="sub-setting"
-          >
-            <p
-              v-for="(rule, i) in details[group.summary.sessionId] as PermissionRuleInfo[]"
-              :key="i"
-              class="card-desc"
-            >
-              {{ kindLabel(rule.kind) }}
-              <template v-if="rule.display"> · {{ rule.display }}</template>
-              · {{ t("settings.permissionRules.expires", { time: formatMs(rule.expiresAtMs) }) }}
-            </p>
-          </div>
-        </template>
-      </template>
-    </template>
   </div>
+
+  <Teleport to=".settings">
+    <div v-if="opened" class="workspace-panel-backdrop">
+      <section
+        class="workspace-panel permission-panel"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="t('settings.permissionRules.panelTitle')"
+      >
+        <header class="workspace-panel-toolbar">
+          <button class="workspace-toolbar-done" type="button" @click="closePanel">
+            {{ t("settings.agentTasks.done") }}
+          </button>
+          <h2>{{ t("settings.permissionRules.panelTitle") }}</h2>
+          <button
+            class="workspace-toolbar-icon"
+            type="button"
+            :disabled="loading"
+            :aria-label="t('settings.permissionRules.refresh')"
+            :title="t('settings.permissionRules.refresh')"
+            @click="load"
+          >
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <path d="M15.9 7.3A6.4 6.4 0 1 0 16 12" />
+              <path d="M15.9 3.8v3.8h-3.8" />
+            </svg>
+          </button>
+        </header>
+
+        <div class="workspace-panel-content permission-panel-content">
+          <div v-if="loading" class="workspace-panel-empty permission-panel-state">
+            <span class="permission-state-spinner" aria-hidden="true"></span>
+            <p>{{ t("settings.permissionRules.loading") }}</p>
+          </div>
+          <div
+            v-else-if="sessions.length === 0 && globalCount === 0"
+            class="workspace-panel-empty permission-panel-state"
+          >
+            <span class="workspace-empty-icon permission-empty-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M12 3.4 19 6v5.1c0 4.5-2.9 7.8-7 9.5-4.1-1.7-7-5-7-9.5V6l7-2.6Z" />
+                <path d="m8.8 12 2.1 2.1 4.5-4.6" />
+              </svg>
+            </span>
+            <p>{{ t("settings.permissionRules.empty") }}</p>
+            <span>{{ t("settings.permissionRules.emptyHint") }}</span>
+          </div>
+          <template v-else>
+            <p v-if="error" class="result err permission-panel-error">{{ error }}</p>
+            <div class="permission-list">
+              <div
+                v-if="globalCount > 0"
+                class="permission-list-row"
+                :class="{ 'is-expanded': Boolean(details[GLOBAL_ID]) }"
+              >
+                <div class="permission-row-main">
+                  <button
+                    class="permission-row-disclosure"
+                    type="button"
+                    :aria-expanded="Boolean(details[GLOBAL_ID])"
+                    @click="toggleDetail(GLOBAL_ID)"
+                  >
+                  <span class="permission-row-icon global" aria-hidden="true">
+                    <svg viewBox="0 0 24 24">
+                      <circle cx="12" cy="12" r="8.5" />
+                      <path d="M3.8 12h16.4M12 3.5c2.3 2.3 3.4 5.1 3.4 8.5S14.3 18.2 12 20.5C9.7 18.2 8.6 15.4 8.6 12S9.7 5.8 12 3.5Z" />
+                    </svg>
+                  </span>
+                  <span class="permission-row-copy">
+                    <span class="permission-row-title">
+                      <span>{{ t("settings.permissionRules.globalGroup") }}</span>
+                      <span class="permission-scope-badge">
+                        {{ t("settings.permissionRules.badgeMcp", { n: globalCount }) }}
+                      </span>
+                    </span>
+                    <span class="permission-row-meta">{{ t("settings.permissionRules.globalHint") }}</span>
+                  </span>
+                  <span
+                    class="permission-disclosure-chevron"
+                    :class="{ expanded: Boolean(details[GLOBAL_ID]) }"
+                    aria-hidden="true"
+                  >
+                    <svg viewBox="0 0 16 16"><path d="m5.5 3.5 4.5 4.5-4.5 4.5" /></svg>
+                  </span>
+                  </button>
+                  <div class="workspace-row-menu permission-row-menu">
+                    <button
+                      class="workspace-more-button"
+                      type="button"
+                      :aria-label="t('settings.permissionRules.actions')"
+                      @click.stop="toggleMenu(GLOBAL_ID)"
+                    >
+                      <svg viewBox="0 0 20 20" aria-hidden="true">
+                        <circle cx="4" cy="10" r="1.35" />
+                        <circle cx="10" cy="10" r="1.35" />
+                        <circle cx="16" cy="10" r="1.35" />
+                      </svg>
+                    </button>
+                    <div v-if="menuId === GLOBAL_ID" class="workspace-menu-pop permission-menu-pop">
+                      <button
+                        class="menu-item workspace-menu-danger"
+                        type="button"
+                        @click="askReset(GLOBAL_ID, t('settings.permissionRules.globalGroup'), globalCount, true)"
+                      >
+                        {{ t("settings.permissionRules.reset") }}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="details[GLOBAL_ID]" class="permission-rule-list">
+                  <p v-if="details[GLOBAL_ID] === 'loading'" class="permission-rule-loading">
+                    {{ t("settings.permissionRules.loading") }}
+                  </p>
+                  <div
+                    v-for="(rule, index) in details[GLOBAL_ID] as PermissionRuleInfo[]"
+                    v-else
+                    :key="index"
+                    class="permission-rule-row"
+                  >
+                    <span class="permission-rule-kind">{{ kindLabel(rule.kind) }}</span>
+                    <span v-if="rule.display" class="permission-rule-value" :title="rule.display">{{ rule.display }}</span>
+                    <span class="permission-rule-expiry">{{ t("settings.permissionRules.expires", { time: formatMs(rule.expiresAtMs) }) }}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div
+                v-for="group in sessions"
+                :key="group.summary.sessionId"
+                class="permission-list-row"
+                :class="{
+                  'has-yolo': group.summary.yolo,
+                  'is-expanded': Boolean(details[group.summary.sessionId]),
+                }"
+              >
+                <div class="permission-row-main">
+                  <button
+                    class="permission-row-disclosure"
+                    type="button"
+                    :aria-expanded="Boolean(details[group.summary.sessionId])"
+                    @click="toggleDetail(group.summary.sessionId)"
+                  >
+                  <span class="permission-row-icon" :class="{ danger: group.summary.yolo }" aria-hidden="true">
+                    <svg viewBox="0 0 24 24">
+                      <path d="M12 3.4 19 6v5.1c0 4.5-2.9 7.8-7 9.5-4.1-1.7-7-5-7-9.5V6l7-2.6Z" />
+                      <path d="m8.8 12 2.1 2.1 4.5-4.6" />
+                    </svg>
+                  </span>
+                  <span class="permission-row-copy">
+                    <span class="permission-row-title">
+                      <span :title="group.title || groupTitle(group)">{{ groupTitle(group) }}</span>
+                      <span
+                        v-for="badge in groupBadges(group)"
+                        :key="badge.text"
+                        class="permission-scope-badge"
+                        :class="badge.tone"
+                      >
+                        {{ badge.text }}
+                      </span>
+                    </span>
+                    <span class="permission-row-meta">
+                      <template v-if="group.projectName">{{ group.projectName }} · </template>
+                      {{ t("settings.permissionRules.lastUsed", { time: formatMs(group.summary.lastUsedAtMs) }) }}
+                    </span>
+                    <span class="permission-session-id" :title="group.summary.sessionId">
+                      {{ shortId(group.summary.sessionId) }}
+                    </span>
+                  </span>
+                  <span
+                    class="permission-disclosure-chevron"
+                    :class="{ expanded: Boolean(details[group.summary.sessionId]) }"
+                    aria-hidden="true"
+                  >
+                    <svg viewBox="0 0 16 16"><path d="m5.5 3.5 4.5 4.5-4.5 4.5" /></svg>
+                  </span>
+                  </button>
+                  <div class="workspace-row-menu permission-row-menu">
+                    <button
+                      class="workspace-more-button"
+                      type="button"
+                      :disabled="yoloBusy === group.summary.sessionId"
+                      :aria-label="t('settings.permissionRules.actions')"
+                      @click.stop="toggleMenu(group.summary.sessionId)"
+                    >
+                      <svg viewBox="0 0 20 20" aria-hidden="true">
+                        <circle cx="4" cy="10" r="1.35" />
+                        <circle cx="10" cy="10" r="1.35" />
+                        <circle cx="16" cy="10" r="1.35" />
+                      </svg>
+                    </button>
+                    <div
+                      v-if="menuId === group.summary.sessionId"
+                      class="workspace-menu-pop permission-menu-pop"
+                    >
+                      <button
+                        v-if="group.summary.yolo"
+                        class="menu-item"
+                        type="button"
+                        @click="disableYolo(group)"
+                      >
+                        {{ t("settings.permissionRules.yoloOff") }}
+                      </button>
+                      <button
+                        class="menu-item workspace-menu-danger"
+                        type="button"
+                        @click="askReset(group.summary.sessionId, groupTitle(group), group.summary.ruleCount)"
+                      >
+                        {{ t("settings.permissionRules.reset") }}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div v-if="details[group.summary.sessionId]" class="permission-rule-list">
+                  <p
+                    v-if="details[group.summary.sessionId] === 'loading'"
+                    class="permission-rule-loading"
+                  >
+                    {{ t("settings.permissionRules.loading") }}
+                  </p>
+                  <div
+                    v-for="(rule, index) in details[group.summary.sessionId] as PermissionRuleInfo[]"
+                    v-else
+                    :key="index"
+                    class="permission-rule-row"
+                  >
+                    <span class="permission-rule-kind">{{ kindLabel(rule.kind) }}</span>
+                    <span v-if="rule.display" class="permission-rule-value" :title="rule.display">{{ rule.display }}</span>
+                    <span class="permission-rule-expiry">{{ t("settings.permissionRules.expires", { time: formatMs(rule.expiresAtMs) }) }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </template>
+          <p v-if="error && (loading || (sessions.length === 0 && globalCount === 0))" class="result err permission-panel-error">
+            {{ error }}
+          </p>
+        </div>
+        <div
+          v-if="menuId"
+          class="workspace-menu-backdrop"
+          @click="menuId = null"
+        ></div>
+      </section>
+    </div>
+
+    <div v-if="resetTarget" class="workspace-panel-backdrop permission-confirm-backdrop">
+      <section
+        class="confirm-dialog permission-reset-dialog"
+        role="alertdialog"
+        aria-modal="true"
+        :aria-label="t('settings.permissionRules.resetTitle')"
+      >
+        <h2>{{ t("settings.permissionRules.resetTitle") }}</h2>
+        <p class="confirm-intro">{{ resetDescription }}</p>
+        <p class="confirm-note">{{ t("settings.permissionRules.resetPermanentHint") }}</p>
+        <div class="confirm-actions">
+          <button class="btn" type="button" :disabled="resetBusy" @click="resetTarget = null">
+            {{ t("settings.agentTasks.confirmCancel") }}
+          </button>
+          <button class="btn btn-danger" type="button" :disabled="resetBusy" @click="confirmReset">
+            {{ t("settings.permissionRules.resetConfirm") }}
+          </button>
+        </div>
+      </section>
+    </div>
+  </Teleport>
 </template>

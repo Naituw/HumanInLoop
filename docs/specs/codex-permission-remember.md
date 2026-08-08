@@ -466,22 +466,26 @@ D5 要求 Resume 后继续有效，因此仅保存在 daemon 内存不足以满�
 
 ### 6.3 查看与重置
 
-设置页“高级”Tab 的最后一张卡提供静态“管理 Codex 会话授权”入口。该功能使用频率低，必须渐进加载：
+设置页“高级”Tab 的最后一张卡保留全局“宽松模式”开关，并提供静态“管理 Codex 会话授权”入口；会话列表
+不在卡片内展开，而是在与“管理工作目录”同口径的 macOS sheet 中管理。该功能使用频率低，必须渐进加载：
 
 1. 设置窗口启动不读取 rule store；
 2. 切换到高级 Tab 也不查询 rule store，卡片不显示需要后端统计的动态 count；
-3. 用户点击管理按钮后才连接 daemon 并加载对话摘要；
+3. 用户点击管理按钮后才打开独立面板、连接 daemon 并加载对话摘要；
 4. 展开某个对话时再加载其完整 scope / 路径详情；
 5. 设置搜索只索引静态标题与说明，不触发规则加载。
 
-列表按 Codex `session_id` 分组；优先使用 daemon 已有 agent registry 中的对话标题与项目名，不为这个页面扫描
-全部 Codex rollout。标题不可用时显示项目名、缩短的 session id、最后使用时间与预计清理时间。每组展示已有
-scope（精确文件数量 / project root / 完全磁盘，以及未来 shell、network、MCP session scope）。
+列表按 Codex `session_id` 分组；优先使用 daemon 已有 agent registry 中的对话标题与项目名。Registry 不保留的
+较旧会话，在用户打开面板时按精确 `session_id` 从既有 Codex rollout 解析首条真实用户消息作为标题，复用
+`agents::title` 的既有过滤与截断逻辑；解析失败才回退项目名 / “未命名对话”，缩短的 session id 只作为辅助元数据，
+不再充当主标题。收起态以紧凑 badge 展示已有 scope（精确文件 / project root / 完全磁盘 / shell / network /
+MCP / YOLO），点击整行原位展开完整规则和预计清理时间。
 
-首期唯一修改动作是“重置此对话授权”：一次删除该 `session_id` 下全部 AskHuman session rules，不做逐条或
-逐路径编辑。daemon 必须串行完成原子落盘和内存 matcher 失效后再报告成功；此后下一次相关请求重新弹窗。
-设置页不直接编辑存储文件。永久 Codex rules 不属于“重置对话授权”，其查看 / 撤销需要随对应永久类型另行
-设计，不能在这里暗中修改 Codex 原生配置。
+每行右侧只保留统一尺寸的省略号菜单，避免多个文字按钮挤压标题；菜单承载“关闭 YOLO”（存在时）与
+“重置此对话授权”。重置前显示独立确认对话框，一次删除该 `session_id` 下全部 AskHuman session rules，
+不做逐条或逐路径编辑。daemon 必须串行完成原子落盘和内存 matcher 失效后再报告成功；此后下一次相关请求
+重新弹窗。设置页不直接编辑存储文件。永久 Codex rules 不属于“重置对话授权”，其查看 / 撤销需要随对应
+永久类型另行设计，不能在这里暗中修改 Codex 原生配置。
 
 D41 的跨会话 shadow 授权（插件 / codex_apps MCP“始终允许”）不属于任何单个对话，在面板中单列
 “跨会话授权”分组，提供单独查看与重置；“重置此对话授权”不影响它们。
