@@ -178,17 +178,24 @@ qa #2:
 
 ### D6 长正文与附件：单一 `says` 块
 
-8 KiB 阈值 / 2 KiB UTF-8 前缀；`full message:` 与 `files:` 写在**同一** `says` 块内：
+`assistant (you) says` 与 User Prompt 的 `user says` 正文均使用 **512 B UTF-8 总预览预算**：
+
+- 未超过 512 B 时原样输出；
+- 超过时约各用一半预算保留头部与尾部，优先收缩到附近段落、换行或句子边界，中间输出
+  `… [middle omitted] …`；
+- 同时把未截断全文写入 0600 私有文件。`full message:` 与 `files:` 写在**同一** `says` 块内；
+- 问题、用户实际回答、已选项与附件路径不使用该正文预算，继续完整恢复。
 
 ```text
 assistant (you) says:
-  <2KiB 前缀…>
+  <约 256 B 头部>
+  … [middle omitted] …
+  <约 256 B 尾部>
   full message: /…/show-last/<hash>.md
   files:
     - /path/context.pdf
 ```
 
-User Prompt 过长时同样：`user says:` 块内前缀 + `full message:`。  
 全文文件 hash 须含 entry id（或多条不互盖）；权限 0600。
 
 ### D7 User Prompt 并入（best-effort）

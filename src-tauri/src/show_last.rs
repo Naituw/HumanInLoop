@@ -7,9 +7,10 @@ use crate::history::{HistoryAnswer, HistoryEntry, RecentSends};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-pub const MESSAGE_FILE_THRESHOLD_BYTES: usize = 8 * 1024;
-pub const MESSAGE_STDOUT_PREFIX_BYTES: usize = 2 * 1024;
+pub const MESSAGE_STDOUT_PREVIEW_BYTES: usize = 512;
 pub const MAX_COUNT: usize = 10;
+
+const MESSAGE_PREVIEW_OMISSION: &str = "… [middle omitted] …";
 
 const PRIORITY_NOTE: &str = "\
 priority note:
@@ -463,16 +464,13 @@ fn render_says_block(
     storage_dir: &Path,
 ) -> std::io::Result<String> {
     let mut out = format!("{label}:\n");
-    if text.len() > MESSAGE_FILE_THRESHOLD_BYTES {
+    if text.len() > MESSAGE_STDOUT_PREVIEW_BYTES {
         let path = write_full_message_at(storage_dir, storage_key, file_id, text)?;
-        let prefix = utf8_prefix(text, MESSAGE_STDOUT_PREFIX_BYTES);
-        for line in prefix.lines() {
+        let preview = message_preview(text, MESSAGE_STDOUT_PREVIEW_BYTES);
+        for line in preview.lines() {
             out.push_str("  ");
             out.push_str(line);
             out.push('\n');
-        }
-        if !prefix.ends_with('\n') && !prefix.is_empty() && text.len() > prefix.len() {
-            // no extra
         }
         out.push_str(&format!("  full message: {}\n", path.display()));
     } else if !text.is_empty() {
@@ -520,6 +518,71 @@ fn utf8_prefix(text: &str, max_bytes: usize) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+
+fn utf8_suffix(text: &str, max_bytes: usize) -> &str {
+    let mut start = text.len().saturating_sub(max_bytes);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
+}
+
+/// Keep both ends of a long recovery message. The latest User Prompt and AskHuman context often
+/// state their subject near the beginning and the actionable request or conclusion near the end.
+/// Prefer nearby paragraph, line, or sentence boundaries so Markdown is less likely to be cut
+/// mid-item.
+fn message_preview(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+
+    let raw_head = utf8_prefix(text, max_bytes / 2);
+    let head = prefer_head_boundary(raw_head).trim_end();
+    // Give bytes released by a shorter, paragraph-aligned head to the tail. This avoids ugly
+    // fragments when a message is only slightly over the limit while staying within 512 bytes.
+    let raw_tail = utf8_suffix(text, max_bytes.saturating_sub(head.len()));
+    let tail = prefer_tail_boundary(raw_tail).trim();
+
+    format!("{head}\n\n{MESSAGE_PREVIEW_OMISSION}\n\n{tail}")
+}
+
+fn prefer_head_boundary(text: &str) -> &str {
+    for separator in ["\n\n", "\n"] {
+        if let Some(boundary) = text.rfind(separator).filter(|boundary| *boundary > 0) {
+            return &text[..boundary];
+        }
+    }
+    if let Some((boundary, punctuation)) = text.char_indices().rfind(|(boundary, punctuation)| {
+        *boundary >= text.len() / 2 && is_sentence_boundary(*punctuation)
+    }) {
+        return &text[..boundary + punctuation.len_utf8()];
+    }
+    text
+}
+
+fn prefer_tail_boundary(text: &str) -> &str {
+    for separator in ["\n\n", "\n"] {
+        if let Some(boundary) = text.find(separator) {
+            let start = boundary + separator.len();
+            if start < text.len() {
+                return &text[start..];
+            }
+        }
+    }
+    if let Some((boundary, punctuation)) = text.char_indices().find(|(boundary, punctuation)| {
+        *boundary <= text.len() / 2 && is_sentence_boundary(*punctuation)
+    }) {
+        let start = boundary + punctuation.len_utf8();
+        if start < text.len() {
+            return &text[start..];
+        }
+    }
+    text
+}
+
+fn is_sentence_boundary(ch: char) -> bool {
+    matches!(ch, '.' | '!' | '?' | ';' | '。' | '！' | '？' | '；')
 }
 
 fn format_answered_at(at_ms: i64, now_ms: i64) -> String {
@@ -836,7 +899,12 @@ mod tests {
     #[test]
     fn long_message_single_says_block_with_full_message_path() {
         let dir = tempfile::tempdir().unwrap();
-        let message = "x".repeat(MESSAGE_FILE_THRESHOLD_BYTES + 1);
+        let message = format!(
+            "{}\n{}\n{}",
+            "你".repeat(50),
+            "中".repeat(300),
+            "尾".repeat(50)
+        );
         let entry = sample(&message, 1);
         let out = render(
             &[entry],
@@ -849,6 +917,10 @@ mod tests {
             1,
         );
         assert!(out.contains("assistant (you) says:"));
+        assert!(out.contains(MESSAGE_PREVIEW_OMISSION));
+        assert!(out.contains(&"你".repeat(50)));
+        assert!(out.contains(&"尾".repeat(50)));
+        assert!(!out.contains(&"中".repeat(100)));
         assert!(out.contains("full message:"));
         assert!(!out.contains("[message_truncated]"));
         let path_line = out
@@ -926,6 +998,48 @@ mod tests {
     fn utf8_prefix_never_splits_a_character() {
         assert_eq!(utf8_prefix("a你b", 2), "a");
         assert_eq!(utf8_prefix("a你b", 4), "a你");
+        assert_eq!(utf8_suffix("a你b", 2), "b");
+        assert_eq!(utf8_suffix("a你b", 4), "你b");
+    }
+
+    #[test]
+    fn message_preview_prefers_line_boundaries_within_budget() {
+        let head = "你".repeat(50);
+        let tail = "尾".repeat(50);
+        let text = format!("{head}\n{}\n{tail}", "中".repeat(300));
+        let preview = message_preview(&text, MESSAGE_STDOUT_PREVIEW_BYTES);
+        assert_eq!(
+            preview,
+            format!("{head}\n\n{MESSAGE_PREVIEW_OMISSION}\n\n{tail}")
+        );
+        assert!(preview.len() - MESSAGE_PREVIEW_OMISSION.len() <= MESSAGE_STDOUT_PREVIEW_BYTES);
+    }
+
+    #[test]
+    fn message_preview_avoids_fragments_just_over_the_limit() {
+        let head = "opening summary";
+        let middle = "middle details ".repeat(25);
+        let tail = "final conclusion ".repeat(8);
+        let text = format!("{head}\n\n{middle}\n\n{tail}");
+        assert!(text.len() > MESSAGE_STDOUT_PREVIEW_BYTES);
+
+        let preview = message_preview(&text, MESSAGE_STDOUT_PREVIEW_BYTES);
+        assert!(preview.starts_with(head));
+        assert!(preview.ends_with(tail.trim_end()));
+        assert!(!preview.contains("middle details"));
+        assert!(preview.len() - MESSAGE_PREVIEW_OMISSION.len() <= MESSAGE_STDOUT_PREVIEW_BYTES);
+    }
+
+    #[test]
+    fn message_preview_falls_back_to_sentence_boundaries() {
+        assert_eq!(
+            prefer_head_boundary("first。second。cut"),
+            "first。second。"
+        );
+        assert_eq!(
+            prefer_tail_boundary("fragment；final conclusion"),
+            "final conclusion"
+        );
     }
 
     #[test]
