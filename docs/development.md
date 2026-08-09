@@ -64,14 +64,37 @@ Build and install locally:
 # (or <worktree>/.askhuman-dev/bin when Dev Instance is enabled — see below)
 ./scripts/install.sh
 
+# Build/install the exact production release profile when needed:
+./scripts/install.sh --release
+
 # Force production install path even inside an enabled worktree:
 ./scripts/install.sh --global
 
 # Windows        → installs to %LOCALAPPDATA%\Programs\AskHuman
 ./scripts/install-windows.ps1
+
+# Windows exact production profile:
+./scripts/install-windows.ps1 -Release
 ```
 
 > Running the GUI popup on Linux needs system WebKitGTK (e.g. `libwebkit2gtk-4.1`). If it's missing and a session-based channel (Telegram / DingTalk / Feishu) is configured, AskHuman automatically uses that channel; if none is available it exits with code 3 to signal graceful degradation.
+
+`install.sh` uses the dedicated `local-install` Cargo profile (`opt-level=0`, 64 codegen units) so
+small local edits compile quickly; publishing and CI continue to use the production `release`
+profile. The script fingerprints frontend inputs and reuses `dist/` when they have not changed,
+preventing an unchanged Vite rebuild from invalidating Tauri's embedded resources. It also skips
+copy/sign when the built and installed binary state is unchanged (local macOS signing does not
+request a network timestamp). After a successful copy it enforces per-profile target budgets with
+Cargo-coordinated cleanup: local package artifacts are removed first, while dependency caches are
+retained whenever they fit.
+
+Default dev/test builds retain line tables for file/line backtraces without full debugger local
+variable metadata. When full source-level debugger information is needed, use:
+
+```bash
+cargo build --manifest-path src-tauri/Cargo.toml --profile full-debug
+cargo test --manifest-path src-tauri/Cargo.toml --profile full-debug
+```
 
 ### Parallel development (Dev Instance / git worktrees)
 

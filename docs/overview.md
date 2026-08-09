@@ -432,6 +432,10 @@ node scripts/perf-popup.mjs             # 固定 canonical 弹窗性能场景
 ```
 
 - 功能或逻辑变更后按项目规则运行安装脚本，再使用新安装的 `AskHuman` 验证。
+- 本地 `install.sh` 使用独立的快速 `local-install` Cargo profile，并按前端输入指纹复用未变化的
+  `dist/`；正式发布 / CI 仍使用 `release`。安装后按 profile 预算经 Cargo 协调回收 target，
+  优先保留三方依赖；完整调试信息通过 `full-debug` profile 显式开启。详细说明见
+  `docs/development.md`。
 - macOS 安装使用稳定签名身份以维持钥匙串信任；证书与会话边界见 `docs/specs/secret-storage-keychain.md`。
 - 性能 harness、埋点与基线见 `docs/specs/popup-launch-performance.md` 和 `docs/perf/baseline.json`。
 

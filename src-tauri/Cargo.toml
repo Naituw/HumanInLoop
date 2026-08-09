@@ -122,3 +122,21 @@ codegen-units = 16
 incremental = true
 strip = true
 panic = "abort"
+
+# Fast local installation profile. Published artifacts and CI release builds continue to use
+# `profile.release`; this profile trades runtime optimization for much faster edit-build-install
+# cycles while retaining release semantics such as stripped symbols and panic=abort.
+[profile.local-install]
+inherits = "release"
+opt-level = 0
+codegen-units = 64
+incremental = true
+
+# Default tests and debug builds keep line tables/backtraces without the much larger full local
+# variable/type information. Use `--profile full-debug` when source-level debugger detail matters.
+[profile.dev]
+debug = 1
+
+[profile.full-debug]
+inherits = "dev"
+debug = 2

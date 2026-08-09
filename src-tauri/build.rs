@@ -72,6 +72,8 @@ fn build_swift_speech(manifest_dir: &str) {
     let swift_lib_dir = toolchain_usr.join("lib/swift/macosx");
 
     let lib_path = Path::new(&out_dir).join("libahspeech.a");
+    let module_cache = Path::new(&out_dir).join("swift-module-cache");
+    std::fs::create_dir_all(&module_cache).expect("无法创建 Swift module cache");
 
     // 编译为静态库。-static -emit-library 产出 .a；autolink 指令(框架/swiftCore)内嵌到对象中。
     let mut cmd = Command::new(swiftc.trim());
@@ -88,6 +90,12 @@ fn build_swift_speech(manifest_dir: &str) {
         "-parse-as-library",
         "-module-name",
         "ahspeech",
+        // Keep Clang/Swift modules inside Cargo's profile cache. Builds launched from sandboxed
+        // agents may not write ~/.cache/clang, and profile cleanup should own these intermediates.
+        "-module-cache-path",
+        module_cache
+            .to_str()
+            .expect("Swift module cache 路径不是 UTF-8"),
         "-emit-library",
         "-static",
         "-o",
