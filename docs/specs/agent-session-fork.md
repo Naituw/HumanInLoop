@@ -396,6 +396,8 @@ Fork 源正处于 `waitingRequestId` 时：
 - **Grok 真实 E2E（2026-08-09）**：Grok 1.0.0 源 `#18` 停在 AskHuman 时创建子 `#19`；两者
   同时存活，子记录准确指向源 session，分支仅凭继承上下文复述未出现在分支 prompt 中的秘密短语，
   并输出 `GROK_FORK_E2E_OK`。
+- **New 真实回归（2026-08-09）**：修复第二次 `do script` 偶发吞掉固定 helper 命令首字符后，
+  用户从原入口创建 Codex 新任务，Terminal 不再停在 `quote>`，Agent 正常启动。
 - Claude Code 的原生契约、adapter 与自动化回归已覆盖；按用户批准的本轮范围未启动真实 Claude E2E。
 
 ## 15. 反馈记录
@@ -414,3 +416,6 @@ Fork 源正处于 `waitingRequestId` 时：
   等待 tab 就绪再注入 helper 命令；复测通过。
 - **2026-08-09**：原生 Fork 继承标题属于正常行为；用户要求同标题父子会话在所有列表中可直接
   区分，并确认托盘格式为 `[子序号] 从 #父序号 分叉 · Agent — 标题`，把谱系放在长标题之前。
+- **2026-08-09**：等待新 Terminal tab 就绪后再次 `do script` 存在首字符被 line-editor handoff
+  吞掉的竞争，导致 New 的 helper 路径丢失起始单引号并停在 `quote>`；固定命令增加可牺牲的前导
+  shell 空白，保留 Fork 所需的就绪等待，同时让吞字与不吞字两种情况都得到同一 argv。

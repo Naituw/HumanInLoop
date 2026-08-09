@@ -438,11 +438,7 @@ fn create_record_internal(
 /// current process; the one-time helper in the new terminal claims the record first.
 #[cfg(target_os = "macos")]
 pub fn open_terminal(record: &LaunchRecord) -> Result<()> {
-    let command = format!(
-        "{} __agent-launch {}",
-        shell_quote(&record.askhuman_executable),
-        shell_quote(&record.id)
-    );
+    let command = terminal_helper_command(&record.askhuman_executable, &record.id);
     // `do script <command>` can inject before a newly created login shell has finished enabling
     // job control. A long-running TUI may then be treated as a background job and receive SIGTTOU
     // on its first terminal write. Create the tab first and wait for its startup command to become
@@ -465,6 +461,17 @@ end run"#;
         return Err(anyhow!("Terminal.app rejected the launch request"));
     }
     Ok(())
+}
+
+fn terminal_helper_command(askhuman_executable: &str, launch_id: &str) -> String {
+    // Terminal.app can accept the second `do script` during the short handoff from the login
+    // shell to its line editor. In that race it may discard the first injected character. Keep
+    // sacrificial shell whitespace ahead of the quoted executable so either outcome is valid.
+    format!(
+        "  {} __agent-launch {}",
+        shell_quote(askhuman_executable),
+        shell_quote(launch_id)
+    )
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -919,6 +926,14 @@ mod tests {
     #[test]
     fn shell_quote_handles_apostrophes() {
         assert_eq!(shell_quote("/tmp/it's"), "'/tmp/it'\\''s'");
+    }
+
+    #[test]
+    fn terminal_helper_command_has_sacrificial_whitespace() {
+        assert_eq!(
+            terminal_helper_command("/tmp/Ask Human", "launch-id"),
+            "  '/tmp/Ask Human' __agent-launch 'launch-id'"
+        );
     }
 
     /// Task boundary validation happens before any filesystem/readiness side effect
