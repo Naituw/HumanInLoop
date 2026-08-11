@@ -10,8 +10,26 @@ const analyze = process.env.ANALYZE
   ? [visualizer({ filename: "bundle-stats.html", gzipSize: true }) as PluginOption]
   : [];
 
+// Marked (pulled in by Mermaid) detects regexp lookbehind at runtime, but the
+// bundler can constant-fold `new RegExp("(?<=…)")` using the build machine and
+// emit an unconditional lookbehind for Safari 13. Keep the pattern dynamic so
+// Catalina falls back to Marked's non-lookbehind rule as intended.
+const preserveMarkedLookbehindDetection: PluginOption = {
+  name: "preserve-marked-lookbehind-detection",
+  enforce: "pre",
+  transform(code, id) {
+    if (!id.includes("/marked") || !id.endsWith("/lib/marked.esm.js")) return;
+    const probe = 'new RegExp("(?<=1)(?<!1)")';
+    if (!code.includes(probe)) return;
+    return code.replace(
+      probe,
+      'new RegExp("(?" + String.fromCharCode(60) + "=1)(?" + String.fromCharCode(60) + "!1)")',
+    );
+  },
+};
+
 export default defineConfig({
-  plugins: [vue(), ...analyze],
+  plugins: [preserveMarkedLookbehindDetection, vue(), ...analyze],
   // 前端源码与入口 index.html 都在 src/，故以 src 为 Vite 根目录。
   root: "src",
   // Tauri CLI 通过 env 注入，避免 vite 清屏吞掉 Rust 日志

@@ -99,6 +99,10 @@ T_visible = 弹窗里第一帧真正画出 Message/问题（不是空窗，而�
 
 - **方案4（attach 省钥匙串）✅ 已实现（2026-06）**：`attach_im_channels` 与 `ensure_inbound_listeners` 都先用 `load_without_secrets()` 的 `enabled` 标志（`any_im_enabled()`）判定有无启用 IM，无则**完全跳过** `AppConfig::load()`（零钥匙串读取）；有 IM 时才 `load()`。
 - **方案7（前端 bundle 代码分割）**：当前 `App.vue` **静态 import** 四个 view（Popup/Settings/History/Agents），打成单个 ~376KB chunk；弹窗只渲染 `PopupView` 却要下载/解析整包。把 Settings/History/Agents 改 `defineAsyncComponent(() => import(...))`，弹窗 chunk 只含 `PopupView` 及其依赖，减少解析/执行（落在 `show→fe.bootstrap` 与 `frontend boot` 段）。`PopupView` 保持静态以免延迟关键路径。markdown-it 等重依赖可进一步按需懒加载（仅 `isMarkdown` 时）。
+- **Mermaid 懒加载门（2026-08）**：完整 Mermaid adapter 只在 `MarkdownContent` 扫描到实际
+  ```` ```mermaid ```` fence 后动态加载，普通 Markdown 和 `--no-markdown` 都不能下载 Mermaid core / 图型
+  chunks，也不能让 Popup 的 `fe.bootstrap`、`fe.mounted` 或 `fe.painted` 等待图表。完整会话仅调度可见区
+  附近的 Mermaid body；源码代码块必须先可用。
 
 ### 观感优化（不减总时长，改善感知）
 

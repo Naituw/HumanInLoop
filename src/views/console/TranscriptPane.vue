@@ -4,8 +4,8 @@
 // 本组件自身是滚动容器（占满详情区正文）。
 import { nextTick, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
+import MarkdownContent from "../../components/MarkdownContent.vue";
 import { consoleTranscript } from "../../lib/ipc";
-import { renderMarkdown } from "../../lib/markdown";
 import type { TranscriptEventJson } from "../../lib/types";
 
 const { t } = useI18n();
@@ -25,6 +25,7 @@ const truncatedHead = ref(false);
 const loading = ref(false);
 const error = ref("");
 const root = ref<HTMLElement | null>(null);
+const stickToBottom = ref(true);
 
 // 长 message 折叠：按事件绝对下标记录展开态。
 const expanded = ref<Set<number>>(new Set());
@@ -51,6 +52,7 @@ async function loadLatest(): Promise<void> {
     truncatedHead.value = page.truncatedHead;
     await nextTick();
     if (root.value) root.value.scrollTop = root.value.scrollHeight; // 进入即定位到最新
+    stickToBottom.value = true;
   } catch (err) {
     error.value = String(err);
   } finally {
@@ -93,12 +95,43 @@ function thinkingSnippet(text: string): string {
   return one.length < text.length ? `${one}…` : one;
 }
 
+function onScroll(): void {
+  const element = root.value;
+  if (!element) return;
+  stickToBottom.value =
+    element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+}
+
+function onMarkdownUpdated(event: Event): void {
+  const element = root.value;
+  if (!element) return;
+  if (stickToBottom.value) {
+    void nextTick(() => {
+      if (root.value) root.value.scrollTop = root.value.scrollHeight;
+    });
+    return;
+  }
+
+  const detail = (event as CustomEvent<{ heightDelta?: number }>).detail;
+  const delta = detail?.heightDelta ?? 0;
+  const changed = event.target as HTMLElement | null;
+  if (!delta || !changed) return;
+  const viewport = element.getBoundingClientRect();
+  const changedRect = changed.getBoundingClientRect();
+  if (changedRect.bottom <= viewport.top) element.scrollTop += delta;
+}
+
 onMounted(loadLatest);
 watch(() => props.sessionId, loadLatest);
 </script>
 
 <template>
-  <div ref="root" class="tx-root">
+  <div
+    ref="root"
+    class="tx-root"
+    @scroll.passive="onScroll"
+    @markdown-content-updated="onMarkdownUpdated"
+  >
     <div class="tx-bar">
       <span class="tx-count">{{
         t("console.tx.loaded", { loaded: events.length, total })
@@ -130,7 +163,12 @@ watch(() => props.sessionId, loadLatest);
           <div class="tx-user-text">{{ e.text }}</div>
         </div>
 
-        <div v-else-if="e.type === 'assistant'" class="markdown-body tx-assistant" v-html="renderMarkdown(e.text)" />
+        <MarkdownContent
+          v-else-if="e.type === 'assistant'"
+          class="tx-assistant"
+          :source="e.text"
+          lazy-mermaid
+        />
 
         <div v-else-if="e.type === 'thinking'" class="tx-thinking">
           {{ thinkingSnippet(e.text) }}
@@ -142,10 +180,11 @@ watch(() => props.sessionId, loadLatest);
             <span class="tx-time">{{ clockTime(e.at, e.atLabel) }}</span>
           </div>
           <div v-if="e.message" class="tx-ask-qtext">
-            <div
-              class="markdown-body ask-md"
+            <MarkdownContent
+              class="ask-md"
               :class="{ clamped: isLongAsk(e.message) && !expanded.has(start + i) }"
-              v-html="renderMarkdown(e.message)"
+              :source="e.message"
+              lazy-mermaid
             />
             <button v-if="isLongAsk(e.message)" class="ask-expand" @click="toggleExpand(start + i)">
               {{ expanded.has(start + i) ? t("console.tx.collapse") : t("console.tx.expand") }}

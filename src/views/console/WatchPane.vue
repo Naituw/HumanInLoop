@@ -3,7 +3,7 @@
 // 足迹时间线 + TODO 面板。帧由 daemon 按签名推送（`agent-detail` 事件，父级转发）。
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { renderMarkdown } from "../../lib/markdown";
+import MarkdownContent from "../../components/MarkdownContent.vue";
 import type { AgentDetailFrame, DetailStep } from "../../lib/types";
 
 const { t } = useI18n();
@@ -12,11 +12,6 @@ const props = defineProps<{
   /** 当前帧（尚未收到首帧时为 null → 加载占位）。 */
   frame: AgentDetailFrame | null;
 }>();
-
-const bodyHtml = computed(() => {
-  const text = props.frame?.text;
-  return text ? renderMarkdown(text) : "";
-});
 
 const todosOpen = ref(true);
 
@@ -51,7 +46,7 @@ const todoSummary = computed(() => {
       <span class="act-heading">{{ t("console.activityHeading", { time: clockTime(frame.at) }) }}</span>
       <slot name="heading-actions" />
     </div>
-    <div v-if="bodyHtml" class="markdown-body act-text" v-html="bodyHtml" />
+    <MarkdownContent v-if="frame.text" class="act-text" :source="frame.text" />
     <p v-else-if="!frame.steps.length" class="act-none">{{ t("console.noActivity") }}</p>
 
     <div v-if="frame.steps.length" class="steps">

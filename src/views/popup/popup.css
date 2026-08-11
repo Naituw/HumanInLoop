@@ -895,6 +895,31 @@ mark.popup-find-hit-current,
   background: color-mix(in srgb, #ff9f0a 55%, transparent);
   outline-color: color-mix(in srgb, #ff9f0a 80%, #fff);
 }
+.popup-find-atomic-proxy {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: block;
+  padding: 0;
+  pointer-events: none;
+  background: transparent;
+  outline: none;
+}
+.popup-find-atomic-hit {
+  outline: 2px solid color-mix(in srgb, #ffd60a 72%, transparent);
+  outline-offset: 2px;
+}
+.popup-find-atomic-current {
+  outline-color: color-mix(in srgb, #ff9f0a 90%, #000);
+  box-shadow: 0 0 0 3px color-mix(in srgb, #ff9f0a 20%, transparent);
+  scroll-margin: 64px 12px;
+}
+.theme-dark .popup-find-atomic-hit {
+  outline-color: color-mix(in srgb, #ffd60a 55%, transparent);
+}
+.theme-dark .popup-find-atomic-current {
+  outline-color: color-mix(in srgb, #ff9f0a 88%, #fff);
+}
 .options {
   display: flex;
   flex-direction: column;

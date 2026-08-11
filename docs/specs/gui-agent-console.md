@@ -27,7 +27,7 @@
 | 编号 | 决策项 | 结论 |
 |---|---|---|
 | C1 | 整体形态 | 改造现有 Agent 状态窗口为**双栏**（边栏 + 详情区），不新增第二个窗口 |
-| C2 | 详情深度 | **与 IM Watch 同帧**：复用 `WatchFrame`（状态行 + 最后一段助手文字 + 足迹时间线 ≤3 步 + TODO + 累计工作时长），就地刷新。GUI 侧放宽文字截断上限并用 **Markdown 渲染**。不做前端累积活动流，不做完整会话回放（列入后续候选） |
+| C2 | 详情深度 | **与 IM Watch 同帧**：复用 `WatchFrame`（状态行 + 最后一段助手文字 + 足迹时间线 ≤3 步 + TODO + 累计工作时长），就地刷新。GUI 侧放宽文字截断上限并用 **Markdown 渲染**；显式 Mermaid fence 共用本地图表组件，同源 frame 不重复渲染，新源使旧异步结果失效。不做前端累积活动流，不做完整会话回放（列入后续候选） |
 | C3 | 输入框语义 | **追加**（同 IM `/msg`）：文本、源文件引用和粘贴图片可组合或仅附件发送；待送达消息显示为输入框上方可撤回的气泡，同时显示条目数与附件数，再次发送即追加队列；不采用 composer 的整体覆盖语义。附件生命周期见 `agent-interject.md` D2 |
 | C4 | 「＋」新建任务形态 | **嵌入右栏**：点组头「＋」右栏切换为任务表单（项目已选定），完整复用新建任务窗口的表单逻辑与启动链路（readiness / LaunchRecord / Terminal.app / 待办来源 / 权限三态）；启动成功后 best-effort **自动选中新出现的会话**（按 cwd + 启动时间匹配） |
 | C5 | 边栏范围 | 有会话的项目 + **「最近项目」折叠区**（来自 workspace 索引 `agents/workspaces.rs`，过滤 hidden / 不存在路径）；无活跃会话的项目也能点「＋」 |
@@ -39,7 +39,7 @@
 | C11 | Dev 环境 | 本功能在独立 worktree（`feat/gui-agent-console`）+ popup-only Dev Instance 开发，不挂 IM 测试渠道 |
 | C12 | 前瞻预留 | 为未来「提问收进控制台内联作答」的设想预留 5 个结构点（R1–R5，见 §5），**只选形状、不写功能代码**；弹窗集成本身未定案、不在本 spec 范围 |
 | C13 | 状态指示器视觉系统（原型定稿 2026-07-25） | 工作中＝移植 Cursor 的 `ui-ascii-loading-indicator`（sine_3x3：3×3 点阵、8 帧位掩码 `[189,220,90,78,45,291,306,433]`、175ms/帧，所有工作中行共用同一帧同步动画）；颜色低饱和且随主题（深色＝42% 绿混白、浅色＝70% 深绿混深灰，CSS 变量统一，详情页状态文字同色）；等待回答＝🙋（轻微浮动）；空闲＝同一点阵**静态 4 点**（中行 3 点＋右上 1 点）灰色（「动停了」隐喻）；已结束＝无指示物、整行灰显。不用彩色圆点区分状态 |
-| C14 | 完整会话视图（原型定稿 2026-07-25） | 详情区默认「最近动态」，标题行右侧按钮切「完整会话」（同位置变「返回」；切换会话自动回默认）；进入即定位最新，**每页 200 条向上分页**（顶部按钮加载更早，滚动位置锚定），标题行 sticky 显示已加载/总数；渲染：用户消息＝蓝底气泡、助手文字＝Markdown、工具调用＝足迹同款紧凑行；**AskHuman 为一等问答卡**（🙋 徽标＋提问＋蓝底「你」的回答；未回答显示占位）；多问题＝message 下 Q1/Q2/Qn 子块各带回答；长 message 4 行截断＋展开全文/收起。实现须把 `transcript_full::AskHumanBlock` 扩展为结构化 `{kind, message, questions[{text, answer}]}`（MCP `ask` 读 `questions` 参数；MCP `whats_next` 与 CLI `--whats-next` 标为独立 kind，由前端按界面语言显示固定问题「接下来做什么？」；两种 MCP 工具都从 Codex content block 解出与 CLI 相同的文本区块，答案按 `# Qn` 分组回填；普通 CLI 解析 `-q`），daemon 侧按游标分页 |
+| C14 | 完整会话视图（原型定稿 2026-07-25） | 详情区默认「最近动态」，标题行右侧按钮切「完整会话」（同位置变「返回」；切换会话自动回默认）；进入即定位最新，**每页 200 条向上分页**（顶部按钮加载更早，滚动位置锚定），标题行 sticky 显示已加载/总数；渲染：用户消息＝蓝底气泡、助手文字＝Markdown、工具调用＝足迹同款紧凑行；助手文字与 AskHuman message 的显式 Mermaid fence 安全渲染，每个 body 最多 10 图，并用 IntersectionObserver 调度可见区附近内容；图表异步变高时保持底部跟随或旧内容阅读锚点。**AskHuman 为一等问答卡**（🙋 徽标＋提问＋蓝底「你」的回答；未回答显示占位）；多问题＝message 下 Q1/Q2/Qn 子块各带回答；长 message 4 行截断＋展开全文/收起。实现须把 `transcript_full::AskHumanBlock` 扩展为结构化 `{kind, message, questions[{text, answer}]}`（MCP `ask` 读 `questions` 参数；MCP `whats_next` 与 CLI `--whats-next` 标为独立 kind，由前端按界面语言显示固定问题「接下来做什么？」；两种 MCP 工具都从 Codex content block 解出与 CLI 相同的文本区块，答案按 `# Qn` 分组回填；普通 CLI 解析 `-q`），daemon 侧按游标分页 |
 | C15 | 项目 diff 状态条 + stage（原型定稿 2026-07-25） | 输入框上方一条**项目级**「未暂存变更」状态条（文件数/新增数/±行数；无变更不显示）；展开＝文件列表（M/A/D 徽标＋每文件 ±行数＋行内「暂存」），再点单文件展开 hunk 视图（红绿底色、面板内滚动 ≤300px）；**单文件暂存直接执行、「全部暂存」行内二次确认**——GUI 点按钮已是明确意图，不走跨渠道 Confirm（IM `/stage` 的 Confirm 不变量不变）；复用 `gitutil::DiffModel`，GUI Host 直调不经 daemon；需补单文件 `git add <path>`（现仅 stage_all） |
 | C16 | diff 刷新时机（性能，用户强调） | 大仓库 git 可能很慢，**不频繁调用**：两级懒加载——状态条只跑 `numstat`，hunk 在单文件展开时才跑 `git diff -- <path>`；刷新触发＝选中会话 / 展开面板 / 焦点会话帧变化且含编辑-写入步（防抖合并 ≥2s）/ 窗口重获焦点；调用互斥（上次未返回不重发）、带超时；**不做常驻轮询** |
 | C17 | Popup 反向快捷入口（2026-07-25） | 普通 ask、whats-next 与 Agent 权限确认共用的 Popup 顶栏，在 daemon 能把调用方 `(agent_kind, agent_session_id)` **精确命中活动 AgentRegistry 记录**时显示「在 Agent 窗口中查看」；按钮位于右侧动作区的**置顶右侧、待办左侧**。四家 Agent 统一口径，不按 pid / cwd / 家族模糊猜测。点击保持 Popup 打开，经 GUI Host 打开或聚焦全局唯一 Agent Window 并定位该 session；未追踪、无可信绑定、Windows 均隐藏。左侧 Agent badge 的「聚焦终端」语义不变 |

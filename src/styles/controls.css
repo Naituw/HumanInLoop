@@ -440,6 +440,95 @@
 .code-copy.copied .cc-check {
   display: inline;
 }
+.mermaid-block {
+  min-width: 0;
+  border-radius: var(--radius-md);
+  background: var(--md-code-bg);
+}
+.mermaid-block.mermaid-rendered {
+  padding: 10px;
+}
+.mermaid-canvas {
+  min-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-radius: calc(var(--radius-md) - 2px);
+}
+.mermaid-frame-shell {
+  position: relative;
+  margin: 0 auto;
+}
+.mermaid-frame {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: block;
+  max-width: none;
+  border: 0;
+  background: transparent;
+  transform-origin: top left;
+}
+.mermaid-status {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 42px 10px 12px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  text-align: center;
+}
+.mermaid-status-rendering::before {
+  content: "";
+  width: 12px;
+  height: 12px;
+  margin-right: 7px;
+  border: 1.5px solid color-mix(in srgb, var(--text-secondary) 24%, transparent);
+  border-top-color: var(--text-secondary);
+  border-radius: 50%;
+  animation: mermaid-spin 0.7s linear infinite;
+}
+@keyframes mermaid-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.mermaid-status-failed,
+.mermaid-status-tooLarge,
+.mermaid-status-tooMany {
+  justify-content: flex-start;
+  min-height: 0;
+  padding-top: 6px;
+  padding-bottom: 6px;
+  color: var(--text-secondary);
+}
+.mermaid-source-toggle {
+  position: absolute;
+  top: 6px;
+  right: 38px;
+  z-index: 1;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0;
+}
+.mermaid-block:hover .mermaid-source-toggle,
+.mermaid-source-toggle:focus-visible {
+  opacity: 1;
+}
+.mermaid-source-toggle:hover {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--text-primary) 8%, var(--bg-elevated));
+}
+.mermaid-rendered > .code-copy {
+  z-index: 1;
+}
 .markdown-body blockquote {
   margin: 10px 0;
   padding: 2px 12px;

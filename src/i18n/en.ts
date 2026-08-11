@@ -7,6 +7,15 @@ export default {
     copyCode: "Copy code",
     copied: "Copied",
     attachmentBadge: "【{n} attachments】",
+    mermaid: {
+      diagram: "Mermaid diagram",
+      rendering: "Rendering diagram…",
+      failed: "Diagram could not be rendered; showing source",
+      tooLarge: "Diagram exceeds the safety limit; showing source",
+      tooMany: "Diagram limit reached; showing source",
+      showSource: "Show Mermaid source",
+      showDiagram: "Show diagram",
+    },
   },
   popup: {
     loading: "Loading…",

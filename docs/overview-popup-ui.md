@@ -36,6 +36,22 @@ daemon 的 `PopupFocusArbiter` 是跨 helper 的唯一焦点所有者：最早�
 显示 basename，标题规则与 MCP 最多 200ms 的 IM-only 解析等待见
 `docs/specs/im-request-origin.md`。结构化确认卡不走这套标题。
 
+## Mermaid 图表
+
+本地 Agent 内容中的显式 ```` ```mermaid ```` fenced code block 会渐进增强为图表，覆盖 Popup 的
+Message / Question、回复历史详情以及 Agent 控制台的 Watch / 完整会话；Permission Confirm、产品更新
+日志与四个 IM 渠道仍展示原始代码，不执行远程渲染。各入口共用 `MarkdownContent.vue`，普通 Markdown
+或没有 Mermaid fence 时不会加载完整 Mermaid 实现；完整会话还用 IntersectionObserver 只调度可见区
+附近的内容。
+
+每个 Markdown body 最多渲染 10 张图，单图源文最多 40,000 字符，并锁定 `maxEdges=400`。源码先于
+图表可用；单图可复制源码、切换图表 / 源码，加载、语法、清洗或资源限制失败只让该图回退到代码块。
+图表读取所在 Markdown 容器的实际正文字号，随 light / dark / system 有效主题重绘。宽图优先缩到
+可用宽度，但以 12px 可见字号为缩放下限；达到下限仍放不下时才在自身容器横向滚动，窗口改变宽度
+会重新计算。渲染采用 Mermaid sandbox 后再解码并 fail-closed 验证 SVG，以自有 CSP 和
+`sandbox=""` 的无权限 iframe 重新封装；HTML label、回调、
+外部链接与远程资源都不启用。
+
 ## 多问题纵向模式
 
 设计见 `docs/specs/multi-question-vertical.md`，实现计划见 `docs/plans/multi-question-vertical.md`。该模式仅在 `experimental.verticalQuestions` 开启且问题数大于 1 时生效；关闭时保留一次一题的左右切换。
@@ -53,7 +69,8 @@ daemon 的 `PopupFocusArbiter` 是跨 helper 的唯一焦点所有者：最早�
 规格见 `docs/specs/popup-find.md`。弹窗支持浏览器式页内查找：⌘F（Windows/Linux 为 Ctrl+F）在
 导航栏右侧操作区叠放查找条（动作按钮渐隐，条自上方滑入），对共享 Message、题干、预设选项、
 附件名以及 Confirm 详情/选项做连续子串匹配（默认不区分大小写，条上 Aa 可切换），高亮全部命中
-并支持上/下一条与循环；顺序多题会跨题匹配并自动切题。Esc 关闭并清除高亮。实现为
+并支持上/下一条与循环；顺序多题会跨题匹配并自动切题。渲染后的 Mermaid 图按可见 label 作为一个
+原子命中并高亮整张图，不修改 sandbox 内 SVG；切到单图源码后恢复普通文本逐次匹配。Esc 关闭并清除高亮。实现为
 `usePopupFind` + `FindBar` + `lib/findInDom`，不搜用户答案草稿。
 
 ## 推荐选项

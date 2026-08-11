@@ -29,6 +29,7 @@ const {
   fileRef,
   onScroll,
   onContentWheel,
+  refreshFind,
   onDrop,
   onBackgroundClick,
   onFileChange,
@@ -58,6 +59,7 @@ const {
       class="content"
       @scroll="onScroll"
       @wheel.passive="onContentWheel"
+      @markdown-content-updated="refreshFind"
     >
       <ConfirmPane v-if="isConfirm" />
       <template v-else>

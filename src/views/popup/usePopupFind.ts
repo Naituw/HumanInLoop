@@ -10,9 +10,10 @@ import {
 import {
   applyFindMarks,
   clearFindMarks,
-  collectFindableText,
   findAllRanges,
+  findHighlightableRanges,
   setCurrentFindMark,
+  type TextRange,
 } from "../../lib/findInDom";
 import { isMac } from "../../lib/platform";
 import type {
@@ -150,18 +151,14 @@ export function usePopupFind(deps: {
     return segs;
   }
 
-  /**
-   * Prefer live DOM text for a segment when mounted (markdown render ≠ source).
-   * Fall back to model text for sequential questions not in the DOM.
-   */
-  function segmentText(seg: FindSegment): string {
+  function segmentRanges(seg: FindSegment, query: string): TextRange[] {
     const root = deps.contentRef.value;
-    if (!root) return seg.text;
-    const el = root.querySelector(
+    const element = root?.querySelector(
       `[data-find-seg="${CSS.escape(seg.id)}"]`,
     ) as HTMLElement | null;
-    if (!el) return seg.text;
-    return collectFindableText(el) || seg.text;
+    return element
+      ? findHighlightableRanges(element, query, findCaseSensitive.value)
+      : findAllRanges(seg.text, query, findCaseSensitive.value);
   }
 
   function rebuildMatches(): void {
@@ -170,8 +167,7 @@ export function usePopupFind(deps: {
     const next: FindMatch[] = [];
     if (q) {
       for (const seg of segs) {
-        const text = segmentText(seg);
-        const ranges = findAllRanges(text, q, findCaseSensitive.value);
+        const ranges = segmentRanges(seg, q);
         ranges.forEach((r, occurrence) => {
           next.push({
             segmentId: seg.id,

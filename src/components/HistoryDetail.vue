@@ -10,7 +10,7 @@ import {
 import { useI18n } from "vue-i18n";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { startDrag } from "@crabnebula/tauri-plugin-drag";
-import { renderMarkdown, handleCodeCopyClick } from "../lib/markdown";
+import MarkdownContent from "./MarkdownContent.vue";
 import {
   closePreview,
   fileIconDataUrl,
@@ -87,17 +87,6 @@ function openWorkspace() {
 const isMulti = computed(() => props.entry.questions.length > 1);
 const isCancel = computed(() => props.entry.action === "cancel");
 
-// Localized labels for the markdown code-block copy button (reactive to locale).
-const codeCopyLabels = computed(() => ({
-  copyLabel: t("common.copyCode"),
-  copiedLabel: t("common.copied"),
-}));
-
-const messageHtml = computed(() =>
-  props.entry.isMarkdown
-    ? renderMarkdown(props.entry.message.text, codeCopyLabels.value)
-    : ""
-);
 const showMessage = computed(
   () =>
     props.entry.message.text.trim() !== "" ||
@@ -217,27 +206,8 @@ function isAnswerEmpty(a: HistoryAnswer | null): boolean {
   );
 }
 
-function questionHtml(message: string): string {
-  return props.entry.isMarkdown
-    ? renderMarkdown(message, codeCopyLabels.value)
-    : "";
-}
-
 function fileName(path: string): string {
   return path.split(/[\\/]/).pop() || path;
-}
-
-function onContentClick(e: MouseEvent) {
-  if (handleCodeCopyClick(e)) return;
-  const anchor = (e.target as HTMLElement | null)?.closest?.("a") as
-    | HTMLAnchorElement
-    | null;
-  if (!anchor) return;
-  const href = anchor.href;
-  if (!/^(https?:|mailto:)/i.test(href)) return;
-  e.preventDefault();
-  e.stopPropagation();
-  openPath(href).catch(() => {});
 }
 
 function open(path: string) {
@@ -440,12 +410,10 @@ watch(
 
     <!-- Shared message -->
     <template v-if="showMessage">
-      <div
+      <MarkdownContent
         v-if="entry.message.text && entry.isMarkdown"
-        class="markdown-body"
-        v-html="messageHtml"
-        @click="onContentClick"
-      ></div>
+        :source="entry.message.text"
+      />
       <pre v-else-if="entry.message.text" class="plain-body">{{ entry.message.text }}</pre>
 
       <div v-if="attachments.length" class="attachments">
@@ -501,12 +469,10 @@ watch(
         }}</span>
       </div>
 
-      <div
+      <MarkdownContent
         v-if="entry.isMarkdown && q.message"
-        class="markdown-body"
-        v-html="questionHtml(q.message)"
-        @click="onContentClick"
-      ></div>
+        :source="q.message"
+      />
       <pre v-else-if="q.message" class="plain-body">{{ q.message }}</pre>
 
       <!-- Options (selected highlighted, read-only) -->

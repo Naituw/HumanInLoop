@@ -1,7 +1,41 @@
+import { computed, readonly, ref } from "vue";
 import type { ThemeMode, WindowEffect } from "./types";
+
+const configuredTheme = ref<ThemeMode>("system");
+const systemDark = ref(false);
+let mediaQuery: MediaQueryList | null = null;
+let mediaListening = false;
+
+function syncSystemTheme(event?: MediaQueryListEvent): void {
+  systemDark.value = event?.matches ?? mediaQuery?.matches ?? false;
+}
+
+function ensureSystemThemeListener(): void {
+  if (mediaListening || typeof window === "undefined" || !window.matchMedia) return;
+  mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+  syncSystemTheme();
+  if (typeof mediaQuery.addEventListener === "function") {
+    mediaQuery.addEventListener("change", syncSystemTheme);
+  } else {
+    // Safari 13 exposes the legacy MediaQueryList listener API.
+    mediaQuery.addListener(syncSystemTheme);
+  }
+  mediaListening = true;
+}
+
+export const effectiveColorScheme = readonly(
+  computed<"light" | "dark">(() =>
+    configuredTheme.value === "dark" ||
+    (configuredTheme.value === "system" && systemDark.value)
+      ? "dark"
+      : "light",
+  ),
+);
 
 /// 套用主题：显式 light/dark 加类名，system 交给 prefers-color-scheme 兜底。
 export function applyTheme(theme: ThemeMode): void {
+  ensureSystemThemeListener();
+  configuredTheme.value = theme;
   const root = document.documentElement;
   root.classList.remove("theme-light", "theme-dark");
   if (theme === "light") root.classList.add("theme-light");

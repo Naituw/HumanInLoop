@@ -143,7 +143,7 @@ Confirm：
 
 | 模块 | 职责 |
 |---|---|
-| `src/lib/findInDom.ts`（纯函数） | 在文本中找全部 range；可选 TreeWalker 包装 / 清除 mark |
+| `src/lib/findInDom.ts`（纯函数） | 在普通文本中找全部 range、包装 / 清除 mark；把 `data-find-atomic` 图表作为单一命中目标 |
 | `src/views/popup/usePopupFind.ts` | 打开态、query、case、current/total、跨题导航、快捷键、与 request 模式协作 |
 | `src/views/popup/FindBar.vue` | 浮动条 UI |
 | `popup.css` + tokens | 高亮与条样式（亮/暗主题） |
@@ -153,9 +153,12 @@ Confirm：
 
 ### 6.2 高亮策略
 
-**推荐：在可搜索根节点内对文本节点包装 `<mark class="popup-find-hit">`，当前项加 `popup-find-hit-current`。**
+普通文本节点包装 `<mark class="popup-find-hit">`，当前项加 `popup-find-hit-current`。渲染后的 Mermaid
+wrapper 是 `data-find-atomic` 原子节点：索引图中提取的可见 label，命中时只对父页面 wrapper 画高亮
+和定位代理，不下降到 sandbox iframe、也不向 SVG 插入 `<mark>`；同一图内 query 出现多次仍只算一个
+命中。切到单图源码后移除原子语义，代码文本恢复逐次匹配。
 
-- Markdown 已是 `v-html`：每次 `messageHtml` / 题干 HTML 重渲染后必须 **重放** 高亮（`watch` query + html + viewSource + currentQ）。
+- Markdown DOM 由 `MarkdownContent` 管理；源码变化、题目切换、图表异步完成、主题重绘或图 / 源码切换后发出更新事件，打开中的 Find **重放** 当前查询与定位。
 - 包装时跳过 `script`/`style`；尽量不拆开输入类控件（范围内本无）。
 - 清除：关条或重算前 `unwrap` 全部 find mark，避免残留破坏复制/选区。
 - 备选：CSS Custom Highlight API（不改 DOM）；WKWebView/WebView2 支持度需验收，可作为优化而非第一依赖。
@@ -197,6 +200,8 @@ Confirm：
 - ⌘F 打开条；再 ⌘F 聚焦；Esc 关闭清 mark。
 - 预填选区。
 - Message Markdown 与 plain / 源码模式切换后高亮一致。
+- Mermaid label 命中整张图、同图只计一次，图 / 源码切换后计数更新，sandbox SVG 不被改写。
+- Find 打开时图表异步完成或主题重绘会重放当前查询。
 - 选项文案、附件名可命中。
 - 顺序多题：命中 Q2 时自动切题。
 - Confirm detail + choice。

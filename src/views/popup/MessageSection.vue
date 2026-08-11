@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 共享 Message 区（描述 + AI→人附件 + 复制/源码工具条），顶部常驻、不随题切换。
 import { useI18n } from "vue-i18n";
+import MarkdownContent from "../../components/MarkdownContent.vue";
 import { usePopupContext } from "./context";
 
 const { t } = useI18n();
@@ -9,11 +10,9 @@ const {
   request,
   showDescription,
   messageText,
-  messageHtml,
   viewSource,
   copiedMessage,
   copyMessage,
-  onContentClick,
   attachments,
   selectedFile,
   thumbs,
@@ -29,13 +28,11 @@ const {
 <template>
   <!-- 共享 Message 区（描述 + 附件），仅在有内容时展示，顶部常驻 -->
   <template v-if="showDescription">
-    <div
+    <MarkdownContent
       v-if="messageText && request?.isMarkdown && !viewSource"
-      class="markdown-body"
+      :source="messageText"
       data-find-seg="message"
-      v-html="messageHtml"
-      @click="onContentClick"
-    ></div>
+    />
     <pre
       v-else-if="messageText"
       class="plain-body"

@@ -7,6 +7,15 @@ export default {
     copyCode: "复制代码",
     copied: "已复制",
     attachmentBadge: "【{n} 个附件】",
+    mermaid: {
+      diagram: "Mermaid 图表",
+      rendering: "正在渲染图表…",
+      failed: "图表无法渲染，已显示源码",
+      tooLarge: "图表超出安全上限，已显示源码",
+      tooMany: "图表数量已达上限，已显示源码",
+      showSource: "查看 Mermaid 源码",
+      showDiagram: "查看图表",
+    },
   },
   popup: {
     loading: "加载中…",

@@ -32,6 +32,26 @@ describe("renderMarkdown", () => {
     const html = renderMarkdown("```\nx\n```", { copyLabel: '"><script>' });
     expect(html).not.toContain('data-copy=""><script>');
   });
+
+  it("marks Mermaid fences without changing ordinary fences", () => {
+    const mermaid = renderMarkdown("``` Mermaid extra\ngraph TD; A-->B\n```");
+    const ordinary = renderMarkdown("```typescript\nconst x = 1\n```");
+
+    expect(mermaid).toContain('class="code-block mermaid-block"');
+    expect(mermaid).toContain("data-mermaid-pending");
+    expect(mermaid).toContain("graph TD; A--&gt;B");
+    expect(ordinary).toContain('<div class="code-block">');
+    expect(ordinary).not.toContain("data-mermaid-pending");
+  });
+
+  it("only treats the first normalized info token as Mermaid", () => {
+    expect(renderMarkdown("```not-mermaid mermaid\nx\n```")).not.toContain(
+      "data-mermaid-pending",
+    );
+    expect(renderMarkdown("```mermaidish\nx\n```")).not.toContain(
+      "data-mermaid-pending",
+    );
+  });
 });
 
 describe("handleCodeCopyClick", () => {

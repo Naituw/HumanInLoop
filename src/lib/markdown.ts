@@ -21,7 +21,8 @@ export const markdownReady: Promise<void> = import("markdown-it").then(
       const rendered = defaultFence
         ? defaultFence(tokens, idx, options, env, self)
         : self.renderToken(tokens, idx, options);
-      return wrapCodeBlock(md, rendered, env);
+      const language = tokens[idx]?.info.trim().split(/\s+/, 1)[0]?.toLowerCase();
+      return wrapCodeBlock(md, rendered, env, language === "mermaid");
     };
 
     const defaultCodeBlock = md.renderer.rules.code_block?.bind(md.renderer);
@@ -51,14 +52,21 @@ const CHECK_ICON =
 // Wrap a rendered <pre>…</pre> code block so it can host a hover copy button.
 // The raw text is read from the DOM at click time (see handleCodeCopyClick), so
 // nothing extra needs to be embedded here beyond the localized labels.
-function wrapCodeBlock(md: MarkdownIt, rendered: string, env: unknown): string {
+function wrapCodeBlock(
+  md: MarkdownIt,
+  rendered: string,
+  env: unknown,
+  isMermaid = false,
+): string {
   const e = (env ?? {}) as MarkdownOptions;
   const copy = md.utils.escapeHtml(e.copyLabel ?? "Copy");
   const copied = md.utils.escapeHtml(e.copiedLabel ?? "Copied");
   const button =
     `<button class="code-copy" type="button" title="${copy}" aria-label="${copy}"` +
     ` data-copy="${copy}" data-copied="${copied}">${COPY_ICON}${CHECK_ICON}</button>`;
-  return `<div class="code-block">${rendered}${button}</div>`;
+  const marker = isMermaid ? " mermaid-block" : "";
+  const pending = isMermaid ? " data-mermaid-pending" : "";
+  return `<div class="code-block${marker}"${pending}>${rendered}${button}</div>`;
 }
 
 // Minimal HTML escape for the pre-load fallback (mirrors markdown-it's escapeHtml set).
@@ -87,6 +95,9 @@ export function handleCodeCopyClick(e: MouseEvent): boolean {
   const target = e.target as HTMLElement | null;
   const btn = target?.closest?.(".code-copy") as HTMLElement | null;
   if (!btn) return false;
+  const handledEvent = e as MouseEvent & { __askHumanCodeCopyHandled?: boolean };
+  if (handledEvent.__askHumanCodeCopyHandled) return true;
+  handledEvent.__askHumanCodeCopyHandled = true;
   e.preventDefault();
   e.stopPropagation();
   const code = btn.closest(".code-block")?.querySelector("code");

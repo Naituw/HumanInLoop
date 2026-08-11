@@ -3,6 +3,13 @@
 记录需要跨会话保留的未完成 / 延期事项和明确下一步。任务 / 需求完成后删除其 section
 （历史留在 git）。
 
+## 待验收：本地 Markdown Mermaid 图表的跨平台实机运行
+
+完整实现、自动测试、本地浏览器 sandbox / 布局验证与 bundle spike 已完成，详见
+`docs/plans/mermaid-rendering.md` 的实施记录。仍需在 Catalina 级 WKWebView、Windows WebView2 与
+Linux WebKitGTK 分别跑一次计划 §8.3 的图型、错误、主题、Find 和回答流程矩阵；当前 macOS Tauri
+Popup 会在本轮安装后先验收。实机 gate 未齐前不降低安全等级或提高系统要求。
+
 ## 定期同步：Codex Shell 判定复刻（codex-permission-remember §6.4）
 
 权限记忆功能复刻了 Codex 的 Shell 判定逻辑（`src-tauri/src/shell_safety.rs` +

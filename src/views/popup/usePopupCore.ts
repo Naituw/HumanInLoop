@@ -765,9 +765,6 @@ export function usePopupCore() {
   });
   const images = computed(() => imagesByQ.value[current.value] ?? []);
   const replyFiles = computed(() => replyFilesByQ.value[current.value] ?? []);
-  const renderedHtml = computed(() =>
-    currentQuestion.value ? questionHtml(currentQuestion.value) : ""
-  );
   // 旧版切题左右滑动方向 + 过渡名；「全部看过」用于 sequential 模式显示发送按钮。
   const slideDir = ref<"next" | "prev">("next");
   const transitionName = computed(() =>
@@ -780,11 +777,6 @@ export function usePopupCore() {
   const qHeaderRef = ref<HTMLElement | null>(null);
   // 共享 Message（描述 + 附件）。无 -q 时 text 为空（第一个参数已提升为问题）。
   const messageText = computed(() => request.value?.message.text ?? "");
-  const messageHtml = computed(() =>
-    request.value?.isMarkdown && !viewSource.value
-      ? renderMarkdown(messageText.value, codeCopyLabels.value)
-      : ""
-  );
   const showDescription = computed(
     () => messageText.value.trim() !== "" || attachments.value.length > 0
   );
@@ -936,12 +928,6 @@ export function usePopupCore() {
       focusedQ.value === i ||
       (inputByQ.value[i]?.trim().length ?? 0) > 0
     );
-  }
-  // 每题题干渲染（Markdown 全局开关 + 源码视图）。
-  function questionHtml(q: Question): string {
-    return request.value?.isMarkdown && !viewSource.value
-      ? renderMarkdown(q.message, codeCopyLabels.value)
-      : "";
   }
   // 仅「当前题」显示 ⌘1–9 角标（避免每题都冒出 ⌘1）。
   function cardOptionHotkey(qIndex: number, optIndex: number): string | null {
@@ -2370,6 +2356,7 @@ export function usePopupCore() {
     goFind: find.goFind,
     onFindQueryInput: find.onFindQueryInput,
     toggleFindCase: find.toggleFindCase,
+    refreshFind: find.refreshFind,
     // 请求 / 加载态
     request,
     confirmRequest,
@@ -2398,10 +2385,8 @@ export function usePopupCore() {
     userInput,
     images,
     replyFiles,
-    renderedHtml,
     transitionName,
     allViewed,
-    questionHtml,
     expandedQ,
     optionHotkey,
     cardOptionHotkey,
@@ -2436,7 +2421,6 @@ export function usePopupCore() {
     returnComposerHome,
     // Message / 头部
     messageText,
-    messageHtml,
     showDescription,
     showQuestionHeader,
     questionHeaderLabel,

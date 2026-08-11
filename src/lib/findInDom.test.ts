@@ -3,6 +3,8 @@ import {
   applyFindMarks,
   clearFindMarks,
   findAllRanges,
+  findHighlightableRanges,
+  setAtomicFindText,
   setCurrentFindMark,
 } from "./findInDom";
 
@@ -57,5 +59,26 @@ describe("applyFindMarks / clearFindMarks", () => {
     const marks = applyFindMarks(root, "needle", false);
     expect(marks).toHaveLength(1);
     expect(root.querySelector("textarea")!.value).toBe("needle");
+  });
+
+  it("treats a rendered diagram as one atomic match without touching its SVG", () => {
+    const root = document.createElement("div");
+    root.innerHTML =
+      '<p>needle</p><div data-find-atomic><iframe></iframe><svg><text>keep</text></svg></div>';
+    const diagram = root.querySelector<HTMLElement>("[data-find-atomic]")!;
+    setAtomicFindText(diagram, "needle needle");
+    const before = diagram.querySelector("svg")!.outerHTML;
+
+    expect(findHighlightableRanges(root, "needle", false)).toHaveLength(2);
+    const marks = applyFindMarks(root, "needle", false);
+    expect(marks).toHaveLength(2);
+    expect(diagram.querySelectorAll("[data-popup-find]")).toHaveLength(1);
+    expect(diagram.querySelector("svg")!.outerHTML).toBe(before);
+
+    setCurrentFindMark(marks, 1);
+    expect(diagram.classList.contains("popup-find-atomic-current")).toBe(true);
+    clearFindMarks(root);
+    expect(diagram.querySelector("svg")!.outerHTML).toBe(before);
+    expect(diagram.classList.contains("popup-find-atomic-hit")).toBe(false);
   });
 });

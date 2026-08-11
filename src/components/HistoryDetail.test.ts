@@ -65,4 +65,37 @@ describe("HistoryDetail", () => {
     expect(wrapper.find(".rec-badge").text()).toBe("Recommended");
     expect(wrapper.find(".unanswered").text()).toBe("Not answered");
   });
+
+  it("routes stored Markdown prompts through the shared Mermaid component", () => {
+    const entry: HistoryEntry = {
+      id: "mermaid-history",
+      timestampMs: 1_700_000_000_000,
+      project: "",
+      source: "",
+      channel: "popup",
+      action: "send",
+      isMarkdown: true,
+      message: {
+        text: "```mermaid\nsequenceDiagram\nA->>B: Hello\n```",
+        files: [],
+      },
+      questions: [],
+      answers: [],
+    };
+
+    const wrapper = mount(HistoryDetail, {
+      props: { entry },
+      global: {
+        plugins: [i18n],
+        stubs: {
+          MarkdownContent: {
+            props: ["source"],
+            template: '<div class="markdown-stub">{{ source }}</div>',
+          },
+        },
+      },
+    });
+
+    expect(wrapper.get(".markdown-stub").text()).toContain("sequenceDiagram");
+  });
 });

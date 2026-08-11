@@ -146,6 +146,10 @@ popup、IM 或项目 todo。
 
 不在 MCP 暴露的 CLI 开关：`--no-markdown`（MCP 恒 Markdown，不传该 flag）、`--single`、`--select-only`（脚本/纯文本专用，模型自助场景不适用）。
 
+本地 WebView 对 `message` / `question` 中显式 ```` ```mermaid ```` fence 做渐进式图表渲染，范围和安全
+边界见 `docs/plans/mermaid-rendering.md`。这是展示层扩展，不改变 MCP schema、子进程 argv、stdout 或
+历史数据；Telegram、Slack、飞书、钉钉仍接收原始 Markdown fence，不新增图片、附件或网络渲染调用。
+
 argv 映射：`message`→首个位置参数（或经 `-q` 拆分）；每个 question→`-q`；option→`-o`（`recommended` 时 `-o!`）；每个 file→`-f`。子进程保持默认**文本输出**（不传 `--output json`），以 argv 数组 spawn（无 shell，免引号转义）。
 
 返回（文本区块透传，D5 二轮定案）：
@@ -200,7 +204,7 @@ argv 映射：`message`→首个位置参数（或经 `-q` 拆分）；每个 qu
 
 1. `AskHuman mcp` 启动 STDIO MCP server，`tools/list` 含 `ask`、`whats_next`、`show_last`、`todo_add`、`todo_list`、`todo_update`；`ask` input schema 直接保留 `questions[].question` 与 `questions[].options[].text`（无 `$defs` / `$ref`），三个交互工具的隐藏 token 字段均不出现在 schema；Todo 读写按稳定 ID 工作。
 2. 在 Codex 中：写入 `[mcp_servers.askhuman]`（含大 `tool_timeout_sec`）后，调用 `ask` 能弹窗/经 IM 提问、长时间等待不超时；人类回复正常返回。
-3. `ask` 覆盖核心能力：多问题、`options`/`recommended`、`files` 均按 CLI 语义生效；`message`/`question` 按 Markdown 渲染；取消时输出顶层 `status` 引导。
+3. `ask` 覆盖核心能力：多问题、`options`/`recommended`、`files` 均按 CLI 语义生效；`message`/`question` 按 Markdown 渲染，本地 Popup 的显式 Mermaid fence 渐进渲染且四个 IM 渠道保持源码；取消时输出顶层 `status` 引导。
 4. 人类回复图片：模型侧收到 `ImageContent`（可见图像），非图片文件以路径出现在文本中。
 5. daemon 因版本更新 drain/重启：已运行的 MCP server 不退出，下一次 `ask` 自动连到新 daemon（撞排空时等待后成功）。
 6. 设置「Agent」Tab：三态模式互斥；一键切换自动卸旧装新；选「未集成」清除全部产物；产物过期显示「更新」。

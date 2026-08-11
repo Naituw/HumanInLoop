@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 纵向模式（实验开关 + 多题）：所有问题纵向平铺成卡片，scroll-spy 定位当前题。
 import { useI18n } from "vue-i18n";
+import MarkdownContent from "../../components/MarkdownContent.vue";
 import { usePopupContext } from "./context";
 import AnswerComposer from "./AnswerComposer.vue";
 import { optionDisplayText } from "./optionDisplay";
@@ -11,8 +12,6 @@ const {
   questions,
   total,
   viewSource,
-  questionHtml,
-  onContentClick,
   chosenByQ,
   single,
   selectOnly,
@@ -49,13 +48,11 @@ const {
       }}</span>
     </div>
 
-    <div
+    <MarkdownContent
       v-if="request?.isMarkdown && !viewSource && q.message"
-      class="markdown-body"
+      :source="q.message"
       :data-find-seg="`q-${qi}-msg`"
-      v-html="questionHtml(q)"
-      @click="onContentClick"
-    ></div>
+    />
     <pre
       v-else-if="q.message"
       class="plain-body"

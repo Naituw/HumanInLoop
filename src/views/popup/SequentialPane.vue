@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 旧版（顺序模式）：单题 / 实验开关关时——一次显示一个问题，上一步/下一步左右滑动切换。
 import { useI18n } from "vue-i18n";
+import MarkdownContent from "../../components/MarkdownContent.vue";
 import { usePopupContext } from "./context";
 import AnswerComposer from "./AnswerComposer.vue";
 import { optionDisplayText } from "./optionDisplay";
@@ -16,9 +17,7 @@ const {
   onQuestionEntered,
   current,
   currentQuestion,
-  renderedHtml,
   viewSource,
-  onContentClick,
   chosen,
   single,
   selectOnly,
@@ -46,13 +45,11 @@ const {
   <!-- 当前问题区（上一个/下一个左右滑动） -->
   <Transition :name="transitionName" mode="out-in" @after-enter="onQuestionEntered">
     <div class="question-pane" :key="current">
-      <div
+      <MarkdownContent
         v-if="request?.isMarkdown && !viewSource && currentQuestion?.message"
-        class="markdown-body"
+        :source="currentQuestion.message"
         :data-find-seg="`q-${current}-msg`"
-        v-html="renderedHtml"
-        @click="onContentClick"
-      ></div>
+      />
       <pre
         v-else-if="currentQuestion?.message"
         class="plain-body"
