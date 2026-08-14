@@ -7,6 +7,7 @@ use super::DingTalkError;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
+use tokio::time::{self, Instant, Interval};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
@@ -14,6 +15,8 @@ pub const TOPIC_BOT_MESSAGE: &str = "/v1.0/im/bot/messages/get";
 pub const TOPIC_CARD_CALLBACK: &str = "/v1.0/card/instances/callback";
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// 上抛给上层的事件（`data` 为已解析的 JSON）。
 pub enum StreamEvent {
@@ -30,6 +33,8 @@ pub struct StreamConn {
     client_secret: String,
     topics: Vec<String>,
     ws: Ws,
+    heartbeat: Interval,
+    awaiting_pong: bool,
 }
 
 impl StreamConn {
@@ -48,6 +53,8 @@ impl StreamConn {
             client_secret: client_secret.to_string(),
             topics,
             ws,
+            heartbeat: heartbeat_interval(),
+            awaiting_pong: false,
         })
     }
 
@@ -55,18 +62,45 @@ impl StreamConn {
     /// 返回 `None` 表示重连多次仍失败（上层据此结束）。
     pub async fn recv(&mut self) -> Option<StreamEvent> {
         loop {
-            match self.ws.next().await {
-                Some(Ok(Message::Text(txt))) => {
+            let frame = tokio::select! {
+                frame = self.ws.next() => Some(frame),
+                _ = self.heartbeat.tick() => None,
+            };
+            match frame {
+                None => {
+                    // A sleeping Mac or a network handoff can leave the TCP socket half-open:
+                    // REST sends keep working while this reader waits forever. Probe the WebSocket
+                    // explicitly and rebuild it when the previous probe received no response.
+                    if self.awaiting_pong
+                        || self
+                            .ws
+                            .send(Message::Ping(Vec::new().into()))
+                            .await
+                            .is_err()
+                    {
+                        if !self.reconnect().await {
+                            return None;
+                        }
+                    } else {
+                        self.awaiting_pong = true;
+                    }
+                }
+                Some(Some(Ok(Message::Text(txt)))) => {
+                    self.awaiting_pong = false;
                     if let Some(ev) = self.handle_frame(txt.as_str()).await {
                         return Some(ev);
                     }
                 }
-                Some(Ok(Message::Ping(p))) => {
+                Some(Some(Ok(Message::Ping(p)))) => {
+                    self.awaiting_pong = false;
                     let _ = self.ws.send(Message::Pong(p)).await;
+                }
+                Some(Some(Ok(Message::Pong(_)))) => {
+                    self.awaiting_pong = false;
                 }
                 // Cannot collapse into a match guard: `.await` is not allowed there.
                 #[allow(clippy::collapsible_match)]
-                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                Some(Some(Ok(Message::Close(_)))) | Some(Some(Err(_))) | Some(None) => {
                     if !self.reconnect().await {
                         return None;
                     }
@@ -150,11 +184,17 @@ impl StreamConn {
             .await
             {
                 self.ws = ws;
+                self.heartbeat = heartbeat_interval();
+                self.awaiting_pong = false;
                 return true;
             }
         }
         false
     }
+}
+
+fn heartbeat_interval() -> Interval {
+    time::interval_at(Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL)
 }
 
 /// 注册长连接 + 建 WebSocket。
