@@ -14,6 +14,8 @@ import {
 import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { pnpmBuildCommand } from "./package-command.mjs";
+
 const CACHE_VERSION = 1;
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = resolve(repoRoot, "dist");
@@ -119,8 +121,8 @@ if (
 }
 
 console.log("==> 构建前端 (dist/)");
-const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
-const result = spawnSync(pnpm, ["build"], {
+const pnpm = pnpmBuildCommand();
+const result = spawnSync(pnpm.command, pnpm.args, {
   cwd: repoRoot,
   env: process.env,
   stdio: "inherit",
