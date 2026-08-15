@@ -96,6 +96,11 @@ libc = "0.2"
 # Store channel secrets in the Windows Credential Manager.
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", default-features = false, features = ["windows-native"] }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Threading",
+] }
 
 # Store channel secrets in the Linux Secret Service (D-Bus; needs gnome-keyring/kwallet).
 # Falls back to plaintext config when unavailable (headless servers).

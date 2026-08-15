@@ -36,7 +36,7 @@ struct Preferences {
 }
 
 pub fn supported(target: AgentTarget) -> bool {
-    cfg!(unix) && matches!(target, AgentTarget::ClaudeCode | AgentTarget::Codex)
+    matches!(target, AgentTarget::ClaudeCode | AgentTarget::Codex)
 }
 
 pub fn enabled(target: AgentTarget) -> bool {

@@ -191,7 +191,13 @@ fn is_self(entry: &ProcEntry) -> bool {
 }
 
 fn basename(p: &str) -> String {
-    p.rsplit('/').next().unwrap_or(p).to_string()
+    let name = p
+        .trim_matches('"')
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(p)
+        .trim_matches('"');
+    name.strip_suffix(".exe").unwrap_or(name).to_string()
 }
 
 /// 从 `start_pid` 向上回溯进程树，返回第一个命中指定家族、且非自身的祖先 pid。
@@ -310,7 +316,29 @@ pub fn pid_alive(pid: u32) -> bool {
     )
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn pid_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    if pid == 0 {
+        return false;
+    }
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return std::io::Error::last_os_error().raw_os_error() == Some(ERROR_ACCESS_DENIED as i32);
+    }
+    let mut exit_code = 0u32;
+    let ok = unsafe { GetExitCodeProcess(process, &mut exit_code) } != 0;
+    unsafe {
+        CloseHandle(process);
+    }
+    ok && exit_code == STILL_ACTIVE as u32
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn pid_alive(_pid: u32) -> bool {
     false
 }
@@ -341,7 +369,58 @@ fn process_chain(start_pid: u32) -> Vec<ProcEntry> {
     chain
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn process_chain(start_pid: u32) -> Vec<ProcEntry> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Vec::new();
+    }
+    let mut table = HashMap::new();
+    let mut entry = PROCESSENTRY32W::default();
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while has_entry {
+        let end = entry
+            .szExeFile
+            .iter()
+            .position(|&unit| unit == 0)
+            .unwrap_or(entry.szExeFile.len());
+        let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
+        table.insert(
+            entry.th32ProcessID,
+            ProcEntry {
+                pid: entry.th32ProcessID,
+                ppid: entry.th32ParentProcessID,
+                comm: name.clone(),
+                command: name,
+            },
+        );
+        has_entry = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+    unsafe {
+        CloseHandle(snapshot);
+    }
+
+    let mut chain = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut pid = start_pid;
+    while pid > 0 && seen.insert(pid) {
+        let Some(item) = table.get(&pid).cloned() else {
+            break;
+        };
+        pid = item.ppid;
+        chain.push(item);
+    }
+    chain
+}
+
+#[cfg(not(any(unix, windows)))]
 fn process_chain(_start_pid: u32) -> Vec<ProcEntry> {
     Vec::new()
 }

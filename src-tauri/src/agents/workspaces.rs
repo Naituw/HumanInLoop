@@ -462,15 +462,16 @@ mod tests {
     fn cursor_recovery_requires_unique_existing_path() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("one").join("two-three")).unwrap();
+        let root = dir.path().ancestors().last().unwrap();
         let encoded = format!(
             "{}-one-two-three",
             dir.path()
-                .strip_prefix("/")
+                .strip_prefix(root)
                 .unwrap()
                 .to_string_lossy()
-                .replace('/', "-")
+                .replace(['/', '\\'], "-")
         );
-        let matches = recover_cursor_path(&encoded, Path::new("/"), 0, 2);
+        let matches = recover_cursor_path(&encoded, root, 0, 2);
         assert_eq!(matches, vec![dir.path().join("one").join("two-three")]);
     }
 
@@ -480,15 +481,16 @@ mod tests {
         // Both interpretations of "one-two" exist: the nested one/two and the hyphenated one-two.
         fs::create_dir_all(dir.path().join("one").join("two")).unwrap();
         fs::create_dir_all(dir.path().join("one-two")).unwrap();
+        let root = dir.path().ancestors().last().unwrap();
         let encoded = format!(
             "{}-one-two",
             dir.path()
-                .strip_prefix("/")
+                .strip_prefix(root)
                 .unwrap()
                 .to_string_lossy()
-                .replace('/', "-")
+                .replace(['/', '\\'], "-")
         );
-        let matches = recover_cursor_path(&encoded, Path::new("/"), 0, 2);
+        let matches = recover_cursor_path(&encoded, root, 0, 2);
         assert_eq!(matches.len(), 2, "ambiguity must surface both candidates");
     }
 }

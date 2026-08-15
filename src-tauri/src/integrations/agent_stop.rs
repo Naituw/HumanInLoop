@@ -43,7 +43,7 @@ struct Preferences {
 }
 
 pub fn supported(kind: AgentKind) -> bool {
-    cfg!(unix) && kind != AgentKind::Grok
+    kind != AgentKind::Grok
 }
 
 pub fn enabled(kind: AgentKind) -> bool {

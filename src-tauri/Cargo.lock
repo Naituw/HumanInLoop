@@ -1955,6 +1955,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-bash",
  "uuid",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

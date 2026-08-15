@@ -107,7 +107,7 @@ fn codex_label(event_key: &str) -> Option<&'static str> {
 }
 
 pub fn supported() -> bool {
-    cfg!(unix)
+    true
 }
 
 /// 是否有任意一家 agent 已开启生命周期追踪（即至少一家装了本功能的 lifecycle hook）。

@@ -308,9 +308,9 @@ mod tests {
 
     #[test]
     fn config_dir_respects_askhuman_home() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let prev = std::env::var_os(crate::dev_instance::ASKHUMAN_HOME_ENV);
-        let custom = PathBuf::from("/tmp/askhuman-home-test-xyz");
+        let custom = std::env::temp_dir().join("askhuman-home-test-xyz");
         std::env::set_var(crate::dev_instance::ASKHUMAN_HOME_ENV, &custom);
         assert_eq!(config_dir(), custom);
         match prev {
@@ -321,11 +321,11 @@ mod tests {
 
     #[test]
     fn dev_presets_dir_not_under_askhuman_home() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let prev = std::env::var_os(crate::dev_instance::ASKHUMAN_HOME_ENV);
         std::env::set_var(
             crate::dev_instance::ASKHUMAN_HOME_ENV,
-            "/tmp/instance-home-only",
+            std::env::temp_dir().join("instance-home-only"),
         );
         assert_eq!(
             dev_presets_dir(),
