@@ -166,7 +166,7 @@ pub fn parse_powershell_plain_commands(script: &str) -> Option<Vec<Vec<String>>>
     }
 
     fn push_command(commands: &mut Vec<Vec<String>>, command: &mut Vec<String>) -> Option<()> {
-        if command.is_empty() {
+        if command.is_empty() || command.first().is_some_and(|word| word.contains('=')) {
             return None;
         }
         commands.push(std::mem::take(command));
@@ -304,7 +304,7 @@ pub fn is_dangerous_powershell_words(words: &[String]) -> bool {
         return normalized.iter().any(|word| {
             matches!(
                 word.as_str(),
-                "-force" | "-recurse" | "-r" | "-fo" | "/f" | "/s"
+                "-force" | "-recurse" | "-r" | "-fo" | "-rf" | "-fr" | "/f" | "/s"
             )
         });
     }
