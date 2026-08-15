@@ -226,6 +226,7 @@ async fn apply_windows(progress: Option<ProgressCb>) -> Result<()> {
     use std::process::{Command, Stdio};
     use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 
+    super::cleanup_stale_windows_workdirs();
     let release = fetch_latest_release(true).await?;
     let expected_version = super::normalize_version(release["tag_name"].as_str().unwrap_or(""));
     let url = asset_url_for_current(&release)
@@ -251,6 +252,7 @@ async fn apply_windows(progress: Option<ProgressCb>) -> Result<()> {
     std::fs::create_dir_all(&extract).context("创建解压目录失败")?;
     extract_archive(&archive, &extract)?;
     let worker = find_executable(&extract).ok_or_else(|| anyhow!("压缩包中未找到 AskHuman.exe"))?;
+    verify_windows_authenticode(&worker)?;
     let version = Command::new(&worker)
         .arg("version")
         .stdin(Stdio::null())
@@ -278,16 +280,72 @@ async fn apply_windows(progress: Option<ProgressCb>) -> Result<()> {
         &transaction_path,
         &serde_json::to_vec(&transaction)?,
     )?;
+    let (worker_stdout, worker_stderr) = super::windows_worker_log_files("direct")?;
     let mut command = Command::new(&worker);
     command
         .arg("__update-worker")
         .arg(&transaction_path)
         .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::from(worker_stdout))
+        .stderr(Stdio::from(worker_stderr));
     command.spawn().context("无法启动 Windows 更新 worker")?;
     Ok(())
+}
+
+/// Validate the embedded Authenticode signature and its trust chain without displaying UI.
+/// The release workflow timestamps every Windows artifact, so WinVerifyTrust also validates the
+/// timestamped signature when the short-lived signing certificate has expired.
+#[cfg(windows)]
+pub(crate) fn verify_windows_authenticode(path: &std::path::Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::WinTrust::{
+        WinVerifyTrust, WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0,
+        WINTRUST_FILE_INFO, WTD_CHOICE_FILE, WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT,
+        WTD_REVOKE_WHOLECHAIN, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
+    };
+
+    let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut file = WINTRUST_FILE_INFO {
+        cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,
+        pcwszFilePath: wide_path.as_ptr(),
+        ..Default::default()
+    };
+    let mut data = WINTRUST_DATA {
+        cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
+        dwUIChoice: WTD_UI_NONE,
+        fdwRevocationChecks: WTD_REVOKE_WHOLECHAIN,
+        dwUnionChoice: WTD_CHOICE_FILE,
+        Anonymous: WINTRUST_DATA_0 { pFile: &mut file },
+        dwStateAction: WTD_STATEACTION_VERIFY,
+        dwProvFlags: WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT,
+        ..Default::default()
+    };
+    let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    let status = unsafe {
+        WinVerifyTrust(
+            std::ptr::null_mut(),
+            &mut action,
+            (&mut data as *mut WINTRUST_DATA).cast(),
+        )
+    };
+    data.dwStateAction = WTD_STATEACTION_CLOSE;
+    let _ = unsafe {
+        WinVerifyTrust(
+            std::ptr::null_mut(),
+            &mut action,
+            (&mut data as *mut WINTRUST_DATA).cast(),
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "Windows Authenticode verification failed for {} (0x{:08x})",
+            path.display(),
+            status as u32
+        ))
+    }
 }
 
 /// Hidden Windows updater role. It runs from the verified new binary outside the install path,

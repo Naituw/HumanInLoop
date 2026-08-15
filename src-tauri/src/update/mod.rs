@@ -16,6 +16,58 @@ pub mod notes;
 pub mod npm;
 pub mod state;
 
+#[cfg(windows)]
+pub(crate) fn cleanup_stale_windows_workdirs() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(24 * 60 * 60))
+        .unwrap_or(std::time::UNIX_EPOCH);
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("askhuman_update_") && !name.starts_with("askhuman_npm_update_") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|modified| modified < cutoff);
+        if stale {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_worker_log_files(
+    kind: &str,
+) -> std::io::Result<(std::fs::File, std::fs::File)> {
+    use std::io::Write;
+
+    let directory = crate::paths::config_dir();
+    std::fs::create_dir_all(&directory)?;
+    let path = directory.join(format!("{kind}-update-worker.log"));
+    if path
+        .metadata()
+        .is_ok_and(|metadata| metadata.len() > 1024 * 1024)
+    {
+        let _ = std::fs::remove_file(&path);
+    }
+    let mut stdout = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    writeln!(
+        stdout,
+        "\n--- worker started at {:?} ---",
+        std::time::SystemTime::now()
+    )?;
+    let stderr = stdout.try_clone()?;
+    Ok((stdout, stderr))
+}
+
 /// GitHub 仓库（更新检查 / 资产下载 / release notes 的来源）。
 pub const GITHUB_OWNER: &str = "Naituw";
 pub const GITHUB_REPO: &str = "AskHuman";

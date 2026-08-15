@@ -215,6 +215,7 @@ async fn stage_windows_npm_worker() -> Result<()> {
     use std::process::{Command, Stdio};
     use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 
+    super::cleanup_stale_windows_workdirs();
     let target = std::env::current_exe().context("failed to locate current AskHuman.exe")?;
     let expected_version = npm_latest_version(true).await?;
     let work = std::env::temp_dir().join(format!("askhuman_npm_update_{}", uuid::Uuid::new_v4()));
@@ -236,14 +237,15 @@ async fn stage_windows_npm_worker() -> Result<()> {
         &transaction_path,
         &serde_json::to_vec(&transaction)?,
     )?;
+    let (worker_stdout, worker_stderr) = super::windows_worker_log_files("npm")?;
     let mut command = Command::new(&worker);
     command
         .arg("__npm-update-worker")
         .arg(&transaction_path)
         .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::from(worker_stdout))
+        .stderr(Stdio::from(worker_stderr));
     command
         .spawn()
         .context("failed to start npm update worker")?;
@@ -292,6 +294,7 @@ pub fn run_windows_worker(args: &[String]) -> Result<()> {
     );
     let output = run_npm_command(&launch).context("failed to start npm update")?;
     let verified = output.status.success()
+        && crate::update::direct::verify_windows_authenticode(&transaction.target).is_ok()
         && Command::new(&transaction.target)
             .arg("version")
             .stdin(Stdio::null())

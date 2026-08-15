@@ -19,7 +19,7 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
   Write-Error "需要 Rust 工具链（https://rustup.rs）"; exit 1
 }
 
-# 在途请求提示（与 install.sh 对应；daemon 暂不支持 Windows 时 status 不可用，自然跳过）。
+# Show the same in-flight request warning as install.sh before replacing the binary.
 if (Get-Command AskHuman -ErrorAction SilentlyContinue) {
   $StatusOut = & AskHuman daemon status 2>$null
   if ($LASTEXITCODE -eq 0 -and $StatusOut -match 'requests\s+(\d+) active' -and [int]$Matches[1] -gt 0) {
@@ -62,7 +62,17 @@ if ((Test-Path -LiteralPath $InstalledBin) -and (Test-Path -LiteralPath $Install
 }
 
 if (-not $SkipCopy) {
-  Copy-Item $Bin $InstalledBin -Force
+  $StagedBin = Join-Path $InstallDir ".AskHuman.new.$PID.exe"
+  try {
+    Copy-Item -LiteralPath $Bin -Destination $StagedBin -Force
+    $StagedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $StagedBin).Hash.ToLowerInvariant()
+    if ($StagedHash -ne $SourceHash) {
+      throw "Staged AskHuman.exe hash does not match the build output"
+    }
+    Move-Item -LiteralPath $StagedBin -Destination $InstalledBin -Force
+  } finally {
+    Remove-Item -LiteralPath $StagedBin -Force -ErrorAction SilentlyContinue
+  }
   $InstalledHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $InstalledBin).Hash.ToLowerInvariant()
   $StateTemp = "$InstallState.tmp.$PID"
   @("source=$SourceHash", "installed=$InstalledHash") | Set-Content -LiteralPath $StateTemp -Encoding ASCII
