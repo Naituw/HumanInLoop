@@ -78,3 +78,67 @@ function Remove-AskHumanUserPath([string]$Directory) {
   )
   Write-Host "==> Removed $Directory from the current user's PATH"
 }
+
+function Get-AskHumanCommandLauncherContent([string]$InstallDirectory) {
+  $DefaultInstallDirectory = Join-Path $env:LOCALAPPDATA "Programs\AskHuman"
+  if ((Get-AskHumanNormalizedPathEntry $InstallDirectory) -ne
+      (Get-AskHumanNormalizedPathEntry $DefaultInstallDirectory)) {
+    throw "The global command launcher only supports the default install directory"
+  }
+
+  return "@echo off`r`nrem AskHuman managed command launcher v1`r`n`"%LOCALAPPDATA%\Programs\AskHuman\AskHuman.exe`" %*`r`n"
+}
+
+function Test-AskHumanManagedCommandLauncher([string]$Content) {
+  return $Content.StartsWith(
+    "@echo off`r`nrem AskHuman managed command launcher v1`r`n",
+    [StringComparison]::Ordinal
+  )
+}
+
+function Install-AskHumanCommandLauncher(
+  [string]$InstallDirectory,
+  [string]$LauncherDirectory = (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps")
+) {
+  if (-not (Test-Path -LiteralPath $LauncherDirectory -PathType Container)) {
+    throw "The standard Windows command-launcher directory is missing: $LauncherDirectory"
+  }
+
+  $LauncherPath = Join-Path $LauncherDirectory "AskHuman.cmd"
+  $Content = Get-AskHumanCommandLauncherContent $InstallDirectory
+  if (Test-Path -LiteralPath $LauncherPath) {
+    $Existing = [IO.File]::ReadAllText($LauncherPath)
+    if (-not (Test-AskHumanManagedCommandLauncher $Existing)) {
+      throw "Refusing to overwrite an unmanaged command launcher: $LauncherPath"
+    }
+    if ($Existing -ceq $Content) {
+      Write-Host "==> Command launcher is already current: $LauncherPath"
+      return $LauncherPath
+    }
+  }
+
+  $StagedLauncher = Join-Path $LauncherDirectory ".AskHuman.cmd.new.$PID"
+  try {
+    [IO.File]::WriteAllText($StagedLauncher, $Content, [Text.Encoding]::ASCII)
+    Move-Item -LiteralPath $StagedLauncher -Destination $LauncherPath -Force
+  } finally {
+    Remove-Item -LiteralPath $StagedLauncher -Force -ErrorAction SilentlyContinue
+  }
+  Write-Host "==> Installed command launcher: $LauncherPath"
+  return $LauncherPath
+}
+
+function Remove-AskHumanCommandLauncher(
+  [string]$LauncherDirectory = (Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps")
+) {
+  $LauncherPath = Join-Path $LauncherDirectory "AskHuman.cmd"
+  if (-not (Test-Path -LiteralPath $LauncherPath -PathType Leaf)) { return }
+
+  $Content = [IO.File]::ReadAllText($LauncherPath)
+  if (-not (Test-AskHumanManagedCommandLauncher $Content)) {
+    Write-Warning "Preserving unmanaged command launcher: $LauncherPath"
+    return
+  }
+  Remove-Item -LiteralPath $LauncherPath -Force
+  Write-Host "==> Removed command launcher: $LauncherPath"
+}

@@ -12,7 +12,7 @@ Engineering notes for contributors. User-facing docs live in [`docs/wiki/`](./wi
 
 - `src/` — Vue 3 + Vite + TypeScript frontend. The Vite entry `index.html` lives here, and Vite's `root` is set to `src` (build output goes to the repo-root `dist/`, which Tauri embeds).
 - `src-tauri/` — Rust backend (Tauri 2). Produces the single `AskHuman` binary.
-- `scripts/` — build/install/release helpers (`install.sh`, `install-windows.ps1`, `publish.sh`, `bump-version.mjs`).
+- `scripts/` — build/install/release helpers (`install.sh`, `install-windows.cmd`, `publish.sh`, `bump-version.mjs`).
 - `packaging/npm/` — npm main package (`askhuman`) and scoped per-platform binary subpackages.
 
 ## Develop, build, test
@@ -71,15 +71,17 @@ Build and install locally:
 ./scripts/install.sh --global
 
 # Windows        → installs to %LOCALAPPDATA%\Programs\AskHuman
-./scripts/install-windows.ps1
+.\scripts\install-windows.cmd
 
 # Windows exact production profile:
-./scripts/install-windows.ps1 -Release
+.\scripts\install-windows.cmd -Release
 ```
 
-The Windows installer idempotently adds its install directory to the current user's `PATH`.
-Open a new PowerShell window after installation, then run `AskHuman --version`; the uninstaller
-removes only that managed install-directory entry and preserves every unrelated `PATH` entry.
+The Windows command wrapper works under the default restrictive PowerShell execution policy. The
+installer idempotently adds its install directory to the current user's `PATH` and installs a
+managed `AskHuman.cmd` launcher in the standard per-user `WindowsApps` command directory. This makes
+`AskHuman --version` available immediately even when an Agent installs from a different Windows
+session. The uninstaller removes only its managed launcher and install-directory entry.
 
 > Running the GUI popup on Linux needs system WebKitGTK (e.g. `libwebkit2gtk-4.1`). If it's missing and a session-based channel (Telegram / DingTalk / Feishu) is configured, AskHuman automatically uses that channel; if none is available it exits with code 3 to signal graceful degradation.
 

@@ -427,7 +427,7 @@ pnpm tauri dev
 pnpm build && cargo build --release --manifest-path src-tauri/Cargo.toml --features custom-protocol
 cargo test --manifest-path src-tauri/Cargo.toml
 ./scripts/install.sh                    # macOS / Linux
-./scripts/install-windows.ps1           # Windows
+.\scripts\install-windows.cmd           # Windows
 node scripts/perf-popup.mjs             # 固定 canonical 弹窗性能场景
 ```
 

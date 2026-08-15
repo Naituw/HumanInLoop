@@ -174,7 +174,8 @@ VM 上的构建产物和安装尝试没有改动仓库源文件；VM 仓库保�
 - npm 全局升级也必须先释放 package 内的 `.exe`，再由外部/临时 worker 执行升级；失败时不能留下
   半安装状态。
 - PowerShell 5.1 与 7 均需支持安装脚本；编码、执行策略提示和路径含空格必须有测试。installer
-  幂等加入当前用户 `PATH`，uninstaller 只删除自身管理的安装目录，不覆盖其他条目。
+  幂等加入当前用户 `PATH`，并在标准 per-user `WindowsApps` 目录维护命令 launcher，使 Agent 跨 session
+  安装后既有终端立即可用；uninstaller 只删除自身管理的 launcher 和安装目录，不覆盖其他条目。
 
 ### WP-10：Windows CI 与可观测性
 

@@ -5,6 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$UsesDefaultInstallDir = [string]::IsNullOrWhiteSpace($env:INSTALL_DIR)
 $InstallDir = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "Programs\AskHuman" }
 $InstalledBin = Join-Path $InstallDir "AskHuman.exe"
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
@@ -50,6 +51,9 @@ if (Test-Path -LiteralPath $InstallDir) {
   Remove-Item -LiteralPath $InstallDir -Recurse -Force
 }
 
+if ($UsesDefaultInstallDir) {
+  Remove-AskHumanCommandLauncher
+}
 Remove-AskHumanUserPath $InstallDir
 
 if ($PurgeData) {

@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptDir
+$UsesDefaultInstallDir = [string]::IsNullOrWhiteSpace($env:INSTALL_DIR)
 $InstallDir = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "Programs\AskHuman" }
 $BuildProfile = if ($Release) { "release" } else { "local-install" }
 Set-Location $RepoRoot
@@ -120,5 +121,13 @@ Enforce-ProfileBudget "full-debug" "src-tauri\target\full-debug" 6144
 Enforce-ProfileBudget "release" "src-tauri\target\release" 4096
 
 Add-AskHumanUserPath $InstallDir
+if ($UsesDefaultInstallDir) {
+  $LauncherDir = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps"
+  $KnownPath = "$env:Path;$([Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::User))"
+  if (-not (Test-AskHumanPathContains $KnownPath $LauncherDir)) {
+    throw "The standard Windows command-launcher directory is not on PATH: $LauncherDir"
+  }
+  Install-AskHumanCommandLauncher $InstallDir $LauncherDir | Out-Null
+}
 Write-Host "==> 完成：$InstallDir\AskHuman.exe"
-Write-Host "提示: 请重新打开 PowerShell，然后运行 AskHuman --version。"
+Write-Host "==> AskHuman 命令已就绪；可直接运行 AskHuman --version。"

@@ -23,7 +23,7 @@ After making any change to this project's functionality or logic, verify the res
 ./scripts/install.sh
 
 # Windows
-./scripts/install-windows.ps1
+./scripts/install-windows.cmd
 ```
 
 ## Code comments
