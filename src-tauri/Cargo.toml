@@ -102,6 +102,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_Security",
   "Win32_Security_Authorization",
   "Win32_Storage_FileSystem",
+  "Win32_System_Diagnostics_Debug",
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_RemoteDesktop",
   "Win32_System_Registry",

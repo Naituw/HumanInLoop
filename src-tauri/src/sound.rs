@@ -200,7 +200,8 @@ mod imp {
 
 #[cfg(target_os = "windows")]
 mod imp {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBeep, MB_ICONASTERISK};
+    use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
+    use windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONASTERISK;
 
     pub fn support() -> &'static str {
         "toggle"

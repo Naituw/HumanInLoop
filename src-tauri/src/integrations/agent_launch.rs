@@ -901,7 +901,6 @@ fn epoch_secs() -> u64 {
         .as_secs()
 }
 
-#[cfg(unix)]
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
