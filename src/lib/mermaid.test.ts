@@ -181,18 +181,24 @@ describe("renderMermaid", () => {
     15_000,
   );
 
-  it("renders and normalizes a real Mermaid flowchart", async () => {
-    const result = await renderMermaid(
-      "flowchart TD\n  A[开始] --> B[完成]",
-      "light",
-    );
-    expect(result.documentUrl).toMatch(
-      /^data:text\/html;charset=UTF-8;base64,/,
-    );
-    expect(result.findText).toContain("开始");
-    expect(result.findText).toContain("完成");
-    expect(decodeDocument(result.documentUrl)).toContain("default-src 'none'");
-  });
+  it(
+    "renders and normalizes a real Mermaid flowchart",
+    async () => {
+      const result = await renderMermaid(
+        "flowchart TD\n  A[开始] --> B[完成]",
+        "light",
+      );
+      expect(result.documentUrl).toMatch(
+        /^data:text\/html;charset=UTF-8;base64,/,
+      );
+      expect(result.findText).toContain("开始");
+      expect(result.findText).toContain("完成");
+      expect(decodeDocument(result.documentUrl)).toContain("default-src 'none'");
+    },
+    // The preceding edge-limit case intentionally stresses Mermaid's parser. Its cleanup can
+    // leave the next real render slower on Windows CI and constrained VMs.
+    15_000,
+  );
 
   it("uses the Markdown body font size in the Mermaid theme", async () => {
     const result = await renderMermaid("flowchart TD\nA[Readable]-->B", "light", 12);
