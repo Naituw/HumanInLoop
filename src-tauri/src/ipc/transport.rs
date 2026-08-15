@@ -297,23 +297,129 @@ fn create_windows_server(
     first: bool,
 ) -> io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
     use tokio::net::windows::named_pipe::ServerOptions;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 
-    ServerOptions::new()
-        .first_pipe_instance(first)
-        .reject_remote_clients(true)
-        .create(endpoint)
+    let sid = current_user_sid()?;
+    let sddl: Vec<u16> = pipe_sddl(&sid).encode_utf16().chain(Some(0)).collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let converted = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    };
+    if converted == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let mut attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor,
+        bInheritHandle: 0,
+    };
+    let result = unsafe {
+        ServerOptions::new()
+            .first_pipe_instance(first)
+            .reject_remote_clients(true)
+            .create_with_security_attributes_raw(endpoint, (&mut attributes as *mut _) as *mut _)
+    };
+    unsafe {
+        LocalFree(descriptor);
+    }
+    result
+}
+
+#[cfg(windows)]
+fn pipe_sddl(sid: &str) -> String {
+    // Protected DACL: the current logon user and LocalSystem are the only principals
+    // allowed to open the pipe. Remote clients are rejected separately by pipe mode.
+    format!("D:P(A;;GA;;;SY)(A;;GA;;;{sid})")
+}
+
+#[cfg(windows)]
+fn current_user_sid() -> io::Result<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token: HANDLE = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    let result = (|| {
+        let mut required = 0u32;
+        unsafe {
+            GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut required);
+        }
+        if required == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut buffer = vec![0u8; required as usize];
+        if unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                required,
+                &mut required,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+
+        let user = unsafe { &*(buffer.as_ptr().cast::<TOKEN_USER>()) };
+        let mut sid_text = std::ptr::null_mut();
+        if unsafe { ConvertSidToStringSidW(user.User.Sid, &mut sid_text) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut len = 0usize;
+        unsafe {
+            while *sid_text.add(len) != 0 {
+                len += 1;
+            }
+        }
+        let sid = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(sid_text, len) });
+        unsafe {
+            LocalFree(sid_text.cast());
+        }
+        Ok(sid)
+    })();
+
+    unsafe {
+        CloseHandle(token);
+    }
+    result
 }
 
 #[cfg(windows)]
 pub(crate) fn windows_endpoint(role: &str) -> String {
     use sha2::{Digest, Sha256};
     use std::fmt::Write as _;
+    use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
 
+    let mut session_id = u32::MAX;
+    unsafe {
+        ProcessIdToSessionId(GetCurrentProcessId(), &mut session_id);
+    }
     let identity = format!(
-        "{}\\{}|{}|{}",
-        std::env::var("USERDOMAIN").unwrap_or_default(),
-        std::env::var("USERNAME").unwrap_or_default(),
-        std::env::var("SESSIONNAME").unwrap_or_default(),
+        "{}|{session_id}|{}",
+        current_user_sid().unwrap_or_else(|_| {
+            format!(
+                "{}\\{}",
+                std::env::var("USERDOMAIN").unwrap_or_default(),
+                std::env::var("USERNAME").unwrap_or_default()
+            )
+        }),
         crate::paths::config_dir().to_string_lossy()
     );
     let digest = Sha256::digest(identity.as_bytes());
@@ -334,5 +440,16 @@ mod tests {
         assert!(super::endpoint_path("gui-host")
             .to_string_lossy()
             .contains("gui-host"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pipe_acl_names_only_system_and_current_user() {
+        let sid = super::current_user_sid().unwrap();
+        assert!(sid.starts_with("S-1-"));
+        assert_eq!(
+            super::pipe_sddl(&sid),
+            format!("D:P(A;;GA;;;SY)(A;;GA;;;{sid})")
+        );
     }
 }

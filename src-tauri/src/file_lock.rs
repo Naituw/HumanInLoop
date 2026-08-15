@@ -19,10 +19,24 @@ impl FileLock {
         let file = open_lock_file(path)?;
         match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => Ok(Some(Self { file })),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) if lock_is_contended(&error) => Ok(None),
             Err(error) => Err(error),
         }
     }
+}
+
+fn lock_is_contended(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::WouldBlock {
+        return true;
+    }
+
+    // fs2 forwards Win32 lock errors without mapping ERROR_LOCK_VIOLATION to
+    // WouldBlock. Normalize both contention codes so callers have one API.
+    #[cfg(windows)]
+    return matches!(error.raw_os_error(), Some(32 | 33));
+
+    #[cfg(not(windows))]
+    false
 }
 
 impl Drop for FileLock {

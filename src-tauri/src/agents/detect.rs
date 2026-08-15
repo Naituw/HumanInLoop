@@ -19,6 +19,19 @@ struct ProcEntry {
     command: String,
 }
 
+/// Native process facts used by lifecycle binding. Fields that the OS refuses to disclose stay
+/// `None`; callers must fail closed rather than substituting another process's identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessIdentity {
+    pub pid: u32,
+    pub parent_pid: u32,
+    pub executable: Option<String>,
+    pub command_line: Option<String>,
+    pub session_id: Option<u32>,
+    /// Windows FILETIME ticks since 1601; unavailable on Unix adapters today.
+    pub creation_time: Option<u64>,
+}
+
 /// 本程序自身可执行文件名的标记（避免把 reporter / daemon / mcp / ask 子进程误判成 Agent）。
 /// **只按可执行名匹配**（comm + argv0 basename），**不扫描参数**——否则命令行参数里恰好提到
 /// "askhuman" 的 agent（如 `codex exec "用 askhuman 提问…"`）会被误判为自身而被 walk 跳过，
@@ -262,6 +275,31 @@ pub fn parent_pid(pid: u32) -> Option<u32> {
         .filter(|parent| *parent != 0)
 }
 
+/// Inspect one process without launching PowerShell, WMI, or another helper process on Windows.
+pub fn inspect_process(pid: u32) -> Option<ProcessIdentity> {
+    #[cfg(unix)]
+    {
+        let (parent_pid, executable) = ps_ppid_comm(pid)?;
+        Some(ProcessIdentity {
+            pid,
+            parent_pid,
+            executable: (!executable.is_empty()).then_some(executable),
+            command_line: ps_command(pid),
+            session_id: None,
+            creation_time: None,
+        })
+    }
+    #[cfg(windows)]
+    {
+        inspect_process_windows(pid)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
 /// 识别 `pid` 所在的终端 App：沿进程链向上找首个已知终端祖先，返回稳定标识串
 /// （`apple-terminal` / `iterm2` / `ghostty` / `kitty` / `wezterm` / `alacritty` / `tmux`
 /// / `vscode` / `cursor`）；找不到（或非 unix）返回 `None`。
@@ -400,15 +438,7 @@ fn process_chain(start_pid: u32) -> Vec<ProcEntry> {
             .position(|&unit| unit == 0)
             .unwrap_or(entry.szExeFile.len());
         let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
-        table.insert(
-            entry.th32ProcessID,
-            ProcEntry {
-                pid: entry.th32ProcessID,
-                ppid: entry.th32ParentProcessID,
-                comm: name.clone(),
-                command: name,
-            },
-        );
+        table.insert(entry.th32ProcessID, (entry.th32ParentProcessID, name));
         has_entry = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
     }
     unsafe {
@@ -419,13 +449,174 @@ fn process_chain(start_pid: u32) -> Vec<ProcEntry> {
     let mut seen = std::collections::HashSet::new();
     let mut pid = start_pid;
     while pid > 0 && seen.insert(pid) {
-        let Some(item) = table.get(&pid).cloned() else {
+        let Some((ppid, name)) = table.get(&pid).cloned() else {
             break;
         };
-        pid = item.ppid;
-        chain.push(item);
+        let native = inspect_process_windows_with_parent(pid, ppid);
+        let comm = native
+            .as_ref()
+            .and_then(|process| process.executable.clone())
+            .unwrap_or_else(|| name.clone());
+        let command = native
+            .and_then(|process| process.command_line)
+            .unwrap_or(name);
+        chain.push(ProcEntry {
+            pid,
+            ppid,
+            comm,
+            command,
+        });
+        pid = ppid;
     }
     chain
+}
+
+#[cfg(windows)]
+fn inspect_process_windows(pid: u32) -> Option<ProcessIdentity> {
+    inspect_process_windows_with_parent(pid, toolhelp_parent_pid(pid)?)
+}
+
+#[cfg(windows)]
+fn inspect_process_windows_with_parent(pid: u32, parent_pid: u32) -> Option<ProcessIdentity> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return None;
+    }
+    let executable = query_process_image(process);
+    let command_line = query_process_command_line(process);
+    let mut session_id = 0u32;
+    let session_id =
+        (unsafe { ProcessIdToSessionId(pid, &mut session_id) } != 0).then_some(session_id);
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let creation_time =
+        (unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) }
+            != 0)
+            .then_some(((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64);
+    unsafe {
+        CloseHandle(process);
+    }
+
+    Some(ProcessIdentity {
+        pid,
+        parent_pid,
+        executable,
+        command_line,
+        session_id,
+        creation_time,
+    })
+}
+
+#[cfg(windows)]
+fn query_process_image(process: windows_sys::Win32::Foundation::HANDLE) -> Option<String> {
+    use windows_sys::Win32::System::Threading::QueryFullProcessImageNameW;
+
+    let mut buffer = vec![0u16; 32_768];
+    let mut length = buffer.len() as u32;
+    if unsafe { QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut length) } == 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&buffer[..length as usize]))
+}
+
+#[cfg(windows)]
+fn query_process_command_line(process: windows_sys::Win32::Foundation::HANDLE) -> Option<String> {
+    #[repr(C)]
+    struct UnicodeString {
+        length: u16,
+        maximum_length: u16,
+        buffer: *const u16,
+    }
+
+    unsafe extern "system" {
+        fn NtQueryInformationProcess(
+            process_handle: windows_sys::Win32::Foundation::HANDLE,
+            process_information_class: u32,
+            process_information: *mut std::ffi::c_void,
+            process_information_length: u32,
+            return_length: *mut u32,
+        ) -> i32;
+    }
+
+    const PROCESS_COMMAND_LINE_INFORMATION: u32 = 60;
+    let mut required = 0u32;
+    unsafe {
+        NtQueryInformationProcess(
+            process,
+            PROCESS_COMMAND_LINE_INFORMATION,
+            std::ptr::null_mut(),
+            0,
+            &mut required,
+        );
+    }
+    if required < std::mem::size_of::<UnicodeString>() as u32 {
+        return None;
+    }
+    let mut storage = vec![0u8; required as usize];
+    let status = unsafe {
+        NtQueryInformationProcess(
+            process,
+            PROCESS_COMMAND_LINE_INFORMATION,
+            storage.as_mut_ptr().cast(),
+            required,
+            &mut required,
+        )
+    };
+    if status < 0 {
+        return None;
+    }
+    let value = unsafe { &*(storage.as_ptr().cast::<UnicodeString>()) };
+    let byte_len = value.length as usize;
+    if byte_len == 0 || byte_len % 2 != 0 || value.buffer.is_null() {
+        return None;
+    }
+    let storage_start = storage.as_ptr() as usize;
+    let storage_end = storage_start.checked_add(storage.len())?;
+    let text_start = value.buffer as usize;
+    let text_end = text_start.checked_add(byte_len)?;
+    if text_start < storage_start || text_end > storage_end {
+        return None;
+    }
+    Some(String::from_utf16_lossy(unsafe {
+        std::slice::from_raw_parts(value.buffer, byte_len / 2)
+    }))
+}
+
+#[cfg(windows)]
+fn toolhelp_parent_pid(pid: u32) -> Option<u32> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    let mut entry = PROCESSENTRY32W::default();
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut found = None;
+    let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while has_entry {
+        if entry.th32ProcessID == pid {
+            found = Some(entry.th32ParentProcessID);
+            break;
+        }
+        has_entry = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+    unsafe {
+        CloseHandle(snapshot);
+    }
+    found
 }
 
 #[cfg(not(any(unix, windows)))]
