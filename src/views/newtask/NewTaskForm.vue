@@ -25,6 +25,7 @@ import type {
   TodoEntry,
 } from "../../lib/types";
 import { AGENT_INSTALL_DOCS } from "../settings/useAgentTasks";
+import { primaryModifierPressed, primaryShortcutLabel } from "../../lib/platform";
 import LaunchPermission from "./LaunchPermission.vue";
 
 const { t } = useI18n();
@@ -42,7 +43,9 @@ const emit = defineEmits<{ launched: [] }>();
 // ===== init =====
 const popupSubmitKey = ref<PopupSubmitKey>("cmdEnter");
 const submitWithBareEnter = computed(() => popupSubmitKey.value === "enter");
-const submitKeyLabel = computed(() => (submitWithBareEnter.value ? "↵" : "⌘↵"));
+const submitKeyLabel = computed(() =>
+  submitWithBareEnter.value ? "↵" : primaryShortcutLabel("enter")
+);
 /** `agentTasks.permissionPrompt`（G6）：ask 显示单选，另两态为固定模式。 */
 const permissionPrompt = ref<string>("ask");
 const loaded = ref(false);
@@ -264,8 +267,8 @@ function onInputKeydown(e: KeyboardEvent): void {
   if (e.isComposing || (e as KeyboardEvent & { keyCode?: number }).keyCode === 229) {
     return;
   }
-  const mod = e.metaKey || e.ctrlKey;
-  const anyMod = mod || e.shiftKey || e.altKey;
+  const mod = primaryModifierPressed(e);
+  const anyMod = e.metaKey || e.ctrlKey || e.shiftKey || e.altKey;
   const isPrimarySendMod = mod && !e.shiftKey && !e.altKey;
   const shouldSubmit = submitWithBareEnter.value ? !anyMod : isPrimarySendMod;
   if (!shouldSubmit) return;

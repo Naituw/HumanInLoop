@@ -2183,7 +2183,7 @@ pub fn open_test_popup() -> Result<(), String> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PopupSoundSupport {
-    /// `"named"` (macOS with `names`), `"toggle"` (Linux), or `"none"` (hidden).
+    /// `"named"` (macOS with `names`), `"toggle"` (Windows/Linux), or `"none"` (hidden).
     kind: String,
     /// Optional sound names, only non-empty for `"named"`.
     names: Vec<String>,

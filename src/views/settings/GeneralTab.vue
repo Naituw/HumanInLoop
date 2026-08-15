@@ -4,6 +4,7 @@ import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { openTestPopup } from "../../lib/ipc";
 import { formatShortcut } from "../../lib/shortcut";
+import { primaryModifierLabel, primaryShortcutLabel } from "../../lib/platform";
 import type { UiLanguage } from "../../lib/types";
 import { useSettingsContext } from "./context";
 
@@ -127,7 +128,7 @@ const config = computed(() => ctx.config.value!);
           :class="{ active: (config.general.popupSubmitKey ?? 'cmdEnter') === 'cmdEnter' }"
           @click="changeSubmitKey('cmdEnter')"
         >
-          {{ t("settings.popupBehavior.submitKeyCmdEnter") }}
+          {{ t("settings.popupBehavior.submitKeyCmdEnter", { shortcut: primaryShortcutLabel("enter") }) }}
         </button>
         <button
           type="button"
@@ -142,7 +143,7 @@ const config = computed(() => ctx.config.value!);
       {{
         (config.general.popupSubmitKey ?? "cmdEnter") === "enter"
           ? t("settings.popupBehavior.submitKeyEnterHint")
-          : t("settings.popupBehavior.submitKeyCmdEnterHint")
+          : t("settings.popupBehavior.submitKeyCmdEnterHint", { shortcut: primaryShortcutLabel("enter") })
       }}
     </p>
     <hr class="divider" />
@@ -410,7 +411,7 @@ const config = computed(() => ctx.config.value!);
       class="card-desc"
       style="margin-top: 6px"
     >
-      {{ t("settings.speech.recordHint") }}
+      {{ t("settings.speech.recordHint", { modifier: primaryModifierLabel() }) }}
     </p>
   </div>
 

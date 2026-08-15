@@ -154,9 +154,9 @@ export function useSettingsSearch(deps: {
         "settings.channels.slackUserId",
       ]),
     ];
+    list.push(e("general", "settings.popupBehavior.sound"));
     if (isMac) {
       list.push(
-        e("general", "settings.popupBehavior.sound"),
         e("general", "settings.popupBehavior.appearAnimation"),
         e("general", "settings.speech.title", [
           "settings.speech.language",

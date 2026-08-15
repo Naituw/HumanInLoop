@@ -16,6 +16,7 @@ import { isMac } from "../../lib/platform";
 import { applyTheme, applyWindowMaterial } from "../../lib/theme";
 import {
   eventToSpec,
+  formatModifierPreview,
   isModifierOnly,
   shortcutConflict,
   specToString,
@@ -149,15 +150,6 @@ export function useGeneralSettings(core: SettingsCore) {
   const shortcutError = ref<ConflictReason | null>(null);
   let shortcutHandler: ((e: KeyboardEvent) => void) | null = null;
 
-  function previewModifiers(e: KeyboardEvent): string {
-    let o = "";
-    if (e.ctrlKey) o += "⌃";
-    if (e.altKey) o += "⌥";
-    if (e.shiftKey) o += "⇧";
-    if (e.metaKey) o += "⌘";
-    return o ? o + "…" : "";
-  }
-
   function stopRecordShortcut() {
     recordingShortcut.value = false;
     shortcutPreview.value = "";
@@ -173,7 +165,7 @@ export function useGeneralSettings(core: SettingsCore) {
     shortcutError.value = null;
     shortcutPreview.value = "";
     shortcutHandler = (e: KeyboardEvent) => {
-      // 捕获阶段拦截，避免触发浏览器/窗口默认行为（如 ⌘W 关窗）。
+      // Capture before the webview handles platform shortcuts such as close-window.
       e.preventDefault();
       e.stopPropagation();
       if (e.key === "Escape") {
@@ -181,7 +173,7 @@ export function useGeneralSettings(core: SettingsCore) {
         return;
       }
       if (isModifierOnly(e)) {
-        shortcutPreview.value = previewModifiers(e);
+        shortcutPreview.value = formatModifierPreview(e);
         return;
       }
       const spec = eventToSpec(e);

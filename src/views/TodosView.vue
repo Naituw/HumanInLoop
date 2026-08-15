@@ -5,7 +5,11 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { applyTheme, fileToDataUrl } from "../lib/theme";
-import { isWindows } from "../lib/platform";
+import {
+  isWindows,
+  primaryModifierPressed,
+  primaryShortcutLabel,
+} from "../lib/platform";
 import { applyLanguage } from "../i18n";
 import ComposerAttachments from "../components/ComposerAttachments.vue";
 import TodoAttachmentList from "./todos/TodoAttachmentList.vue";
@@ -47,9 +51,9 @@ const { t, locale } = useI18n();
 /** Same setting as the popup submit shortcut (`settings.popupBehavior.submitKey`). */
 const popupSubmitKey = ref<PopupSubmitKey>("cmdEnter");
 const submitWithBareEnter = computed(() => popupSubmitKey.value === "enter");
-/** Badge on the Add button — matches popup (`⌘↵` / `↵`). */
+/** Badge on the Add button — matches the platform's popup submit shortcut. */
 const submitKeyLabel = computed(() =>
-  submitWithBareEnter.value ? "↵" : "⌘↵"
+  submitWithBareEnter.value ? "↵" : primaryShortcutLabel("enter")
 );
 
 function applyPopupSubmitKey(value: unknown): void {
@@ -360,8 +364,8 @@ function onNewKeydown(e: KeyboardEvent): void {
   if (e.isComposing || (e as KeyboardEvent & { keyCode?: number }).keyCode === 229) {
     return;
   }
-  const mod = e.metaKey || e.ctrlKey;
-  const anyMod = mod || e.shiftKey || e.altKey;
+  const mod = primaryModifierPressed(e);
+  const anyMod = e.metaKey || e.ctrlKey || e.shiftKey || e.altKey;
   const isPrimarySendMod = mod && !e.shiftKey && !e.altKey;
   const shouldSubmit = submitWithBareEnter.value ? !anyMod : isPrimarySendMod;
   if (!shouldSubmit) return;
@@ -754,8 +758,8 @@ function onEditKeydown(e: KeyboardEvent): void {
   if (e.isComposing || (e as KeyboardEvent & { keyCode?: number }).keyCode === 229) {
     return;
   }
-  const mod = e.metaKey || e.ctrlKey;
-  const anyMod = mod || e.shiftKey || e.altKey;
+  const mod = primaryModifierPressed(e);
+  const anyMod = e.metaKey || e.ctrlKey || e.shiftKey || e.altKey;
   const isPrimarySendMod = mod && !e.shiftKey && !e.altKey;
   const shouldSubmit = submitWithBareEnter.value ? !anyMod : isPrimarySendMod;
   if (!shouldSubmit) return;

@@ -674,9 +674,9 @@ export interface GeneralConfig {
   historyLimit: number;
   /** 待办执行历史保留条数（每项目）。默认 100；0 = 停止新增记录（保留旧历史）。 */
   todoHistoryLimit: number;
-  /** Built-in popup sound. Empty disables it; macOS stores a name, Linux uses a toggle. */
+  /** Built-in popup sound. Empty disables it; macOS stores a name, other desktops use a toggle. */
   popupSound: string;
-  /** Menu bar / tray status icon mode (off/active/always). Desktop only (macOS/Linux). */
+  /** Menu bar / system-tray status icon mode (off/active/always). */
   menuBarIcon: MenuBarIconMode;
   /** Popup pre-warm (faster popups by keeping one mounted, hidden helper ready). Default true. */
   popupPrewarm: boolean;

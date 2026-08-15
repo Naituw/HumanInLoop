@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "test": "vitest run && node --test scripts/*.node-test.mjs",
+    "icons:generate": "node scripts/generate-app-icons.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },

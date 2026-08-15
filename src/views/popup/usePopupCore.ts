@@ -29,7 +29,11 @@ import {
   todosRemove,
 } from "../../lib/ipc";
 import { isFocusableTerminal } from "../../lib/terminals";
-import { isWindows } from "../../lib/platform";
+import {
+  isWindows,
+  primaryModifierPressed,
+  primaryShortcutLabel,
+} from "../../lib/platform";
 import { matchShortcut } from "../../lib/shortcut";
 import { applyLanguage } from "../../i18n";
 import { renderMarkdown, handleCodeCopyClick } from "../../lib/markdown";
@@ -897,7 +901,7 @@ export function usePopupCore() {
   );
   /** Label for the submit shortcut badge (⌘↵ vs ↵). */
   const submitKeyLabel = computed(() =>
-    submitWithBareEnter.value ? "↵" : "⌘↵"
+    submitWithBareEnter.value ? "↵" : primaryShortcutLabel("enter")
   );
   const submitPrimary = computed(() => submitShowsCmdEnter.value);
   // 下一个是否主按钮：末题从不主；否则在「提交尚未成为主按钮」时为主（读题引导）。
@@ -908,7 +912,7 @@ export function usePopupCore() {
   // CMD+数字 选项快捷键上限（1-9）；超出的选项不分配快捷键。
   const OPTION_HOTKEY_MAX = 9;
   function optionHotkey(i: number): string | null {
-    return i < OPTION_HOTKEY_MAX ? `⌘${i + 1}` : null;
+    return i < OPTION_HOTKEY_MAX ? primaryShortcutLabel(String(i + 1)) : null;
   }
 
   function isAnswered(i: number): boolean {
@@ -1859,7 +1863,7 @@ export function usePopupCore() {
   // 仅「纯」⌘/Ctrl（未叠加 Shift/Option）才算命中快捷键修饰键：例如 Cmd+Shift（截屏）下
   // 再按 1–9 不会命中选项快捷键，故此时不应高亮。
   function onlyCmdHeld(e: KeyboardEvent): boolean {
-    return (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey;
+    return primaryModifierPressed(e) && !e.shiftKey && !e.altKey;
   }
 
   /** Insert a newline at the caret of the focused textarea (enter-submit mode). */
@@ -1890,7 +1894,7 @@ export function usePopupCore() {
   }
 
   function onKeydown(e: KeyboardEvent) {
-    const mod = e.metaKey || e.ctrlKey;
+    const mod = primaryModifierPressed(e);
     cmdHeld.value = onlyCmdHeld(e);
     // In-page find (⌘/Ctrl+F, Esc while open, ⌘G, …) — before business shortcuts.
     if (find.handleFindKeydown(e)) return;
@@ -1905,7 +1909,7 @@ export function usePopupCore() {
         if (e.isComposing || (e as KeyboardEvent & { keyCode?: number }).keyCode === 229) {
           return;
         }
-        const anyMod = mod || e.shiftKey || e.altKey;
+        const anyMod = e.metaKey || e.ctrlKey || e.shiftKey || e.altKey;
         const isPrimarySendMod = mod && !e.shiftKey && !e.altKey;
         const shouldSubmit = submitWithBareEnter.value ? !anyMod : isPrimarySendMod;
         if (shouldSubmit) {
@@ -1947,7 +1951,7 @@ export function usePopupCore() {
       if (e.isComposing || (e as KeyboardEvent & { keyCode?: number }).keyCode === 229) {
         return;
       }
-      const anyMod = mod || e.shiftKey || e.altKey;
+      const anyMod = e.metaKey || e.ctrlKey || e.shiftKey || e.altKey;
       const isPrimarySendMod = mod && !e.shiftKey && !e.altKey; // pure ⌘/Ctrl+Enter
       const shouldSubmit = submitWithBareEnter.value
         ? !anyMod

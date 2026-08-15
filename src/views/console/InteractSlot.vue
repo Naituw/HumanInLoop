@@ -8,8 +8,10 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { AgentRecord, ImageAttachment } from "../../lib/types";
 import ComposerAttachments from "../../components/ComposerAttachments.vue";
 import { useInterjectAttachments } from "../interject/useInterjectAttachments";
+import { primaryModifierPressed, primaryShortcutLabel } from "../../lib/platform";
 
 const { t } = useI18n();
+const submitShortcut = primaryShortcutLabel("enter");
 
 const props = defineProps<{
   record: AgentRecord;
@@ -55,7 +57,7 @@ function send(): void {
 
 function onKeydown(e: KeyboardEvent): void {
   if (e.key !== "Enter") return;
-  const withModifier = e.metaKey || e.ctrlKey;
+  const withModifier = primaryModifierPressed(e);
   if (props.submitBareEnter) {
     // enter 模式：裸 Enter 发送，任意修饰键换行。
     if (!withModifier && !e.shiftKey && !e.altKey) {
@@ -151,7 +153,7 @@ onBeforeUnmount(() => unlistenDrop?.());
               :disabled="(!draft.trim() && !attachments.hasAttachments.value) || attachments.busy.value"
               @click="send"
             >
-              {{ t("console.send") }} <span class="kbd">{{ submitBareEnter ? "↵" : "⌘↵" }}</span>
+              {{ t("console.send") }} <span class="kbd">{{ submitBareEnter ? "↵" : submitShortcut }}</span>
             </button>
           </div>
         </div>
