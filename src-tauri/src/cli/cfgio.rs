@@ -5,7 +5,9 @@ use crate::config::AppConfig;
 use crate::i18n::Lang;
 use crate::secrets;
 use serde_json::Value;
-use std::io::{BufRead, IsTerminal, Read, Write};
+#[cfg(unix)]
+use std::io::BufRead;
+use std::io::{IsTerminal, Read, Write};
 
 /// 本地化：按语言选英 / 中。CLI 配置命令专属文案用它（既有错误仍走 `i18n::tr`）。
 pub fn t(lang: Lang, en: &str, zh: &str) -> String {
@@ -38,15 +40,9 @@ pub fn block_on<F: std::future::Future>(fut: F) -> F::Output {
         .block_on(fut)
 }
 
-/// daemon 运行状态（仅 unix 有 daemon；非 unix 无 `client` 模块，一律 None）。
-/// 供 channel list / doctor 跨平台复用，避免在 Windows 直接引用 unix-only 的 `crate::client`。
-#[cfg(unix)]
+/// Return daemon status on every supported desktop platform.
 pub fn daemon_status() -> Option<crate::ipc::StatusInfo> {
     block_on(crate::client::request_status())
-}
-#[cfg(not(unix))]
-pub fn daemon_status() -> Option<crate::ipc::StatusInfo> {
-    None
 }
 
 // ——— 点号路径读写（基于 serde_json::Value，camelCase）———

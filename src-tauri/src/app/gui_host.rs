@@ -268,6 +268,10 @@ fn tray_supported() -> bool {
     {
         std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
     }
+    #[cfg(windows)]
+    {
+        true
+    }
 }
 
 // ===== 入口：在 launch() 的 setup 中调用 =====

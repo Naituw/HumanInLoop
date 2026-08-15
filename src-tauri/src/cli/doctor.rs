@@ -13,15 +13,9 @@ use crate::integrations::{
 
 const AGENTS: [&str; 4] = ["cursor", "claude", "codex", "grok"];
 
-#[cfg(unix)]
 fn daemon_login_ready() -> bool {
     crate::integrations::login_item::daemon_is_installed()
         && !crate::integrations::login_item::daemon_needs_update()
-}
-
-#[cfg(not(unix))]
-fn daemon_login_ready() -> bool {
-    false
 }
 
 pub fn dispatch(args: &[String], lang: Lang) {

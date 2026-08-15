@@ -265,7 +265,6 @@ fn cascade_popup_position(win: &tauri::WebviewWindow, cascade_index: u32) {
 
 /// Present a fully rendered helper window according to the daemon-owned focus decision.
 /// Foreground uses the regular Tauri activation path; background cascade must not activate NSApp.
-#[cfg(unix)]
 pub(crate) fn finalize_popup_show(
     app: &tauri::AppHandle,
     presentation: crate::ipc::PopupPresentation,

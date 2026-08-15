@@ -1363,7 +1363,6 @@ fn effective_popup_history_context(
     app: &AppHandle,
     state: &State<AppState>,
 ) -> (String, Option<crate::gui_host::HistoryOpenTarget>) {
-    #[cfg(unix)]
     if let Some(warm) = app.try_state::<crate::app::WarmPopup>() {
         if let Some(show) = warm.show.lock().ok().and_then(|show| show.clone()) {
             let target = history_open_target(
@@ -1384,7 +1383,6 @@ fn effective_popup_history_context(
     (state.project.clone(), target)
 }
 
-#[cfg(unix)]
 fn route_open_history_window(
     app: AppHandle,
     project: String,
@@ -1412,7 +1410,6 @@ fn route_open_history_window(
 
 /// Resolve the popup's daemon-validated Agent Window target. Warm helpers keep per-request context
 /// in `WarmPopup.show`; cold helpers keep it in `AppState`.
-#[cfg(unix)]
 fn effective_popup_agent_console_session(
     app: &AppHandle,
     state: &State<AppState>,
@@ -1432,30 +1429,22 @@ fn effective_popup_agent_console_session(
 /// The frontend supplies no session identifier of its own; absence means the shortcut is invalid.
 #[tauri::command]
 pub fn open_agent_console(app: AppHandle, state: State<AppState>) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        let session_id = effective_popup_agent_console_session(&app, &state)
-            .filter(|session_id| !session_id.trim().is_empty())
-            .ok_or_else(|| "no matched agent session".to_string())?;
-        route_open_window(
-            app,
-            crate::gui_host::WindowKind::Agents,
-            false,
-            None,
-            Some(crate::gui_host::InterjectTarget {
-                session: session_id,
-                agent: None,
-                cwd: None,
-            }),
-            None,
-        );
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (app, state);
-        Err("unsupported".to_string())
-    }
+    let session_id = effective_popup_agent_console_session(&app, &state)
+        .filter(|session_id| !session_id.trim().is_empty())
+        .ok_or_else(|| "no matched agent session".to_string())?;
+    route_open_window(
+        app,
+        crate::gui_host::WindowKind::Agents,
+        false,
+        None,
+        Some(crate::gui_host::InterjectTarget {
+            session: session_id,
+            agent: None,
+            cwd: None,
+        }),
+        None,
+    );
+    Ok(())
 }
 
 /// 从弹窗导航栏打开独立历史窗口：路由到统一宿主（全局单窗），默认过滤到弹窗所属项目。
@@ -2142,12 +2131,9 @@ pub async fn fork_task_init(session: String) -> Result<ForkTaskInit, String> {
     if !crate::integrations::agent_launch::terminal_available() {
         return Err("Terminal.app is unavailable".into());
     }
-    #[cfg(unix)]
     let snapshot = crate::client::agents_snapshot_if_running()
         .await
         .ok_or_else(|| "Agent daemon is unavailable".to_string())?;
-    #[cfg(not(unix))]
-    let snapshot = serde_json::Value::Array(Vec::new());
     let source = fork_task_source(&snapshot, session.trim(), true)?;
     let kind = crate::agents::AgentKind::parse(&source.kind).ok_or("unknown source Agent")?;
     let readiness = tokio::task::spawn_blocking(move || {
@@ -2219,7 +2205,6 @@ pub async fn fork_task_launch(
     })
     .await
     .map_err(|error| error.to_string())??;
-    #[cfg(unix)]
     crate::client::register_launch(&record).await;
     let launch_id = record.id.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -2229,7 +2214,6 @@ pub async fn fork_task_launch(
     .await
     .map_err(|error| error.to_string())?;
     if result.is_err() {
-        #[cfg(unix)]
         crate::client::cancel_launch(launch_id).await;
     }
     result
@@ -2745,7 +2729,6 @@ pub fn agent_permission_set(
 ) -> Result<(), String> {
     let a = parse_agent(&agent)?;
     agent_permission::set_enabled(a, enabled).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
     crate::app::gui_host::refresh_integration_updates(&app);
     Ok(())
 }
@@ -2774,7 +2757,6 @@ pub fn agent_mode_set(app: tauri::AppHandle, agent: String, mode: String) -> Res
         crate::i18n::tr(crate::i18n::Lang::current(), "cmd.unknownMode").to_string()
     })?;
     agent_mode::set(a, m).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
     crate::app::gui_host::refresh_integration_updates(&app);
     Ok(())
 }
@@ -2784,7 +2766,6 @@ pub fn agent_mode_set(app: tauri::AppHandle, agent: String, mode: String) -> Res
 pub fn agent_mode_update(app: tauri::AppHandle, agent: String) -> Result<(), String> {
     let a = parse_agent(&agent)?;
     agent_mode::update(a).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
     crate::app::gui_host::refresh_integration_updates(&app);
     Ok(())
 }
@@ -2801,7 +2782,6 @@ pub fn agent_mode_update_artifact(
         crate::i18n::tr(crate::i18n::Lang::current(), "cmd.unknownArtifact").to_string()
     })?;
     agent_mode::update_artifact(a, art).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
     crate::app::gui_host::refresh_integration_updates(&app);
     Ok(())
 }
@@ -3974,16 +3954,13 @@ pub async fn update_check(
     let info = match checked {
         Ok(info) => crate::update::persist_check_result(info, manual),
         Err(error) => {
-            #[cfg(unix)]
             if manual {
                 crate::app::gui_host::sync_update_check_error(&app, &error.to_string());
             }
             return Err(error.to_string());
         }
     };
-    #[cfg(unix)]
     crate::app::gui_host::sync_checked_update(&app, &info, manual);
-    #[cfg(unix)]
     crate::client::notify_update_state_changed().await;
     Ok(info)
 }
@@ -4032,7 +4009,6 @@ pub async fn update_apply(app: AppHandle) -> Result<(), String> {
     });
     updater.apply(Some(cb)).await.map_err(|e| e.to_string())?;
     crate::update::state::set_pending(true);
-    #[cfg(unix)]
     crate::client::notify_update_applied().await;
     let _ = app.emit("update_apply_finished", ());
     Ok(())
