@@ -479,37 +479,11 @@ pub fn fmt_duration(secs: u64, lang: Lang) -> String {
 }
 
 /// 本地时区绝对时刻：与 `now` 同日 → `HH:MM:SS`；跨日 → `MM-DD HH:MM`。
-#[cfg(unix)]
 pub fn fmt_local_time(epoch: u64, now: u64) -> String {
-    fn local_tm(t: u64) -> Option<libc::tm> {
-        let secs = t as libc::time_t;
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        let ok = unsafe { !libc::localtime_r(&secs, &mut tm).is_null() };
-        ok.then_some(tm)
-    }
-    let (Some(tm), Some(tm_now)) = (local_tm(epoch), local_tm(now)) else {
-        return fmt_utc_time(epoch, now);
-    };
-    if tm.tm_year == tm_now.tm_year && tm.tm_yday == tm_now.tm_yday {
-        format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
-    } else {
-        format!(
-            "{:02}-{:02} {:02}:{:02}",
-            tm.tm_mon + 1,
-            tm.tm_mday,
-            tm.tm_hour,
-            tm.tm_min
-        )
-    }
+    crate::local_time::compact(epoch, now).unwrap_or_else(|| fmt_utc_time(epoch, now))
 }
 
-/// Windows fallback when libc localtime_r is unavailable.
-#[cfg(not(unix))]
-pub fn fmt_local_time(epoch: u64, now: u64) -> String {
-    fmt_utc_time(epoch, now)
-}
-
-/// UTC 兜底格式化（`localtime_r` 不可用时）。
+/// UTC fallback for timestamps outside the maintained timezone backend's range.
 fn fmt_utc_time(epoch: u64, now: u64) -> String {
     let (h, m, s) = ((epoch / 3600) % 24, (epoch / 60) % 60, epoch % 60);
     if epoch / 86400 == now / 86400 {

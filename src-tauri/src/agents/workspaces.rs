@@ -266,10 +266,15 @@ fn scan_grok(out: &mut Vec<(PathBuf, AgentKind, u64)>) {
 
 fn scan_cursor(out: &mut Vec<(PathBuf, AgentKind, u64)>) {
     let root = paths::cursor_dir().join("projects");
+    let mut seen = HashSet::new();
+    for (path, modified) in super::cursor_vscdb::recent_workspaces() {
+        if seen.insert(path.clone()) {
+            out.push((path, AgentKind::Cursor, modified));
+        }
+    }
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
-    let mut seen = HashSet::new();
     for entry in entries.flatten().take(MAX_SCAN_FILES_PER_AGENT) {
         let Ok(kind) = entry.file_type() else {
             continue;
@@ -278,7 +283,7 @@ fn scan_cursor(out: &mut Vec<(PathBuf, AgentKind, u64)>) {
             continue;
         }
         let encoded = entry.file_name().to_string_lossy().to_string();
-        let matches = recover_cursor_path(&encoded, Path::new("/"), 0, 2);
+        let matches = recover_cursor_project_key(&encoded);
         if matches.len() != 1 {
             continue;
         }
@@ -294,6 +299,39 @@ fn scan_cursor(out: &mut Vec<(PathBuf, AgentKind, u64)>) {
             .unwrap_or(0);
         out.push((path, AgentKind::Cursor, modified));
     }
+}
+
+#[cfg(not(windows))]
+fn recover_cursor_project_key(encoded: &str) -> Vec<PathBuf> {
+    recover_cursor_path(encoded, Path::new("/"), 0, 2)
+}
+
+#[cfg(windows)]
+fn recover_cursor_project_key(encoded: &str) -> Vec<PathBuf> {
+    let Some((root, remainder)) = windows_cursor_key_root(encoded) else {
+        return Vec::new();
+    };
+    recover_cursor_path(remainder, Path::new(&root), 0, 2)
+}
+
+/// Parse the unambiguous Windows key prefixes Cursor emits for drive paths. An explicit `UNC`
+/// prefix is also accepted for forward compatibility; current UNC workspaces are recovered from
+/// Cursor's exact database index before this lossy-key fallback is considered.
+fn windows_cursor_key_root(encoded: &str) -> Option<(String, &str)> {
+    let mut parts = encoded.splitn(2, '-');
+    let first = parts.next()?;
+    let remainder = parts.next().unwrap_or("");
+    if first.len() == 1 && first.as_bytes()[0].is_ascii_alphabetic() {
+        return Some((format!("{}:\\", first), remainder));
+    }
+    if first.eq_ignore_ascii_case("unc") {
+        let mut unc = remainder.splitn(3, '-');
+        let server = unc.next().filter(|part| !part.is_empty())?;
+        let share = unc.next().filter(|part| !part.is_empty())?;
+        let remainder = unc.next().unwrap_or("");
+        return Some((format!("\\\\{server}\\{share}"), remainder));
+    }
+    None
 }
 
 /// Resolve Cursor's hyphen-joined project key against the real filesystem. Exploration stops as
@@ -458,5 +496,22 @@ mod tests {
         );
         let matches = recover_cursor_path(&encoded, root, 0, 2);
         assert_eq!(matches.len(), 2, "ambiguity must surface both candidates");
+    }
+
+    #[test]
+    fn windows_cursor_key_roots_preserve_drive_and_unc_identity() {
+        assert_eq!(
+            windows_cursor_key_root("C-Users-Alice-Repo"),
+            Some(("C:\\".to_string(), "Users-Alice-Repo"))
+        );
+        assert_eq!(
+            windows_cursor_key_root("e-project-中文-Space Here"),
+            Some(("e:\\".to_string(), "project-中文-Space Here"))
+        );
+        assert_eq!(
+            windows_cursor_key_root("UNC-server-share-Team-Repo"),
+            Some(("\\\\server\\share".to_string(), "Team-Repo"))
+        );
+        assert_eq!(windows_cursor_key_root("Users-Alice-Repo"), None);
     }
 }

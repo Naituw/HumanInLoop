@@ -32,6 +32,7 @@ mod hooks;
 mod i18n;
 mod integrations;
 mod ipc;
+mod local_time;
 #[cfg(target_os = "macos")]
 mod macos_dock_icon;
 #[cfg(target_os = "macos")]

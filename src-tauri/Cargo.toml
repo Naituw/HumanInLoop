@@ -43,6 +43,9 @@ uuid = { version = "1", features = ["v4"] }
 # 会话型渠道公共接口（Telegram/钉钉等共享多问题驱动逻辑）需要 async trait。
 async-trait = "0.1"
 dirs = "6"
+# Shared local-time conversion. Chrono's `Local` backend uses each platform's maintained
+# timezone APIs, including Windows DST rules.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 fs2 = "0.4"
 base64 = "0.22"
 anyhow = "1"
@@ -106,6 +109,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_Storage_FileSystem",
   "Win32_System_Diagnostics_Debug",
   "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Console",
   "Win32_System_RemoteDesktop",
   "Win32_System_Registry",
   "Win32_System_Threading",
