@@ -780,7 +780,7 @@ pub fn task_with_attachments(task: &str, files: &[String], warnings: &[String]) 
 fn resolve_login_shell_executable(name: &str) -> Option<String> {
     #[cfg(windows)]
     {
-        return resolve_windows_executable(name);
+        resolve_windows_executable(name)
     }
     #[cfg(unix)]
     {

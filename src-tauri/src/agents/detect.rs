@@ -428,8 +428,10 @@ fn process_chain(start_pid: u32) -> Vec<ProcEntry> {
         return Vec::new();
     }
     let mut table = HashMap::new();
-    let mut entry = PROCESSENTRY32W::default();
-    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
     let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
     while has_entry {
         let end = entry
@@ -602,8 +604,10 @@ fn toolhelp_parent_pid(pid: u32) -> Option<u32> {
     if snapshot == INVALID_HANDLE_VALUE {
         return None;
     }
-    let mut entry = PROCESSENTRY32W::default();
-    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
     let mut found = None;
     let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
     while has_entry {

@@ -557,6 +557,20 @@ fn run(cmd: &str, args: &[&str]) -> std::io::Result<()> {
     }
 }
 
+#[cfg(windows)]
+pub fn is_installed() -> bool {
+    windows_run::read(WINDOWS_GUI_VALUE).is_ok_and(|value| value.is_some())
+}
+
+#[cfg(windows)]
+pub fn needs_update() -> bool {
+    match windows_run::read(WINDOWS_GUI_VALUE) {
+        Ok(Some(installed)) => installed != windows_command(&["--gui-host"]),
+        Ok(None) => false,
+        Err(_) => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -648,18 +662,5 @@ mod tests {
             Some(v) => std::env::set_var(key, v),
             None => std::env::remove_var(key),
         }
-    }
-}
-#[cfg(windows)]
-pub fn is_installed() -> bool {
-    windows_run::read(WINDOWS_GUI_VALUE).is_ok_and(|value| value.is_some())
-}
-
-#[cfg(windows)]
-pub fn needs_update() -> bool {
-    match windows_run::read(WINDOWS_GUI_VALUE) {
-        Ok(Some(installed)) => installed != windows_command(&["--gui-host"]),
-        Ok(None) => false,
-        Err(_) => true,
     }
 }
