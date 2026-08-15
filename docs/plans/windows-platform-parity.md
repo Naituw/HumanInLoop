@@ -2,7 +2,7 @@
 
 对应规格：[`../specs/windows-platform-parity.md`](../specs/windows-platform-parity.md)
 
-状态：**P0–P6 与代码级 P7/P8 已实现；等待外部发布验收**
+状态：**P0–P6 主链路已实现；P7 对齐复审与缺口收口进行中；P8 等待外部发布验收**
 
 策略：长期开发分支，小提交、阶段 gate，完整验收后一次合并主线
 
@@ -427,7 +427,8 @@ P0 启动时按以下顺序工作：
   安全解析并调用 `npm.cmd`。worker 日志轮换，过期临时目录自动清理。
 - P7 维护面：增加幂等 `agents cleanup`、`scripts/uninstall-windows.ps1`（默认保留用户数据，
   `-PurgeData` 显式清除）与 `scripts/verify-windows-signature.ps1`；installer 使用 staging + hash +
-  `Move-Item` 事务复制，并幂等维护当前用户 `PATH`；uninstaller 只移除对应安装目录。
+  `Move-Item` 事务复制，幂等维护当前用户 `PATH` 和带所有权标记的 `WindowsApps\AskHuman.cmd`；uninstaller
+  只移除对应安装目录和自身 launcher。`.cmd` 安装入口在默认 Execution Policy 下调用 PS5 脚本。
 - P8 代码/CI：release workflow 使用 `azure/artifact-signing-action@v2` 的 OIDC 身份，统一 timestamp，
   并在打包前阻断验证 signer subject 与时间戳。生产 Azure account、certificate profile 和 subject 仍需
   发布环境提供；仓库没有长期私钥。
@@ -466,3 +467,181 @@ PowerShell 5.1、PowerShell 7.6.5。SSH 仅用于构建与自动测试，符合�
 
 ARM64、原生 installer 与 Windows Server/RDS 多会话仍按已确认范围另立项目，不属于上述 release
 blocking gate。
+
+## 17. P7 对齐复审与缺口收口计划（2026-08-15）
+
+### 17.1 背景与完成口径
+
+首轮实现已经打通 Windows daemon、GUI Host、Agent、主动命令、更新和安装主链路，但二次全仓审计与
+Win11 桌面试用证明，仍有一些功能被旧的 `cfg(unix)`、macOS 展示假设或历史目录命名遗漏。因此 §16
+不能解释为“Windows 已完全对齐”，本节是进入发布 Gate 前必须执行的收口批次。
+
+本批次完成口径不是“Windows 能编译”，而是：
+
+1. 除明确列入“有意的平台差异”外，Windows 上的入口、行为、展示、错误类别与 macOS/Linux 对齐；
+2. shared daemon 代码在目录和模块边界上也不再伪装成 Unix 实现；
+3. 三项 Win11 实机反馈（应用图标、飞书自动识别关窗、macOS 快捷键文案）均有回归测试与桌面证据；
+4. Windows 全量自动测试、Codex E2E 和桌面矩阵重跑，无新增 macOS/Linux 回归；
+5. 未完成的 Win10、生产签名、SmartScreen 与真实渠道发布 Gate 仍明确保留，不以 mock 结果冒充。
+
+### 17.2 已确认缺口清单
+
+| 编号 | 范围 | 已确认事实 | 目标 |
+|---|---|---|---|
+| C1 | 设置页能力 | Advanced、实验项、tray、预热、Agent task、Windows Terminal 等仍有旧平台门禁；当前工作区已有第一轮修复但未完整验收 | Windows 显示并执行所有已支持能力，搜索索引和说明同步 |
+| C2 | 应用图标 | macOS 运行时内嵌 `icons/icon.png`（机器人问号）；Windows bundle 的 `icon.ico`/多尺寸 PNG 是另一套青黄图标 | 以 `icon.png` 为唯一源重新生成全套 bundle 资源；Windows EXE、任务栏、窗口与文件属性一致 |
+| C3 | 快捷键 | 业务事件多数已接受 Meta/Ctrl，但提交、取消、选项、导航、插话、任务、待办、Console、冲突提示与录制预览多处写死 `⌘`；默认 `cmd+d` 在 Windows 还存在匹配语义歧义 | 建立“主修饰键”抽象：macOS=`⌘`，Windows/Linux=`Ctrl`；展示与实际触发一致，旧配置兼容 |
+| C4 | 飞书自动识别 | 前端流程只有 prepare → 最长 120 秒 wait → 成功/错误/取消，不包含关窗操作；因此 Win11 上窗口消失需从 GUI Host 生命周期、进程异常和长连接路径定位 | 自动识别成功、超时、取消、daemon 断连时设置窗口都保持打开；异常有无敏感信息的诊断记录 |
+| C5 | 本地时间 | `show_last` 绝对时间和 `watch` 时间在 Windows 仍走 UTC fallback | Windows 使用系统本地时区，与 macOS/Linux 输出一致 |
+| C6 | Secret 输入 | CLI secret prompt 在 Windows 使用可见 `read_line` | 使用 Windows console API 隐藏输入并可靠恢复 echo；重定向 stdin 时 fail closed |
+| C7 | Cursor | `state.vscdb` 只搜 macOS/Linux HOME 路径；最近 workspace 恢复以 `/` 为根 | 支持 `%APPDATA%\\Cursor\\User\\globalStorage\\state.vscdb`、盘符/UNC/case 语义及路径含空格中文 |
+| C8 | Agent 定位 | terminal focus backend 只实现 macOS；Windows 虽可用 `wt.exe` 启动任务，却不能把已有任务对应 tab/window 精确前置 | 为 Windows Terminal 建立可验证的稳定任务—window/tab 关联；找不到时返回明确错误，不猜 PID |
+| C9 | Dev Instance | Windows `AskHuman dev` 将 daemon 报为 n/a，installer 不识别 `.askhuman-dev/bin`，相关说明偏 Unix | Windows worktree/Dev Instance 可启停、隔离 daemon/GUI Host/channel preset，并可安装卸载 |
+| C10 | shared 架构 | shared daemon 仍由 `#[path="unix_impl/mod.rs"]` 和 `daemon/unix_impl` 承载 | 机械迁到 `daemon/runtime`/`daemon/server`，平台 adapter 单独命名；行为与协议零变化 |
+| C11 | GUI Host 登录 | CLI 拉起已隐藏 console；HKCU Run 直接启动 console-subsystem EXE 是否闪窗尚未经过真实注销/登录验证 | 实机验证；如闪窗，改用受管无控制台 launcher/等价启动方式，并保证卸载可清理 |
+| C12 | 文档与旧文案 | README、overview、IM command、配置说明、TS 注释和 Windows unsupported 文案仍与实现冲突 | 以最终行为统一更新，移除错误的 macOS/Linux-only 声明 |
+
+有意保留的平台差异：macOS 的材质/动画、Quick Look、SpeechAnalyzer；Windows 的 Credential Manager、
+NTFS profile ACL 继承、`MessageBeep`、named pipe、HKCU Run；未安装 Windows Terminal 时返回清晰的可恢复
+错误。系统托盘的多状态单色图标是状态语义资源，不随 C2 替换为应用图标。
+
+### 17.3 工作流 A：设置页、图标与快捷键展示
+
+#### A1. 设置页能力收口
+
+- 复核并完成当前工作区中的 Advanced tab、生命周期、Agent task、tray、实验项与 Windows Terminal 变更；
+- 设置搜索按“能力是否存在”建索引，Windows 已支持的系统声音不能再被 macOS 条件排除；
+- 删除 `windowsUnsupported` 等失效分支，修正 `types.ts`/Rust command 中“仅 macOS/Linux”的旧注释；
+- 增加 Windows platform mock 的 tab/search/component tests，并在 Win11 逐项点击验证。
+
+#### A2. 单一应用图标源
+
+- 将 `src-tauri/icons/icon.png` 定为 canonical source，使用可复现脚本/固定工具生成 32、128、256、ICNS、
+  ICO 多分辨率资源，不手工维护彼此不同的位图；
+- 添加资源校验：必需尺寸/alpha 存在，生成物清单固定，避免以后只换 macOS runtime PNG；
+- 重新构建 Windows release binary 后验证资源管理器、EXE 属性、任务栏、窗口标题栏和 Alt+Tab；清理
+  Windows icon cache 只作为验证手段，不写入安装逻辑；
+- 保留 `icons/tray/*` 的 idle/active/stopped/attention 状态图标。
+
+#### A3. 平台主修饰键
+
+- 在前端 platform/shortcut 层提供唯一 API：主修饰键事件判定、短/长标签、组合键格式化、录制预览；
+- 将配置中的历史 `cmd` token 解释为“主修饰键”以兼容默认 `cmd+d`：macOS 匹配 Meta，Windows/Linux
+  匹配 Ctrl；显式 Ctrl/Alt/Shift 组合继续可解析，保存时输出稳定规范串；
+- 替换 Popup、Confirm、Interject、Todos、New/Fork Task、Console 和 Settings 中所有用户可见的硬编码
+  `⌘`，i18n 冲突文案改为参数化标签；
+- 测试 macOS `⌘↵/⌘W/⌘1`、Windows/Linux `Ctrl+Enter/Ctrl+W/Ctrl+1` 的展示和触发严格一致，覆盖
+  IME、裸 Enter 模式、可定制语音快捷键及旧配置载入。
+
+### 17.4 工作流 B：飞书自动识别关窗专项
+
+先复现和留证，再改生命周期；不把“延长超时”当作修复。
+
+1. 在 GUI Host 增加最小诊断：进程启动/退出原因、窗口 create/destroy/recount、panic/abort 可定位信息、
+   detect 阶段（prepare/wait/success/cancel/timeout/daemon disconnect）；日志不得包含 App Secret、token、
+   open_id 或识别码。
+2. 在同一 Win11 配置下分别从命令、tray 与设置入口打开 Channels，启动飞书自动识别，记录
+   12 秒 host grace、15 秒 binary watch、120 秒 detect timeout 前后的进程、窗口和 daemon 状态；同时检查
+   Windows Application Error/WER 事件，区分“窗口被销毁”“GUI Host 正常退出”“进程 crash”。
+3. 根据证据修复对应层：
+   - 若是窗口租约/计数错误，使 hosted window 在长 Tauri command 期间仍持有 host lease；
+   - 若是 host 换新，binary refresh 只能在真实零窗口时发生；
+   - 若是 WebSocket/FFI panic，消除 panic/abort 并把错误返回 UI；
+   - 若是 daemon 断连，wait 返回可恢复错误且窗口继续存在；
+   - 将全局单槽取消状态收敛为明确的 detect operation identity，避免旧请求误取消新请求。
+4. 增加可控 mock 长连接集成测试，至少让窗口跨过 12 秒、15 秒和 120 秒边界，覆盖成功、取消、超时、
+   daemon restart、重复点击与关闭窗口后的连接清理。
+5. 使用真实飞书凭据做一次 Win11 成功识别和一次取消；只记录结果与时间，不保存凭据/识别值。
+
+### 17.5 工作流 C：Windows 运行时与 Agent 细节
+
+#### C1. 时间、secret 与用户路径
+
+- 将本地时间转换抽为跨平台 helper，Windows 使用系统时区 API/受维护 crate；以固定时区 fixture 测
+  DST、午夜与无效时间；
+- Windows secret prompt 使用 console mode guard，成功、Ctrl+C、EOF 和错误路径均恢复输入模式；
+- `~`/home 解析统一改用 `dirs::home_dir()`，Windows path 测试不再依赖 `HOME`。
+
+#### C2. Cursor Windows 数据路径
+
+- 从 Roaming AppData 寻找 Cursor global storage，并保留可注入候选路径供 unit test；
+- workspace key 解析使用盘符/UNC-aware root，不构造 Unix `/`；对 `C:\\`、大小写、空格、中文、UNC、
+  不存在/拒绝访问建 fixture；
+- 在 VM 有 Cursor 时做 read-only smoke；未安装时只声称 simulated coverage。
+
+#### C3. Windows Terminal focus
+
+- 先用 VM 当前 `wt.exe` 版本验证稳定 window name、tab title 和 `focus-tab` 能力；启动 AskHuman task 时
+  生成不可碰撞 identity 并记入 Agent launch/registry；
+- focus 只能使用已登记 identity 找到目标 window/tab，不通过模糊标题或任意子进程 PID 猜测；
+- 覆盖窗口被关、tab 被改名、Terminal 重启、多 task/多 workspace 与 Terminal 未安装；失败时 GUI/IM
+  返回相同错误类别。
+
+### 17.6 工作流 D：Dev Instance、GUI Host 启动与 shared 架构
+
+#### D1. Windows Dev Instance
+
+- 把 `cli/dev_cmd.rs` 的 daemon/host 操作接到跨平台 lifecycle API，删除 Windows n/a；
+- `install-windows.ps1/.cmd` 识别 worktree Dev Instance，安装到隔离的 `.askhuman-dev/bin`，保持 pipe、锁、
+  配置、日志与正式实例隔离；
+- 按 `agent-worktree-setup.md` 的既有语义支持 channel preset 询问、enable/status/disable/uninstall；添加
+  两个 worktree 并存测试，禁止覆盖主实例二进制或 hooks。
+
+#### D2. 登录启动无闪窗
+
+- 在 Win11 真实注销/登录观察 daemon 与 GUI Host 是否出现控制台闪窗，记录 HKCU Run 命令、父进程、
+  GUI session 和恢复状态；
+- 若直接 console-subsystem EXE 会闪窗，引入受管 hidden launcher（或等价 Windows API 启动层），所有
+  login entry 带所有权标记，升级/卸载/Dev Instance 可精确清理；
+- 验证 tray off/active/always 与 daemon on-demand/keep-alive 的组合，不因隐藏 console 吞掉 CLI 输出。
+
+#### D3. shared daemon 目录归位
+
+- 先锁定协议/行为测试，再把 `daemon/unix_impl` 机械迁移为 `daemon/runtime` 或 `daemon/server`；
+- socket/named-pipe、Unix signal、Windows control/process 等真实差异仅留在 platform adapter；
+- 迁移提交只做模块/路径/注释变化，不夹带功能修复；三平台测试结果必须逐项相同。
+
+### 17.7 实施顺序与提交边界
+
+按风险和可回滚性执行：
+
+1. 提交当前已完成但未归档的 Windows launcher、设置能力与 Windows Terminal 变更；
+2. `docs(windows)`：提交本复审计划；
+3. `fix(windows,ui)`：图标、快捷键展示/匹配、设置搜索与旧门禁；
+4. `fix(channels,windows)`：飞书自动识别关窗根因与回归测试；
+5. `fix(windows)`：本地时间、secret prompt、home/Cursor path；
+6. `feat(agents,windows)`：Windows Terminal 精确 focus；
+7. `feat(dev,windows)`：Dev Instance 与无闪窗 login 启动；
+8. `refactor(daemon)`：shared runtime 目录归位；
+9. `docs(windows)` / `test(windows)`：文档、矩阵与最终证据。
+
+若前一步 gate 未通过，不进入下一步；尤其不在飞书窗口问题仍不可复现/不可解释时开始 daemon 目录迁移。
+
+### 17.8 验证矩阵与退出条件
+
+#### 自动化
+
+- macOS 本机：`pnpm test`、`pnpm build`、Node tests、Rust full tests、Clippy；每次逻辑变更后执行
+  `./scripts/install.sh`，后续 AskHuman 使用新安装版本；
+- Windows VM：PS5/PS7 installer 与 launcher tests、Vitest/build、Rust full tests、Clippy、release build、
+  `doctor --json`、daemon lifecycle、Codex authenticated E2E；
+- 新增：platform shortcut unit/component tests、icon generation check、detect delayed mock integration、Windows
+  local-time/secret/paths/Cursor/Terminal-focus/Dev Instance tests。
+
+#### Win11 桌面验收
+
+- 应用图标五处一致；所有快捷键徽标均为 Ctrl 样式且实际可触发；
+- Advanced/实验/tray/声音/Agent task 可见可用；
+- 飞书自动识别成功/取消/120 秒超时不关设置窗口；
+- Windows Terminal 新建、Fork、精确 focus；tray/窗口单例、登录无闪窗、注销重登恢复；
+- 新 PowerShell/cmd 会话均可直接运行 `AskHuman`，卸载只清理托管 launcher。
+
+#### 仍需外部完成
+
+- 干净 Win10 22H2 核心矩阵；
+- 生产 Authenticode + timestamp + SmartScreen；
+- 最终签名包 direct/npm update/rollback；
+- 若飞书以外渠道没有真实凭据，至少一个真实渠道 smoke，其余保持 mock 标记。
+
+只有本节所有代码/Win11 项通过、外部项继续清晰列为发布 blocker，且 overview/spec/README 与实际行为一致
+时，才能把状态改回“代码级 P7 完成”。
