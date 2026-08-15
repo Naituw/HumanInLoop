@@ -665,7 +665,7 @@ pub struct TodosInit {
     lang: String,
     /// 与弹窗一致的提交快捷键：`cmdEnter`（⌘/Ctrl+Enter）或 `enter`（裸 Enter）。
     popup_submit_key: String,
-    /// 「创建任务」入口是否可用（spec gui-agent-task-launch G1）：macOS 且 Terminal.app 存在。
+    /// Whether a supported platform terminal is available for creating Agent tasks.
     new_task_supported: bool,
 }
 
@@ -1165,7 +1165,7 @@ pub struct AgentsInit {
     lang: String,
     /// 与弹窗一致的提交快捷键（控制台输入框 ⌘↵ 发送）。
     popup_submit_key: String,
-    /// 「新建任务」入口是否可用（spec gui-agent-task-launch G1 同口径）：macOS 且 Terminal.app 存在。
+    /// Whether a supported platform terminal is available for creating Agent tasks.
     new_task_supported: bool,
 }
 
@@ -1691,26 +1691,6 @@ pub fn agent_task_workspace_add(
     crate::agents::workspaces::add(std::path::Path::new(&path), false)
 }
 
-/// Open the native system directory picker used by the Agent-task workspace manager.
-#[tauri::command]
-pub fn agent_task_workspace_pick(app: AppHandle) -> Result<Option<String>, String> {
-    #[cfg(target_os = "macos")]
-    {
-        use std::sync::mpsc::channel;
-        let (tx, rx) = channel();
-        app.run_on_main_thread(move || {
-            let _ = tx.send(crate::macos_menu::choose_directory());
-        })
-        .map_err(|e| e.to_string())?;
-        rx.recv().map_err(|e| e.to_string())?
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = app;
-        Err("Agent task workspace picker is only supported on macOS".to_string())
-    }
-}
-
 #[tauri::command]
 pub fn agent_task_workspace_pin(path: String, pinned: bool) -> Result<(), String> {
     crate::agents::workspaces::set_pinned(&path, pinned)
@@ -1734,26 +1714,10 @@ pub async fn agent_task_readiness(
         .map_err(|e| e.to_string())
 }
 
-/// Open a harmless Terminal.app self-check. It never resolves or starts an Agent binary.
+/// Open a harmless platform terminal self-check. It never resolves or starts an Agent binary.
 #[tauri::command]
 pub fn agent_task_test_terminal() -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let script = r#"tell application "Terminal"
-activate
-do script "printf '\\nAskHuman Terminal test succeeded.\\n'"
-end tell"#;
-        let status = std::process::Command::new("/usr/bin/osascript")
-            .args(["-e", script])
-            .status()
-            .map_err(|e| e.to_string())?;
-        status
-            .success()
-            .then_some(())
-            .ok_or_else(|| "Terminal.app rejected the test".to_string())
-    }
-    #[cfg(not(target_os = "macos"))]
-    Err("Terminal.app test is only available on macOS".to_string())
+    crate::integrations::agent_launch::test_terminal().map_err(|error| error.to_string())
 }
 
 // ===== 「新建 Agent 任务」窗口（spec gui-agent-task-launch）=====
@@ -1872,7 +1836,7 @@ pub fn project_key_of(dir: String) -> String {
     crate::project::detect_from(std::path::Path::new(&dir))
 }
 
-/// 启动新任务（spec gui-agent-task-launch §2.5）：复用 IM 的 LaunchRecord + Terminal.app 链路。
+/// Start a task through the same private LaunchRecord and platform-terminal bridge used by IM.
 /// `task` 由前端拼装（选待办时 = 待办原文快照 + 空行 + 补充）；`todo_project`/`todo_id` 非空时
 /// Terminal 成功打开后 best-effort 出队（G7）。成功后 best-effort 把活跃槽切到 popup（G11）。
 #[tauri::command]
@@ -2026,7 +1990,7 @@ fn fork_task_source(
 #[tauri::command]
 pub async fn fork_task_init(session: String) -> Result<ForkTaskInit, String> {
     if !crate::integrations::agent_launch::terminal_available() {
-        return Err("Terminal.app is unavailable".into());
+        return Err("A supported system terminal is unavailable".into());
     }
     let snapshot = crate::client::agents_snapshot_if_running()
         .await

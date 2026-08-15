@@ -262,7 +262,7 @@ export interface TodosInit {
   lang: string;
   /** 与弹窗一致的提交快捷键（添加待办）。 */
   popupSubmitKey: PopupSubmitKey;
-  /** 「创建任务」入口是否可用（spec gui-agent-task-launch G1）：macOS 且 Terminal.app 存在。 */
+  /** Whether a supported platform terminal is available for creating Agent tasks. */
   newTaskSupported: boolean;
 }
 
@@ -480,7 +480,7 @@ export interface AgentsInit {
   lang: string;
   /** 与弹窗一致的提交快捷键（输入框 ⌘↵ 发送）。 */
   popupSubmitKey: PopupSubmitKey;
-  /** 「新建任务」入口是否可用（macOS 且 Terminal.app 存在）。 */
+  /** Whether a supported platform terminal is available for creating Agent tasks. */
   newTaskSupported: boolean;
 }
 

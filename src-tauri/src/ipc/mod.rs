@@ -569,7 +569,7 @@ pub enum ClientMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source_session_id: Option<String>,
     },
-    /// Remove a GUI pending launch when Terminal.app rejected the request.
+    /// Remove a GUI pending launch when the platform terminal rejected the request.
     CancelLaunch { id: String },
 }
 

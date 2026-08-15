@@ -799,8 +799,8 @@ fn build_specs(
         i18n::tr(lang, "tray.openTodos").to_string(),
         true,
     ));
-    // 「新建 Agent 任务」（spec gui-agent-task-launch G1/G12）：仅 macOS 且 Terminal.app 可用时
-    // 显示；不要求开启 agentTasks 实验功能。开启生命周期追踪时归入下方 Agent 区（作为末项，
+    // Show New Agent Task when the current platform has a supported terminal. This does not
+    // require agentTasks to be enabled. With lifecycle tracking it moves into the Agent section,
     // 用户定案 2026-07-25）；未开启（无 Agent 区）时留在窗口区兜底。
     let new_task_available = crate::integrations::agent_launch::terminal_available();
     if new_task_available && !lifecycle_on {

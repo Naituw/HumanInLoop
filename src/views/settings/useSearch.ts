@@ -3,7 +3,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Ref } from "vue";
 import { useI18n } from "vue-i18n";
 import type { AppConfig } from "../../lib/types";
-import { isMac, isWindows } from "../../lib/platform";
+import { isMac, supportsAgentTasks } from "../../lib/platform";
 import type { Tab } from "./context";
 
 // 静态索引：每条 = 一个设置项（tab + 展示/锚定标题 + 参与匹配的额外文案）。标题文本
@@ -167,35 +167,31 @@ export function useSettingsSearch(deps: {
     if (isMac) {
       list.push(e("general", "settings.popupBehavior.windowEffect"));
     }
-    if (!isWindows) {
-      list.push(
-        e("general", "settings.menuBar.title", [
-          "settings.menuBar.icon",
-          "settings.menuBar.hint",
-        ]),
-        // 高级
-        e("advanced", "settings.experimental.lifecycleTitle", [
-          "settings.experimental.lifecycleDesc",
-        ]),
-        e("advanced", "settings.experimental.daemonLifecycleTitle", [
-          "settings.experimental.daemonLifecycleLabel",
-          "settings.experimental.daemonLifecycleActivity",
-          "settings.experimental.daemonLifecycleKeepalive",
-        ]),
-        e("advanced", "settings.channels.autoActivationTitle", [
-          "settings.channels.autoActivationDesc",
-        ]),
-        e("advanced", "settings.channels.autoEndWatchTitle", [
-          "settings.channels.autoEndWatchDesc",
-        ]),
-        // 授权管理面板内容按需从 daemon 拉取，搜索只索引静态标题/描述（D48）。
-        e("advanced", "settings.permissionRules.title", [
-          "settings.permissionRules.desc",
-        ]),
-      );
-    }
-    // 「从 IM 创建 Agent 任务」在「高级」tab，仅 macOS 渲染。
-    if (!isWindows && isMac) {
+    list.push(
+      e("general", "settings.menuBar.title", [
+        "settings.menuBar.icon",
+        "settings.menuBar.hint",
+      ]),
+      e("advanced", "settings.experimental.lifecycleTitle", [
+        "settings.experimental.lifecycleDesc",
+      ]),
+      e("advanced", "settings.experimental.daemonLifecycleTitle", [
+        "settings.experimental.daemonLifecycleLabel",
+        "settings.experimental.daemonLifecycleActivity",
+        "settings.experimental.daemonLifecycleKeepalive",
+      ]),
+      e("advanced", "settings.channels.autoActivationTitle", [
+        "settings.channels.autoActivationDesc",
+      ]),
+      e("advanced", "settings.channels.autoEndWatchTitle", [
+        "settings.channels.autoEndWatchDesc",
+      ]),
+      // Permission details are loaded on demand; the static title/description remain searchable.
+      e("advanced", "settings.permissionRules.title", [
+        "settings.permissionRules.desc",
+      ]),
+    );
+    if (supportsAgentTasks) {
       list.push(
         e("advanced", "settings.agentTasks.title", [
           "settings.agentTasks.description",

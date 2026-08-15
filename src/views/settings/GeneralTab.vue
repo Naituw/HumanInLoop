@@ -11,7 +11,6 @@ const { t } = useI18n();
 const ctx = useSettingsContext();
 const {
   isMac,
-  isWindows,
   persist,
   changeTheme,
   changeLanguage,
@@ -279,8 +278,8 @@ const config = computed(() => ctx.config.value!);
     </p>
   </div>
 
-  <!-- 菜单栏图标（仅 macOS/Linux 桌面；Windows 不支持） -->
-  <div v-if="!isWindows" class="card">
+  <!-- Menu bar / system tray icon. -->
+  <div class="card">
     <p class="card-title">{{ t("settings.menuBar.title") }}</p>
     <div class="row">
       <span class="label">{{ t("settings.menuBar.icon") }}</span>
@@ -537,8 +536,8 @@ const config = computed(() => ctx.config.value!);
     </p>
   </div>
 
-  <!-- 隐蔽开关：实验性功能（Windows 不显示） -->
-  <div v-if="!isWindows" class="card experimental-toggle">
+  <!-- Hidden switch for experimental features. -->
+  <div class="card experimental-toggle">
     <div class="row">
       <div class="col">
         <span class="label">{{ t("settings.experimental.enableLabel") }}</span>

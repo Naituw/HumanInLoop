@@ -275,14 +275,80 @@ pub fn all_fork_readiness() -> Vec<ForkReadiness> {
     })
 }
 
+#[cfg(target_os = "macos")]
 pub fn terminal_available() -> bool {
-    cfg!(target_os = "macos")
-        && [
-            "/System/Applications/Utilities/Terminal.app",
-            "/Applications/Utilities/Terminal.app",
-        ]
-        .into_iter()
-        .any(|path| Path::new(path).exists())
+    [
+        "/System/Applications/Utilities/Terminal.app",
+        "/Applications/Utilities/Terminal.app",
+    ]
+    .into_iter()
+    .any(|path| Path::new(path).exists())
+}
+
+#[cfg(target_os = "windows")]
+pub fn terminal_available() -> bool {
+    resolve_windows_terminal().is_some()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn terminal_available() -> bool {
+    false
+}
+
+/// Open a harmless platform terminal self-check without resolving or starting an Agent binary.
+#[cfg(target_os = "macos")]
+pub fn test_terminal() -> Result<()> {
+    let script = r#"tell application "Terminal"
+activate
+do script "printf '\\nAskHuman Terminal test succeeded.\\n'"
+end tell"#;
+    let status = Command::new("/usr/bin/osascript")
+        .args(["-e", script])
+        .status()
+        .context("failed to ask Terminal.app to open a test window")?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| anyhow!("Terminal.app rejected the test"))
+}
+
+/// Open a harmless Windows Terminal tab using only fixed arguments.
+#[cfg(target_os = "windows")]
+pub fn test_terminal() -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+
+    let terminal = resolve_windows_terminal()
+        .ok_or_else(|| anyhow!("Windows Terminal (wt.exe) is unavailable"))?;
+    let status = Command::new(terminal)
+        .args([
+            "-w",
+            "new",
+            "new-tab",
+            "--title",
+            "AskHuman Test",
+            "cmd.exe",
+            "/d",
+            "/k",
+            "echo AskHuman Terminal test succeeded.",
+        ])
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("failed to ask Windows Terminal to open a test window")?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| anyhow!("Windows Terminal rejected the test"))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn test_terminal() -> Result<()> {
+    Err(anyhow!(
+        "Agent task terminal launch is unsupported on this platform"
+    ))
 }
 
 pub fn cleanup_expired_records() {
@@ -470,7 +536,7 @@ pub fn open_terminal(record: &LaunchRecord) -> Result<()> {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
 
-    let terminal = resolve_windows_executable("wt.exe")
+    let terminal = resolve_windows_terminal()
         .ok_or_else(|| anyhow!("Windows Terminal (wt.exe) is required to launch Agent tasks"))?;
     let mut command = Command::new(terminal);
     command
@@ -506,9 +572,7 @@ fn terminal_helper_command(askhuman_executable: &str, launch_id: &str) -> String
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn open_terminal(_record: &LaunchRecord) -> Result<()> {
-    Err(anyhow!(
-        "IM Agent launch currently requires macOS Terminal.app"
-    ))
+    Err(anyhow!("IM Agent launch is unsupported on this platform"))
 }
 
 /// Hidden helper entry point. Returns only on validation failure; success replaces this process
@@ -831,6 +895,22 @@ fn resolve_login_shell_executable(name: &str) -> Option<String> {
     }
     #[cfg(not(any(unix, windows)))]
     None
+}
+
+#[cfg(windows)]
+fn resolve_windows_terminal() -> Option<String> {
+    // Microsoft Store execution aliases are zero-byte reparse points. Rust canonicalization can
+    // reject them even though CreateProcess resolves them correctly, so prefer the fixed per-user
+    // WindowsApps alias instead of treating it like a regular Agent executable.
+    let alias = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)?
+        .join("Microsoft")
+        .join("WindowsApps")
+        .join("wt.exe");
+    if fs::symlink_metadata(&alias).is_ok() {
+        return Some(alias.to_string_lossy().to_string());
+    }
+    resolve_windows_executable("wt.exe")
 }
 
 #[cfg(windows)]

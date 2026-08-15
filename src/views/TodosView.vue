@@ -58,7 +58,7 @@ function applyPopupSubmitKey(value: unknown): void {
   }
 }
 
-// 「创建任务」入口（spec gui-agent-task-launch G1）：仅 macOS 且 Terminal.app 存在时显示。
+// Show the create-task entry when the platform has a supported terminal.
 const newTaskSupported = ref(false);
 
 async function createTaskFrom(e: TodoEntry): Promise<void> {

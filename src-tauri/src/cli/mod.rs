@@ -259,7 +259,7 @@ pub fn dispatch() {
             }
             exit(0);
         }
-        // Hidden one-time bridge used only by a newly opened Terminal.app window.
+        // Hidden one-time bridge used only by a newly opened platform terminal.
         "__agent-launch" => {
             if let Err(error) = crate::integrations::agent_launch::run_helper(&argv[2..]) {
                 eprintln!("AskHuman: {error:#}");

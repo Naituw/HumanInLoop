@@ -306,12 +306,12 @@ export default {
       testPopup: "Open test popup",
     },
     menuBar: {
-      title: "Menu bar icon",
+      title: "Status icon",
       icon: "Show icon",
       off: "Off",
       active: "When running",
       always: "Always",
-      hint: "Show a status icon in the menu bar with quick access to settings, history, agents and the daemon. \"When running\" shows it only while the daemon is active; \"Always\" keeps it resident (launches at login) and dims when the daemon is stopped.",
+      hint: "Show a status icon in the menu bar or system tray with quick access to settings, history, agents and the daemon. \"When running\" shows it only while the daemon is active; \"Always\" keeps it resident (launches at login) and dims when the daemon is stopped.",
     },
     speech: {
       title: "Voice input",
@@ -381,8 +381,6 @@ export default {
         "Other visible Stop handlers were found. They run concurrently and may independently continue or stop the Agent.",
       permissionUnsupported:
         "This agent does not support a native PermissionRequest approval flow.",
-      permissionWindowsUnsupported:
-        "Permission approval is waiting for Windows daemon support.",
       permissionClaudeHint:
         "Routes Claude Code permission prompts to AskHuman. Other project, managed, plugin, skill, or agent hooks may still affect the final decision; use /hooks in the current Claude session to inspect active sources.",
       permissionCodexHint:
@@ -417,7 +415,7 @@ export default {
     },
     agentTasks: {
       title: "Create Agent tasks from IM",
-      description: "Use /new (or !new in Slack) to choose a workspace and Agent, then continue the visible session in a new Terminal.app window. Enabling this keeps the daemon available and installs its login item.",
+      description: "Use /new (or !new in Slack) to choose a workspace and Agent, then continue the visible session in a new system terminal window. Enabling this keeps the daemon available and installs its login item.",
       permission: "Permission selection",
       permissionAsk: "Ask every time",
       permissionDefault: "Always Agent default",
@@ -434,7 +432,7 @@ export default {
       confirmCancel: "Cancel",
       confirmEnable: "Enable anyway",
       testTerminal: "Test Terminal",
-      terminalTestDone: "Terminal.app test opened successfully. No Agent was started.",
+      terminalTestDone: "The terminal test window opened successfully. No Agent was started.",
       refresh: "Refresh",
       readiness: "Agent readiness",
       ready: "Ready",
@@ -449,7 +447,7 @@ export default {
       chooseWorkspace: "Add workspace",
       workspaceActions: "Workspace actions",
       noWorkspaces: "No workspaces",
-      noWorkspacesHint: "Use the + button to choose a project folder from your Mac.",
+      noWorkspacesHint: "Use the + button to choose a project folder from this computer.",
       manuallyAdded: "Manually added",
       lastUsed: "Last used {time}",
       pin: "Pin",

@@ -1,13 +1,13 @@
 // 「从 IM 创建 Agent 任务」（实验 tab）域：开启确认弹层、就绪度、工作目录管理面板。
 import { nextTick, onBeforeUnmount, ref } from "vue";
 import { useI18n } from "vue-i18n";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   agentTaskReadiness,
   agentTaskTestTerminal,
   agentTaskWorkspaceAdd,
   agentTaskWorkspaceForget,
   agentTaskWorkspaceHide,
-  agentTaskWorkspacePick,
   agentTaskWorkspacePin,
   agentTaskWorkspaces,
   openPath,
@@ -78,7 +78,12 @@ export function useAgentTasks(core: SettingsCore) {
     taskSettingsBusy.value = true;
     taskSettingsMessage.value = "";
     try {
-      const path = await agentTaskWorkspacePick();
+      const selection = await openDialog({
+        directory: true,
+        multiple: false,
+        title: t("settings.agentTasks.chooseWorkspace"),
+      });
+      const path = Array.isArray(selection) ? selection[0] : selection;
       if (!path) return;
       await agentTaskWorkspaceAdd(path);
       await refreshAgentTaskSettings(false);

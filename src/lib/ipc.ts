@@ -119,8 +119,6 @@ export const agentTaskWorkspaces = (refresh = false) =>
   invoke<AgentTaskWorkspace[]>("agent_task_workspaces", { refresh });
 export const agentTaskWorkspaceAdd = (path: string) =>
   invoke<AgentTaskWorkspace>("agent_task_workspace_add", { path });
-export const agentTaskWorkspacePick = () =>
-  invoke<string | null>("agent_task_workspace_pick");
 export const agentTaskWorkspacePin = (path: string, pinned: boolean) =>
   invoke<void>("agent_task_workspace_pin", { path, pinned });
 export const agentTaskWorkspaceHide = (path: string, hidden: boolean) =>
@@ -573,7 +571,7 @@ export const newTaskProjectsRefreshed = () =>
 export const projectKeyOf = (dir: string) =>
   invoke<string>("project_key_of", { dir });
 
-/** 启动新任务（LaunchRecord + Terminal.app 链路）；成功后所选待办按快照出队。 */
+/** Start a task through the private LaunchRecord and platform-terminal bridge. */
 export const newTaskLaunch = (payload: {
   workspace: string;
   kind: string;

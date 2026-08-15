@@ -709,12 +709,7 @@ const {
         </p>
       </template>
       <p v-else class="card-desc agent-hint">
-        {{
-          modes[a.id].permission.unsupportedReason ===
-          'windows_daemon_unsupported'
-            ? t("settings.integration.permissionWindowsUnsupported")
-            : t("settings.integration.permissionUnsupported")
-        }}
+        {{ t("settings.integration.permissionUnsupported") }}
       </p>
     </template>
 

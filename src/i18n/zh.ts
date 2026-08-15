@@ -297,12 +297,12 @@ export default {
       testPopup: "弹出测试窗口",
     },
     menuBar: {
-      title: "菜单栏图标",
+      title: "状态图标",
       icon: "显示图标",
       off: "关闭",
       active: "运行时",
       always: "一直显示",
-      hint: "在菜单栏显示状态图标，快速打开设置、历史、Agent 状态并管理守护进程。「运行时」仅在守护进程运行时显示；「一直显示」则常驻菜单栏（开机自启），守护进程停止时图标转为停止态。",
+      hint: "在菜单栏或系统托盘显示状态图标，快速打开设置、历史、Agent 状态并管理守护进程。「运行时」仅在守护进程运行时显示；「一直显示」则常驻（开机自启），守护进程停止时图标转为停止态。",
     },
     speech: {
       title: "语音输入",
@@ -366,11 +366,10 @@ export default {
       stopHint:
         "该 Agent 自然完成一轮时，通过当前活跃弹窗或 IM 询问继续还是结束；错误和用户主动取消不会被拦截。",
       stopUnsupported:
-        "该 Agent 无法通过可阻塞的 Stop Hook 继续。Grok 本期不支持；Windows 仍在等待 Daemon 支持。",
+        "该 Agent 无法通过可阻塞的 Stop Hook 继续；当前仅 Grok 不支持。",
       stopCoexist:
         "检测到其它可见的 Stop handler；它们会并发执行，并可能独立决定继续或结束 Agent。",
       permissionUnsupported: "该 Agent 不支持原生 PermissionRequest 审批闭环。",
-      permissionWindowsUnsupported: "权限审批仍在等待 Windows Daemon 支持。",
       permissionClaudeHint:
         "将 Claude Code 权限请求交给 AskHuman。项目、managed、插件、skill 或 agent 的其它 Hook 仍可能影响最终决定；可在当前 Claude 会话使用 /hooks 查看实际来源。",
       permissionCodexHint:
@@ -405,7 +404,7 @@ export default {
     },
     agentTasks: {
       title: "从 IM 创建 Agent 任务",
-      description: "在 IM 中发送 /new（Slack 使用 !new），选择工作目录与 Agent，然后在新的 Terminal.app 窗口中继续这个可见会话。开启后会强制 Daemon 保活并安装登录项。",
+      description: "在 IM 中发送 /new（Slack 使用 !new），选择工作目录与 Agent，然后在新的系统终端窗口中继续这个可见会话。开启后会强制 Daemon 保活并安装登录项。",
       permission: "权限选择",
       permissionAsk: "每次询问",
       permissionDefault: "总是 Agent 默认",
@@ -422,7 +421,7 @@ export default {
       confirmCancel: "取消",
       confirmEnable: "继续开启",
       testTerminal: "测试 Terminal",
-      terminalTestDone: "Terminal.app 测试窗口已成功打开，未启动任何 Agent。",
+      terminalTestDone: "终端测试窗口已成功打开，未启动任何 Agent。",
       refresh: "刷新",
       readiness: "Agent 就绪状态",
       ready: "已就绪",
@@ -437,7 +436,7 @@ export default {
       chooseWorkspace: "添加工作目录",
       workspaceActions: "工作目录操作",
       noWorkspaces: "暂无工作目录",
-      noWorkspacesHint: "点击右上角的 +，从 Mac 中选择一个项目文件夹。",
+      noWorkspacesHint: "点击右上角的 +，从这台电脑中选择一个项目文件夹。",
       manuallyAdded: "手动添加",
       lastUsed: "上次使用 {time}",
       pin: "置顶",

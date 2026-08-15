@@ -6,7 +6,7 @@ import {
   agentLifecycleUninstall,
 } from "../../lib/ipc";
 import type { AgentKind, LifecycleStatus } from "../../lib/types";
-import { isMac } from "../../lib/platform";
+import { supportsAgentTasks } from "../../lib/platform";
 
 export function useLifecycleSettings(
   refreshAgentTaskSettings: (scan?: boolean) => Promise<void>,
@@ -51,7 +51,7 @@ export function useLifecycleSettings(
       if (on) await agentLifecycleInstall(kind);
       else await agentLifecycleUninstall(kind);
       lifecycleStatus.value[kind] = await agentLifecycleStatus(kind);
-      if (isMac) await refreshAgentTaskSettings(false);
+      if (supportsAgentTasks) await refreshAgentTaskSettings(false);
     } catch (e) {
       lifecycleError.value[kind] = String(e);
       // 回滚到后端真实状态，避免开关与实际不一致。
@@ -73,7 +73,7 @@ export function useLifecycleSettings(
     try {
       await agentLifecycleInstall(kind);
       lifecycleStatus.value[kind] = await agentLifecycleStatus(kind);
-      if (isMac) await refreshAgentTaskSettings(false);
+      if (supportsAgentTasks) await refreshAgentTaskSettings(false);
     } catch (e) {
       lifecycleError.value[kind] = String(e);
     } finally {
