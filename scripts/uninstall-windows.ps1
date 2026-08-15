@@ -4,9 +4,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $InstallDir = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "Programs\AskHuman" }
 $InstalledBin = Join-Path $InstallDir "AskHuman.exe"
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+. (Join-Path $ScriptDir "windows-user-path.ps1")
 
 if (Test-Path -LiteralPath $InstalledBin) {
   Write-Host "==> Removing managed Agent integrations"
@@ -47,6 +49,8 @@ if (Test-Path -LiteralPath $InstallDir) {
   Write-Host "==> Removing $InstallDir"
   Remove-Item -LiteralPath $InstallDir -Recurse -Force
 }
+
+Remove-AskHumanUserPath $InstallDir
 
 if ($PurgeData) {
   $DataDir = Join-Path $env:USERPROFILE ".askhuman"

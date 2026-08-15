@@ -81,6 +81,38 @@ jobs:
       - name: frontend and script tests
         run: pnpm test
 
+      - name: Windows maintenance scripts (PowerShell 5.1)
+        if: startsWith(matrix.os, 'windows')
+        shell: powershell
+        run: |
+          $scripts = @(
+            "scripts/install-windows.ps1",
+            "scripts/uninstall-windows.ps1",
+            "scripts/verify-windows-signature.ps1",
+            "scripts/windows-user-path.ps1",
+            "scripts/test-windows-user-path.ps1"
+          )
+          foreach ($script in $scripts) {
+            [void][scriptblock]::Create([IO.File]::ReadAllText($script))
+          }
+          ./scripts/test-windows-user-path.ps1
+
+      - name: Windows maintenance scripts (PowerShell 7)
+        if: startsWith(matrix.os, 'windows')
+        shell: pwsh
+        run: |
+          $scripts = @(
+            "scripts/install-windows.ps1",
+            "scripts/uninstall-windows.ps1",
+            "scripts/verify-windows-signature.ps1",
+            "scripts/windows-user-path.ps1",
+            "scripts/test-windows-user-path.ps1"
+          )
+          foreach ($script in $scripts) {
+            [void][scriptblock]::Create([IO.File]::ReadAllText($script))
+          }
+          ./scripts/test-windows-user-path.ps1
+
       - name: rustfmt (Linux only)
         if: startsWith(matrix.os, 'ubuntu')
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --check

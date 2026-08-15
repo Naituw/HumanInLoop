@@ -77,6 +77,10 @@ Build and install locally:
 ./scripts/install-windows.ps1 -Release
 ```
 
+The Windows installer idempotently adds its install directory to the current user's `PATH`.
+Open a new PowerShell window after installation, then run `AskHuman --version`; the uninstaller
+removes only that managed install-directory entry and preserves every unrelated `PATH` entry.
+
 > Running the GUI popup on Linux needs system WebKitGTK (e.g. `libwebkit2gtk-4.1`). If it's missing and a session-based channel (Telegram / DingTalk / Feishu) is configured, AskHuman automatically uses that channel; if none is available it exits with code 3 to signal graceful degradation.
 
 `install.sh` uses the dedicated `local-install` Cargo profile (`opt-level=0`, 64 codegen units) so

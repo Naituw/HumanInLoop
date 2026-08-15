@@ -427,7 +427,7 @@ P0 启动时按以下顺序工作：
   安全解析并调用 `npm.cmd`。worker 日志轮换，过期临时目录自动清理。
 - P7 维护面：增加幂等 `agents cleanup`、`scripts/uninstall-windows.ps1`（默认保留用户数据，
   `-PurgeData` 显式清除）与 `scripts/verify-windows-signature.ps1`；installer 使用 staging + hash +
-  `Move-Item` 事务复制。
+  `Move-Item` 事务复制，并幂等维护当前用户 `PATH`；uninstaller 只移除对应安装目录。
 - P8 代码/CI：release workflow 使用 `azure/artifact-signing-action@v2` 的 OIDC 身份，统一 timestamp，
   并在打包前阻断验证 signer subject 与时间戳。生产 Azure account、certificate profile 和 subject 仍需
   发布环境提供；仓库没有长期私钥。
@@ -441,6 +441,7 @@ PowerShell 5.1、PowerShell 7.6.5。SSH 仅用于构建与自动测试，符合�
 |---|---|
 | PS5 / PS7 脚本解析 | installer、uninstaller、signature verifier 通过 |
 | install | PS5 与 PS7 安装均通过；最终二进制安装到 `%LOCALAPPDATA%\Programs\AskHuman\AskHuman.exe` |
+| user PATH | PS5 真实安装自动加入目录；重复添加保持 1 条；临时目录 add/remove 往返不影响其他条目；新进程 `Get-Command AskHuman` 与 `AskHuman --version` 通过 |
 | daemon | `daemon start --force` 成功；protocol 2；named pipe endpoint；`agents monitor --json` 返回快照 |
 | Rust tests | 1090 tests：1088 passed、0 failed、2 ignored |
 | Clippy | `--all-targets -- -D warnings` 通过 |

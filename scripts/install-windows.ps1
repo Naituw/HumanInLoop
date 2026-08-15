@@ -11,6 +11,7 @@ $RepoRoot = Split-Path -Parent $ScriptDir
 $InstallDir = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "Programs\AskHuman" }
 $BuildProfile = if ($Release) { "release" } else { "local-install" }
 Set-Location $RepoRoot
+. (Join-Path $ScriptDir "windows-user-path.ps1")
 
 if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
   Write-Error "需要 pnpm（npm i -g pnpm）"; exit 1
@@ -118,5 +119,6 @@ Enforce-ProfileBudget "dev" "src-tauri\target\debug" 6144
 Enforce-ProfileBudget "full-debug" "src-tauri\target\full-debug" 6144
 Enforce-ProfileBudget "release" "src-tauri\target\release" 4096
 
+Add-AskHumanUserPath $InstallDir
 Write-Host "==> 完成：$InstallDir\AskHuman.exe"
-Write-Host "提示: 请将 $InstallDir 加入 PATH 后即可在终端使用 AskHuman。"
+Write-Host "提示: 请重新打开 PowerShell，然后运行 AskHuman --version。"
