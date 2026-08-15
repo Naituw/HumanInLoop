@@ -28,7 +28,7 @@
 
 `ConversationOrigin { source, agent_label, project_name }` 独立于 `AskRequest`：它描述投放上下文，不是问题
 内容。daemon 从每个 `RequestEntry` 的 `ShowPayload` 取得 source / project，并优先使用异步解析出的 Agent
-家族；单进程回退从 `AppState` 构造同一模型。公共 `run_conversation` 统一组装 Message 和 Question 标题，
+家族；旧协议/测试入口可从 `AppState` 构造同一模型。公共 `run_conversation` 统一组装 Message 和 Question 标题，
 各渠道只负责渲染。
 
 MCP 会清理 Agent 环境标记，daemon 需靠进程树异步解析。只有本次确实要投放 IM 且 CLI 未直接给出

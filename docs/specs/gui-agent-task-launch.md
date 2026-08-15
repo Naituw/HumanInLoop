@@ -1,30 +1,30 @@
-# 需求：从 Mac GUI 创建 Agent 任务（新建任务窗口）
+# 需求：从桌面 GUI 创建 Agent 任务（新建任务窗口）
 
 > 状态：已实现（2026-07-21）。
 > 关联计划：`docs/plans/gui-agent-task-launch.md`
-> 依赖 / 复用：`docs/specs/im-agent-task-launch.md`（LaunchRecord + Terminal.app 启动链路、
+> 依赖 / 复用：`docs/specs/im-agent-task-launch.md`（LaunchRecord + 原生终端启动链路、
 > Agent readiness 判定、workspace 索引）、`docs/specs/todo-whats-next.md`（项目待办）、
 > `docs/specs/menu-bar-tray.md`（GUI Host 统一窗口）。Todo 附件随任务启动的后续扩展见
 > `docs/specs/todo-attachments.md`。
-> 平台：仅 macOS（与 IM 版首版一致，依赖 Terminal.app）。
+> 平台：macOS（Terminal.app）与 Windows（Windows Terminal `wt.exe`）；Linux 仍后置。
 
 ## 1. 背景与目标
 
-IM `/new` 已支持从四种 IM 选择 workspace / Agent / 权限并在 Mac 上启动真实交互式 Agent 会话。
-本需求把同一能力搬到 Mac 本地 GUI：
+IM `/new` 已支持从四种 IM 选择 workspace / Agent / 权限并在 macOS 或 Windows 上启动真实交互式 Agent 会话。
+本需求把同一能力搬到本地 GUI：
 
 1. 新增一个**通用的「新建 Agent 任务」独立窗口**（GUI Host 承载，全局唯一），单页表单完成
    选项目 → 选任务来源（手动输入 / 项目待办）→ 选 Agent → 选权限 → 启动；
 2. 待办窗口每条待办提供「创建任务」按钮：带该项目 + 该待办打开同一窗口（即预选了项目与待办的
    同一面板），不做单独流程；
 3. 托盘菜单提供「新建 Agent 任务」入口（无预选打开）；
-4. Agent 可用性判定与 IM `/new` **完全一致**；启动复用 IM 的 LaunchRecord + Terminal.app 链路。
+4. Agent 可用性判定与 IM `/new` **完全一致**；启动复用 IM 的 LaunchRecord + 平台原生终端链路。
 
 ## 2. 已确认决策（用户经 AskHuman 定案）
 
 | 编号 | 决策项 | 结论 |
 |---|---|---|
-| G1 | 功能门控 | **不要求**开启 `agentTasks.enabled` 实验功能；仅要求 macOS 且 Terminal.app 存在。不满足时所有入口（待办行按钮、托盘项）**不显示** |
+| G1 | 功能门控 | **不要求**开启 `agentTasks.enabled` 实验功能；要求 macOS 的 Terminal.app 或 Windows Terminal `wt.exe` 可用。不满足时入口隐藏或给出可恢复的安装提示。 |
 | G2 | 流程形态 | 通用流程 + **独立窗口**（便于复用未来更多入口）；**单页表单**，不做分步向导 |
 | G3 | 面板统一 | 待办入口与菜单入口共用同一面板；待办入口＝预选了项目与该条待办；菜单入口可自由选待办或直接输入 |
 | G4 | Agent 判定 | 与 IM `/new` 相同：login shell 可解析 CLI 二进制 + lifecycle installed/current + AskHuman 集成 CLI/MCP 通道产物可用（`agent_launch::readiness`，一字不改地复用） |
@@ -52,7 +52,7 @@ IM `/new` 已支持从四种 IM 选择 workspace / Agent / 权限并在 Mac 上�
        Agent：Claude Code ✓ / Codex ✓ / Cursor ✗(原因) / Grok ✗(原因)
        权限：Agent 默认 / YOLO（仅 permissionPrompt=ask 时显示单选）
        [启动任务]
-  → 新 Terminal.app 窗口启动 Agent TUI 并执行任务
+  → 新 Terminal.app 窗口或 Windows Terminal tab 启动 Agent TUI 并执行任务
   → 该待办出队进执行历史；窗口自动关闭
 ```
 
@@ -88,14 +88,15 @@ IM `/new` 已支持从四种 IM 选择 workspace / Agent / 权限并在 Mac 上�
 
 - 不新增第二套 readiness / 启动实现；`agent_launch.rs` 的判定与链路原样复用；
 - 不做 GUI 侧的自动 watch、任务队列、进程管理（同 IM 非目标）；
-- 不支持 Linux / Windows（入口隐藏）；
+- 不支持 Linux（入口隐藏）；Windows Server/RDS 多会话 broker 后置；
 - 不在本窗口内管理 workspace（pin/hide/添加仍在设置「高级 → 从 IM 创建 Agent 任务」面板）；
 - 不改变 IM `/new` 的任何行为。
 
 ## 6. 验收标准
 
-1. macOS 且 Terminal.app 存在时，待办行 hover 出现「创建任务」按钮、托盘菜单出现
-   「新建 Agent 任务」；否则两者均不出现（Linux 托盘、非 mac 待办窗口同样隐藏）。
+1. macOS 且 Terminal.app 存在，或 Windows 且 `wt.exe` 可解析时，待办行 hover 出现「创建任务」按钮、
+   托盘菜单出现「新建 Agent 任务」；Linux 隐藏。Windows Terminal 缺失时不拼接 shell 字符串，
+   只给出明确安装提示。
 2. 未开启 `agentTasks.enabled` 时功能完整可用。
 3. 待办行进入：项目与该待办已预选；改选其它项目后待办预选清除。
 4. Agent 列表四家全列；就绪状态与同机 IM `/new` 的可选集一致；未就绪原因可点且跳转定位正确。

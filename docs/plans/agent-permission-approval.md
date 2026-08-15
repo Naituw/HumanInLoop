@@ -1,5 +1,9 @@
 # Agent 权限请求经本地弹窗 / IM 审批
 
+> Windows 注（2026-08）：本文保留首期 Unix 实施步骤；Windows 已由
+> `docs/plans/windows-platform-parity.md` 接入相同 PermissionRequest/daemon 语义，以下 Windows
+> unsupported 段落仅作历史记录，当前边界以对应 spec 与 Windows parity plan 为准。
+
 > 状态：已实现（2026-07）
 > 范围：macOS / Linux；Claude Code + Codex 原生 `PermissionRequest` 闭环  
 > 实现前提：只代答原本即将出现的权限弹窗；除原样应用 Claude 提供的 allow suggestion 外，

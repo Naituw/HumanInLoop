@@ -503,7 +503,7 @@ pub fn fmt_local_time(epoch: u64, now: u64) -> String {
     }
 }
 
-/// 非 unix 兜底（daemon 仅 unix，此分支只为编译完整）。
+/// Windows fallback when libc localtime_r is unavailable.
 #[cfg(not(unix))]
 pub fn fmt_local_time(epoch: u64, now: u64) -> String {
     fmt_utc_time(epoch, now)

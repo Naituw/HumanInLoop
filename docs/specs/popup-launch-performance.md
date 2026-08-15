@@ -6,7 +6,7 @@
 > helper，来请求领用直接上屏，藏掉每进程一次性的 WebView 初始化；§6.3 的「远期评估」结论已被它取代——落地形态是
 > **独立预热 helper 进程**（非 gui-host 预建窗），并把「延后 show」（方案8）合入热路径（领用注入正文后才 show）。
 > 目标：尽可能压缩「`AskHuman` 被调用 → 用户在弹窗里看到 Message/问题」的端到端时间。
-> 涉及面（仅 unix daemon 路径）：`cli/mod.rs`、`client/mod.rs`、`daemon/mod.rs`、`daemon/request.rs`、
+> 涉及面（macOS/Linux/Windows shared daemon 路径）：`cli/mod.rs`、`client/mod.rs`、`daemon/mod.rs`、`daemon/request.rs`、
 > `app/mod.rs`（`run_gui_helper` / `launch`）、`commands.rs`（`popup_init`）、前端 `src/main.ts`、
 > `src/views/PopupView.vue`、`agents/detect.rs`。
 > 不改：stdout 契约、退出码、结果区块格式、抢答语义。
@@ -80,7 +80,7 @@ T_visible = 弹窗里第一帧真正画出 Message/问题（不是空窗，而�
 |---|---|---|---|
 | WebView/Tauri 初始化 | Helper §2.3-3 | **固有** | 整链主要耗时；GUI 框架决定。只能「提前开始」或「预热」，难「去除」（见 §6） |
 | 独立进程 spawn | Daemon §2.2-9 | **固有** | 三进程架构代价；`spawn` 本身非阻塞 |
-| 各 IPC 往返 | 多处 | **固有，小** | 本地 unix socket，亚毫秒级，可忽略 |
+| 各 IPC 往返 | 多处 | **固有，小** | 本地 Unix socket / Windows named pipe，通常亚毫秒级，可忽略 |
 | `await getSettings()` 挂载前 | 前端 §2.4-2 | **可优化** | 仅为 language 却读钥匙串 + 阻塞挂载；helper 已用无钥匙串配置加载过 |
 | `popupInit()` 排在 onMounted 最后 | 前端 §2.4-3 | **可优化** | 内容被多个 await（含钥匙串）挡住 |
 | `spawn_gui_helper` 在 IM attach 之后 | Daemon §2.2-8/9 | **可优化** | 弹窗启动被 IM 钥匙串+网络挡住 |

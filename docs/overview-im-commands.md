@@ -62,7 +62,7 @@ Watch 规格见 `docs/specs/im-watch.md`。订阅持久化在 `~/.askhuman/state
 共享视图/校验在 `msg_card.rs`，实际队列仍由 `agents/interject.rs` 管理；交互规格见
 `docs/specs/im-msg-compose-card.md`，插话能力见 `docs/specs/agent-interject.md`。
 
-`/todo`、`/todo-rm`、`/todo-auto` 的项目选择、逐条删除与自动执行切换同样复用单选卡台账（`PickerKind::Todo/TodoRm/TodoRmEntry/TodoAuto/TodoAutoEntry/TodoManage`）；项目路径直接作为稳定选项 ID，待新增文本暂存在 picker payload。待办存储直读 `todos.json`，命令层实现在 `daemon/unix_impl/todo.rs`，能力边界见 `docs/specs/todo-whats-next.md`。
+`/todo`、`/todo-rm`、`/todo-auto` 的项目选择、逐条删除与自动执行切换同样复用单选卡台账（`PickerKind::Todo/TodoRm/TodoRmEntry/TodoAuto/TodoAutoEntry/TodoManage`）；项目路径直接作为稳定选项 ID，待新增文本暂存在 picker payload。待办存储直读 `todos.json`，命令层实现在共享 daemon core 的 `daemon/unix_impl/todo.rs`（目录名为历史遗留），macOS/Linux/Windows 语义一致；能力边界见 `docs/specs/todo-whats-next.md`。
 
 `/new` 的 workspace / Agent / 权限步骤也复用单选卡；Telegram 有项目 TODO 时再复用一张任务来源
 选择卡。最终任务输入复用结构化 Confirm 的渠道原生输入能力，但只投放到命令来源渠道；TODO 按所选

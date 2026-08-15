@@ -1,5 +1,8 @@
 # Agent 上下文压缩中的 AskHuman 问答恢复
 
+> Windows 注（2026-08）：本文保留首期 Windows 单进程措辞；当前四家上下文恢复在 Windows 通过
+> shared daemon、native caller binding 与 Windows hook command 工作，旧回退描述仅作历史记录。
+
 > 状态：已实现并安装验证（2026-07-22）
 > 范围：Codex、Claude Code、Cursor、Grok；AskHuman CLI/MCP 问答
 

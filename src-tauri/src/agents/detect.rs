@@ -214,7 +214,7 @@ fn basename(p: &str) -> String {
 }
 
 /// 从 `start_pid` 向上回溯进程树，返回第一个命中指定家族、且非自身的祖先 pid。
-/// 找不到（或非 unix）返回 `None` → 调用方落 TTL 兜底。
+/// 找不到时返回 `None` → 调用方落 TTL 兜底。
 ///
 /// spec D25/D27：Codex 命中的祖先若是**共享 app-server 守护**（`is_shared_app_server`）→ 返回
 /// `None`（walk 只会命中它、拿不到 TUI pid；该会话按「无 pid」路径治理，见 registry）。
@@ -302,7 +302,7 @@ pub fn inspect_process(pid: u32) -> Option<ProcessIdentity> {
 
 /// 识别 `pid` 所在的终端 App：沿进程链向上找首个已知终端祖先，返回稳定标识串
 /// （`apple-terminal` / `iterm2` / `ghostty` / `kitty` / `wezterm` / `alacritty` / `tmux`
-/// / `vscode` / `cursor`）；找不到（或非 unix）返回 `None`。
+/// / `vscode` / `cursor`）；找不到返回 `None`。
 ///
 /// 供 Agent 状态窗口「聚焦终端」按钮**按支持度显隐**：前端仅对已支持的终端（v1 = `apple-terminal`）
 /// 展示按钮。tmux 在外层终端之前命中（pane 与外层 Tab 不是同一个，单纯聚焦外层 Tab 不准），故视为
@@ -389,7 +389,7 @@ pub fn pid_alive(_pid: u32) -> bool {
     false
 }
 
-// ── 进程链回溯（unix：调用 `ps`；非 unix：空） ──
+// ── Process ancestry (Unix: ps; Windows: Toolhelp + native process queries) ──
 
 #[cfg(unix)]
 fn process_chain(start_pid: u32) -> Vec<ProcEntry> {

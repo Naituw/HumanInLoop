@@ -2,7 +2,7 @@
 
 对应规格：[`../specs/windows-platform-parity.md`](../specs/windows-platform-parity.md)
 
-状态：**待实施**
+状态：**P0–P6 与代码级 P7/P8 已实现；等待外部发布验收**
 
 策略：长期开发分支，小提交、阶段 gate，完整验收后一次合并主线
 
@@ -399,3 +399,69 @@ P0 启动时按以下顺序工作：
   Unix 语义。
 - 新事实若要求改变已确认的 OS、Agent、分发、签名或会话范围，先更新规格并取得确认，再改计划。
 - Authenticode 之后只接受签名/打包修复；任何功能性代码变化都返回 P7 重跑双 VM gate。
+
+## 16. 实施记录（2026-08-15）
+
+### 16.1 已完成范围
+
+- 分支：`codex/windows-platform-parity`；实现基线 `b216b333`，本记录对应 `0f76bf7`。
+- P0：修复 Node 24 在 Windows 直接 spawn `.cmd` 的 `EINVAL`，Windows CI 现运行 pnpm/Vitest、
+  Node tests、Rust tests、Clippy 与 release build；安装脚本兼容 Windows PowerShell 5.1 和 PowerShell 7。
+- P1–P2：CLI、hooks、GUI 与 IM 全部切到 shared daemon core；Unix socket / Windows byte-mode named
+  pipe 位于同一 transport 抽象。named pipe 名称按当前 SID、Windows session 与规范化配置目录隔离，
+  使用受保护 DACL（当前用户 + LocalSystem）并拒绝远程客户端。跨进程锁、后台启动、HKCU Run 与
+  native process identity 均有 Windows adapter，不保留产品级 single-process fallback。
+- P3：Windows GUI Host、托盘、设置/历史/待办/Agent/Interject/新建任务/Fork 单窗路由与 daemon 状态
+  订阅已启用；system sound 使用 `MessageBeep`；用户 hooks 支持 `.exe/.ps1/.cmd/.bat`、10 秒边界和
+  stdout/stderr 隔离。
+- P4：四家 Agent lifecycle/context/stop/subagent/permission 集成在 Windows 可安装和修复。Codex 生成
+  `commandWindows` 并按 Windows 实际命令写 trusted hash；进程发现用 Toolhelp、
+  QueryFullProcessImageName、NtQueryInformationProcess、ProcessIdToSessionId 与 GetProcessTimes，hook
+  热路径不启动 PowerShell/WMI。Claude/Cursor timeout hook 生成 PowerShell 5 兼容脚本。Codex shell
+  permission memory 使用保守 PowerShell literal parser；变量、替换、重定向、分组、调用运算符和歧义
+  形式全部 fail-closed 回基础审批。
+- P5：主动 IM command 与 Agent 控制台能力复用 shared daemon；新建/Fork 使用 `wt.exe` direct argv
+  打开 Windows Terminal tab，task/cwd/flags 不拼入 shell 字符串，缺少 Terminal 时返回可恢复错误。
+- P6：direct 与 npm 更新均使用安装目录外事务 worker，排空 daemon/GUI Host 后备份、替换、校验、
+  回滚并恢复原运行角色。Direct asset 先校验 `SHA256SUMS`、版本与 WinVerifyTrust Authenticode；npm
+  安全解析并调用 `npm.cmd`。worker 日志轮换，过期临时目录自动清理。
+- P7 维护面：增加幂等 `agents cleanup`、`scripts/uninstall-windows.ps1`（默认保留用户数据，
+  `-PurgeData` 显式清除）与 `scripts/verify-windows-signature.ps1`；installer 使用 staging + hash +
+  `Move-Item` 事务复制。
+- P8 代码/CI：release workflow 使用 `azure/artifact-signing-action@v2` 的 OIDC 身份，统一 timestamp，
+  并在打包前阻断验证 signer subject 与时间戳。生产 Azure account、certificate profile 和 subject 仍需
+  发布环境提供；仓库没有长期私钥。
+
+### 16.2 Win11 VM 证据
+
+环境：Windows 11 Home 24H2 x64、普通用户、Node 24.19、pnpm 10.34.5、Rust 1.97、Windows
+PowerShell 5.1、PowerShell 7.6.5。SSH 仅用于构建与自动测试，符合本规格会话边界。
+
+| Gate | 结果 |
+|---|---|
+| PS5 / PS7 脚本解析 | installer、uninstaller、signature verifier 通过 |
+| install | PS5 与 PS7 安装均通过；最终二进制安装到 `%LOCALAPPDATA%\Programs\AskHuman\AskHuman.exe` |
+| daemon | `daemon start --force` 成功；protocol 2；named pipe endpoint；`agents monitor --json` 返回快照 |
+| Rust tests | 1090 tests：1088 passed、0 failed、2 ignored |
+| Clippy | `--all-targets -- -D warnings` 通过 |
+| frontend / Node | Vitest 160 passed；Node command-shim tests 3 passed；production build 通过 |
+| Codex E2E | `codex-cli 0.147.0`、ChatGPT 登录；CLI mode + lifecycle + permission + stop 安装成功；生成 `commandWindows`/trusted hashes；真实 authenticated `codex exec` 返回 `WINDOWS_CODEX_E2E_OK` |
+| maintenance | 临时安装目录完整执行 cleanup/daemon stop/remove；目录删除、用户数据保留，随后成功恢复 daemon 与 Codex integration |
+| signing negative | 未签名开发 binary 被 verifier 以 `NotSigned` 拒绝，证明 release gate fail-closed |
+
+### 16.3 尚需外部状态的发布 Gate
+
+这些项目不需要继续修改 shared architecture，但在对外宣称“Windows release certified”前必须完成：
+
+1. 新建干净 Windows 10 22H2 x64 VM，复跑 §12 核心矩阵；当前只有 Win11 VM。
+2. 在生产 Azure Artifact Signing account/profile 中运行 release workflow，验证 zip 与 npm 内同一已签名
+   binary、timestamp、subject、manifest hash，并在 Win11/Win10 记录 SmartScreen 首次运行体验。
+3. 在交互式 Windows 桌面手工验收 tray、WebView2、DPI/多屏/输入法、文件选择、声音、登录/注销；
+   SSH 会话不能替代视觉/焦点验收。
+4. 用至少一个真实 IM 凭据跑主动命令和重连 smoke；自动化已覆盖 mock Router/协议，但测试 VM 未配置
+   生产凭据。
+5. 对最终签名 release candidate 复跑 direct/npm clean install、upgrade、rollback；开发 binary 因未签名
+   会被 direct updater 正确拒绝，不能作为成功更新样本。
+
+ARM64、原生 installer 与 Windows Server/RDS 多会话仍按已确认范围另立项目，不属于上述 release
+blocking gate。

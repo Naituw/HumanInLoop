@@ -3635,8 +3635,8 @@ fn warm_enabled(state: &Arc<ServerState>) -> bool {
         .unwrap_or(false)
 }
 
-/// 是否有可用显示（§D-M3）：无显示（headless）不预热，零浪费。macOS 恒真（GUI 会话）；
-/// Linux 看 `DISPLAY`/`WAYLAND_DISPLAY`。
+/// Whether an interactive display is available (§D-M3). macOS is always a GUI session,
+/// Linux checks DISPLAY/WAYLAND_DISPLAY, and Windows rejects the Services session.
 fn has_display() -> bool {
     #[cfg(target_os = "macos")]
     {

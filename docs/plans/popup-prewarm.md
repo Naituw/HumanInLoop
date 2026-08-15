@@ -1,5 +1,8 @@
 # 计划：弹窗预热（方案6 进程池）
 
+> Windows 注（2026-08）：本文保留首期 Unix 计划措辞；Windows 已使用 shared daemon/popup path，
+> 以下“仅 Unix”是历史记录，当前平台边界以实现与 Windows parity plan 为准。
+
 > 需求与决策见 `docs/specs/popup-prewarm.md`。本计划描述实现方案与全部技术/规则细节，按既有架构落地。
 > 仅 Unix（daemon 路径）；非 Unix / 无显示自动不生效。**默认开、可关**。
 

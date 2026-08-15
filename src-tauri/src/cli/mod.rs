@@ -660,7 +660,7 @@ fn whats_next_question_from_entries(
 }
 
 /// Resolve the calling Agent with environment-only work so it is safe on the ask hot path and
-/// available to both daemon-backed Unix and single-process Windows builds.
+/// available to daemon-backed Unix and Windows builds.
 pub(crate) fn caller_context() -> CallerContext {
     caller_context_from_env(&std::env::vars().collect())
 }

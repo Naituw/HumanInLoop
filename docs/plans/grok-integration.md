@@ -1,5 +1,8 @@
 # Grok 集成实现计划（仅 MCP 方案）
 
+> Windows 注（2026-08）：本文保留首期 hook 平台假设；Windows Grok binding/MCP/lifecycle 已由平台
+> 对齐项目接入 shared daemon，以下 Unix-only 描述仅作历史记录。
+
 > 需求/调研背景：`docs/specs/grok-cli-integration-research.md`（Grok CLI 0.2.82 实测：harness 差异、rules
 > 注入、MCP per-tool 超时、hook 兼容读取等证据链）。本计划只覆盖**实现方案**。
 > 状态：草案（Q1–Q5 已定；第 6 节「Claude/Cursor 兼容读取的坑」P1/P2/P3 已讨论定案，见 §6.2）。

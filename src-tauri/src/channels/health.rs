@@ -3,7 +3,7 @@
 //! 四个平台 client 的统一请求出口（`call` 系列）失败时登记、成功时清除，daemon 的
 //! `ensure_*_router` 建连失败同样登记——覆盖建连 / 投放发送 / 卡片编辑（含 watch）全部路径，
 //! 无须在每个 `eprintln!` 点各自插桩。daemon 经 `TrayState` / `StatusInfo` 把快照带给
-//! 托盘与设置页；CLI 单进程回退里也会写本表，但无读者、进程即退，无害。
+//! 托盘与设置页；legacy in-process/test callers may also write this table without readers.
 //!
 //! 语义（用户定案）：该渠道下一次任何成功操作即清；纯内存态，daemon 重启即清。
 

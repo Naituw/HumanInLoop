@@ -19,7 +19,7 @@
 4. **体检**：一屏汇总 daemon / 渠道 / 集成 的健康状态，便于 headless 排障。
 5. **headless 友好**：原本仅 GUI 的 Agent 实时状态窗口，提供文本 / JSON 输出。
 
-不在本期范围：Windows named-pipe daemon（沿用现状，无 daemon 的能力按下文降级）。
+Windows named-pipe daemon 已在平台对齐项目落地；本命令面在 macOS、Linux 与 Windows 共用同一 daemon 状态和集成模块。
 
 ## 命令总览（锁定）
 
@@ -75,7 +75,7 @@ daemon 是否在跑 / 各渠道（启用·配置齐全·连接）/ 各 agent 集
 - **D8 改名**：原 `agents status`（GUI 状态窗口）→ `agents monitor`，并增加文本 / `--json`。
 - **D9 每个子命令都要有 `help`** 引导配置。
 - **D10 本地化**：所有面向用户输出复用现有 i18n（中 / 英）。
-- **D11 跨平台**：全平台可用；依赖 daemon 的能力（`test` 部分、`detect`、`monitor` 窗口、连接状态）在无 daemon 平台（当前 Windows）降级并给提示。
+- **D11 跨平台**：macOS、Linux 与 Windows 全部可用；`test`、`detect`、`monitor` 与连接状态均查询 shared daemon，Windows 使用 named pipe，不维护单独降级语义。
 
 ## 反馈意见
 

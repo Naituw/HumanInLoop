@@ -139,7 +139,7 @@ mod platform_impl {
     }
 
     /// 后台拉起宿主进程（`AskHuman --gui-host`，detach 新会话脱离调用方终端）。
-    /// 单实例由宿主自身的 flock 去重——重复 spawn 的多余进程会因抢锁失败而立即退出。
+    /// 单实例由宿主自身的跨进程文件锁去重——重复 spawn 的多余进程会因抢锁失败而立即退出。
     pub fn spawn_detached() -> std::io::Result<()> {
         let exe = std::env::current_exe()?;
         spawn_detached_from(&exe)

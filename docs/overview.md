@@ -12,7 +12,7 @@
 
 - **Tauri 2**：Rust 后端 + WebView 前端，单一可执行文件 `AskHuman`，跨 macOS / Windows / Linux。
 - **前端**：Vue 3 + Vite + TypeScript，纯手写 macOS 风 CSS（无组件库）。
-- **运行模型**：Unix 当前走「常驻 Daemon + 瘦客户端 CLI + 独立 GUI Helper / GUI Host」；非 Unix 仍走单进程回退。
+- **运行模型**：macOS、Linux 与 Windows 共用「常驻 Daemon + 瘦客户端 CLI + 独立 GUI Helper / GUI Host」；Unix domain socket 与 Windows named pipe 只在传输、进程和桌面适配层分叉。
 - **输出契约**：CLI 的 stdout 只输出结果区块，所有日志走 stderr。
 
 ## 运行架构
@@ -22,9 +22,9 @@
 **进程职责（同一二进制按角色切换，本地 IPC 通信）**：
 
 - **AskHuman CLI**（多、短命）：解析 argv（`-f` 在此解析为绝对路径、缺失即退 1）→ 提交 `AskRequest` 给 Daemon → 流式取回结果打到 stdout → 按终态映射退出码 0/1/3。
-- **AskHuman Daemon**（Unix 每用户 1 个、常驻、**无 GUI**）：独占四种 IM 的 Router/长连接，承载每请求的 Coordinator/Preemption，集中落盘，监听配置变更，并管理空闲退出、二进制换新和排空。
+- **AskHuman Daemon**（macOS/Linux/Windows 每用户 1 个、常驻、**无 GUI**）：独占四种 IM 的 Router/长连接，承载每请求的 Coordinator/Preemption，集中落盘，监听配置变更，并管理空闲退出、二进制换新和排空。
 - **Popup Helper**（每弹窗 1 个）：由 Daemon 启动，主线程运行 Tauri 弹窗，收题目、回传答案后退出。预热实例及其边界见 `docs/specs/popup-prewarm.md`。
-- **GUI Host**（Unix 每用户至多 1 个、长命）：承载菜单栏/托盘，以及全局唯一的设置、历史、Agent、Interject 窗口；各打开入口通过自有 IPC 路由到宿主。
+- **GUI Host**（macOS/Linux/Windows 每用户至多 1 个、长命）：承载菜单栏/托盘，以及全局唯一的设置、历史、待办、Agent、Interject、新建任务与 Fork 窗口；各打开入口通过自有 IPC 路由到宿主。
 
 **关键约定**：每种 IM 渠道全局只保留一条连接；每个请求仅首个终态回答生效；IPC 和运行状态均为用户私有；既有 stdout、结果区块、退出码和配置兼容契约保持不变。Daemon 排空换新见 `docs/specs/daemon-graceful-drain.md`。
 
@@ -167,7 +167,7 @@ AskHuman/
         cursor_hook.rs       Cursor 超时 Hook 管理
         claude_hook.rs       Claude Code 超时 Hook 管理
         agent_lifecycle.rs   四家 Agent 生命周期 Hook 管理
-        agent_launch.rs      Agent readiness、一次性启动记录与 Terminal.app helper
+        agent_launch.rs      Agent readiness、一次性启动记录与 Terminal.app / Windows Terminal helper
         agent_rules.rs       Agent 全局 Rules 管理
         agent_subagent_guard.rs  Claude/Codex SubagentStart 提示 Hook
         agent_context_recovery.rs  集成 mode 托管的压缩恢复/会话绑定 Hook
@@ -175,19 +175,19 @@ AskHuman/
         mcp_config.rs        四家 MCP server 配置管理
         agent_mode.rs        None/CLI/MCP 模式编排
         agent_stop.rs        Agent Stop 结束确认配置
-        login_item.rs        macOS/Linux GUI Host 与 daemon 登录项
+        login_item.rs        macOS/Linux/Windows GUI Host 与 daemon 登录项
 
       ipc/
         mod.rs               CLI/Daemon/Popup 消息类型
         codec.rs             NDJSON 编解码
-        transport.rs         Unix socket 传输
+        transport.rs         Unix socket / Windows named-pipe 传输与用户隔离
       gui_host/
         mod.rs               GUI Host 自有 IPC 与窗口路由
       client/
         mod.rs               CLI 到 Daemon 的连接与管理操作
         composer.rs          Interject 窗口的 daemon 连接
       daemon/
-        mod.rs               daemon 子命令入口（Unix 转 unix_impl）
+        mod.rs               跨平台 daemon 子命令入口与共享 server core 映射
         unix_impl/
           mod.rs             状态与类型、serve 主循环、连接分发与请求提交
           watch.rs           watch 订阅持久化、tick 刷新与卡片回调
@@ -226,7 +226,7 @@ AskHuman/
 ## 运行流程
 
 1. `main.rs` → `cli::dispatch()`：在创建任何窗口前按 argv 分流纯信息、管理、GUI 和提问命令。
-2. Unix 上，CLI 把参数规范化为请求，连接或拉起 Daemon 后提交；非 Unix 直接走单进程回退。
+2. macOS、Linux 与 Windows 上，CLI 把参数规范化为请求，连接或拉起 Daemon 后提交；本地传输分别使用用户私有的 Unix socket 或 Windows named pipe。
 3. Daemon 登记请求，按配置启动 Popup Helper，并把请求交给已启用的 IM Router；各渠道并行等待回答。
 4. Coordinator 只接受首个终态结果，随即取消其它渠道；历史、回复图片和文件在这一汇聚点统一处理。
 5. Daemon 把最终结果回传 CLI；CLI 只负责写 stdout 并按终态返回退出码。
@@ -321,7 +321,7 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
   项目 diff 状态条 + 插话输入 + 内嵌新建任务 + 原生 Fork 入口；快照对 GUI 额外注入
   `waitingRequestId`/`waitingPreview`/`forkReady`，Fork 子会话持久化直接父 `forkedFromSessionId`。
 
-## Agent 插话（Interject，Unix）
+## Agent 插话（Interject，macOS / Linux / Windows）
 
 > 需求 `docs/specs/agent-interject.md`，计划 `docs/plans/agent-interject.md`。
 
@@ -338,16 +338,16 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 - 待办按项目（git 根）归属，`~/.askhuman/state/todos.json` 是唯一数据源：所有进程直读直写 + 文件锁串行化，不依赖 daemon 存活，跨平台。GUI / CLI / MCP 可在创建时或对已有 Todo 独立管理附件；GUI 默认折叠附件摘要，支持新增区 / 每条 Pending Todo 拖入、新增输入框粘贴图片，以及选中行后粘贴剪贴板图片。单文件 ≤10 MiB 由 AskHuman 托管，>10 MiB 保留绝对路径引用（无稳定源路径的剪贴板图片超过阈值则拒绝），每条最多 20 个，并生成最长边 128 px 的图片缓存缩略图。用户可见写操作在落盘失败时必须报错。
 - Agent 完成任务后必须调 `AskHuman --whats-next`（MCP 为 `whats_next` 工具）：固定提问 + 可选的 Agent 建议任务 + 待办 chip + 恒有「结束本轮」；顺序固定为建议任务、待办、结束，总选项最多 10 条。建议任务仅在确有建议时通过 `-o`/`-o!`（MCP `options`）传入，选择结果保持普通 Ask 的 `[selected_options]` 语义；待办派活为 `[user_input]`，准许结束为 `[selected_options]`，取消为 `[status]`。选中的待办按 id best-effort 出队（Coordinator 汇聚点统一处理）。标记为「自动执行」（⚡）的待办优先级不变：whats-next 时不发卡、直接按队列顺序派发最靠前一条。
 - 送达面：whats-next / 普通提问 Popup 折叠待办区 / Stop 确认卡（兜底）都以选项形式呈现待办；GUI / IM 新建 Agent 任务也可直接执行待办。所有出口在执行前按卡片附件快照与最新 Todo 求交集，托管文件建立请求级交付副本，失效项转为 warning，选项只显示 `【N 个附件】`（支持富文本颜色时为灰色）而不向 IM 上传本地文件。输入面：CLI `todo` 子命令、Popup 内新增、GUI 待办窗口（托盘/AgentsView 入口）、IM `/todo`；IM 创建/管理首版仍只支持文字。
-- IM `/todo`（管理卡：飞书代码卡自带输入表单，钉钉复用提问卡模板 `allow_input`，TG/Slack 文本 + 命令提示）、`/todo-rm`（复用单选卡逐条删除、就地刷新）与 `/todo-auto`（切换自动执行标记）仅 Unix，实现在 `daemon/unix_impl/todo.rs`。
-- macOS 上待办窗口每条待办另有「创建任务」按钮：预选项目与该待办打开新建任务窗口，Terminal 启动成功后按快照出队（spec `docs/specs/gui-agent-task-launch.md`）。
+- IM `/todo`（管理卡：飞书代码卡自带输入表单，钉钉复用提问卡模板 `allow_input`，TG/Slack 文本 + 命令提示）、`/todo-rm`（复用单选卡逐条删除、就地刷新）与 `/todo-auto`（切换自动执行标记）由跨平台 daemon 承载，实现在共享 server core 的 `daemon/unix_impl/todo.rs`（目录名为历史遗留）。
+- macOS 与 Windows 上，待办窗口每条待办另有「创建任务」按钮：预选项目与该待办打开新建任务窗口，Terminal.app 或 Windows Terminal 启动成功后按快照出队（spec `docs/specs/gui-agent-task-launch.md`）。
 
-## 菜单栏图标 + 统一 GUI Host（Unix 桌面）
+## 菜单栏 / 托盘图标 + 统一 GUI Host（macOS / Linux / Windows 桌面）
 
 > 需求 `docs/specs/menu-bar-tray.md`，计划 `docs/plans/menu-bar-tray.md`。
 
-- Unix 每用户单实例 GUI Host；Daemon 保持无 GUI。Host 承载设置、历史、Agent、Interject 与托盘，所有入口路由到它以保证每类窗口唯一。
-- Host 使用独立的 `gui-host.sock` / lock；即使 Daemon 未运行，设置和历史仍能打开。
-- `general.menuBarIcon` 支持 `off|active|always`；Windows 不支持，Linux 桌面 best-effort。
+- 每个交互式桌面会话使用单实例 GUI Host；Daemon 保持无 GUI。Host 承载设置、历史、待办、Agent、Interject、新建任务、Fork 与托盘，所有入口路由到它以保证每类窗口唯一。
+- Host 使用独立的用户私有 `gui-host.sock` 或 Windows named pipe，加跨进程锁做单实例；即使 Daemon 未运行，设置和历史仍能打开。
+- `general.menuBarIcon` 支持 `off|active|always`；Windows 使用原生托盘，Linux 桌面 best-effort。
 - 托盘状态订阅不保活；只有打开窗口的独立连接给 Daemon 续命。`general.daemonLifecycle=keepalive` 是正交的常驻策略。
 - `TrayState` 汇总待答、IM、Agent、更新与 drain；菜单可聚焦待答 Popup、打开 Agent/插话、控制 Daemon 和应用更新。
 - GUI Host 启动与 daemon 停→运行时复用 Agents 设置页口径检查集成更新；待更新时菜单显示可点击警告，无待答时 template 图标显示右上实心圆，设置内更新成功后即时清除。
@@ -384,7 +384,7 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 
 > 设计与实现计划见 `docs/plans/agent-permission-approval.md`。
 
-- Unix 只支持 Claude Code / Codex 的原生 `PermissionRequest` Hook；基础设施或渠道失败、24h 到期时不输出裁决，让 Agent 回到原生审批。
+- macOS、Linux 与 Windows 支持 Claude Code / Codex 的原生 `PermissionRequest` Hook；基础设施或渠道失败、24h 到期时不输出裁决，让 Agent 回到原生审批。
 - 固定动作是批准一次/拒绝；Claude 只原样回放本次请求携带且通过白名单的 allow suggestion，Codex 永不伪造 `updatedPermissions`。
 - 权限请求走独立 Confirm 模型；Popup/四 IM 中首个 Ready 的合法回答胜出，其它端定格，轻量 tombstone 只保留到原 deadline。
 - permission 是默认开启的正交 preference，不是第四种 mode；CLI/MCP mode 按 preference 管理 Hook，None 卸 Hook 但保留偏好。
@@ -412,10 +412,10 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 
 ## 用户级 hooks + 弹窗提示音
 
-- Unix 用户 hook 位于 `~/.askhuman/hooks/<event>`，是按事件命名的可执行脚本；摘要走环境变量，完整负载走 stdin JSON，非阻塞执行。
+- 用户 hook 位于 `~/.askhuman/hooks/<event>`；Unix 执行对应可执行脚本，Windows 支持 `.exe`、`.ps1`、`.cmd` 与 `.bat`。摘要走环境变量，完整负载走 stdin JSON，并以 10 秒边界和输出隔离执行。
 - `ask-received` 在 Daemon 接收一次提问时恰触发一次，与是否显示 Popup 或投放 IM 无关。
-- Daemon 会生成不可执行的 `ask-received.sample`；复制去后缀并 `chmod +x` 即启用，新增事件沿用同一机制。
-- `general.popupSound` 是独立便利功能：macOS 使用系统音名，Linux 有可用播放器时显示，Windows 不支持；它与用户 hooks 相互独立。
+- Daemon 会生成 `ask-received.sample`；Unix 复制去后缀并 `chmod +x`，Windows 改为受支持的扩展名即可启用，新增事件沿用同一机制。
+- `general.popupSound` 是独立便利功能：macOS 使用系统音名，Linux 使用可用播放器，Windows 使用原生 `MessageBeep`；它与用户 hooks 相互独立。
 
 ## 构建 / 开发 / 测试
 

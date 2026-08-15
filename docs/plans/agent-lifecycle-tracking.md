@@ -1,5 +1,8 @@
 # 实现计划：Agent 生命周期追踪 + 状态窗口（实验性功能）
 
+> Windows 注（2026-08）：本文保留首期 Unix 实施步骤；Windows 已由平台对齐项目实现 native process
+> inspection、`commandWindows` hooks、named-pipe 上报与 GUI Host，以下平台限制仅作历史记录。
+
 > 关联需求：`docs/specs/agent-lifecycle-tracking.md`（决策编号 D1–D24）
 > 关联调研：`demo/agent-lifecycle/FINDINGS.md`（事件 / env / 去重 / 标题来源 / Codex 信任算法，均实测）
 > 平台：仅 Unix（macOS/Linux）；Windows 全程编译进去但 UI 与命令对用户隐藏（D2）。

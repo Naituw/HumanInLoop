@@ -1,5 +1,5 @@
 //! 后台拉起 Daemon：macOS 优先交给当前用户的 GUI launchd domain 管理，其它 Unix 则 detach
-//! （新会话）并把 stdio 重定向到 daemon.log，使其脱离 CLI 终端独立存活。
+//! （新会话）并把 stdio 重定向到 daemon.log；Windows 使用无控制台的新进程组并写同一日志。
 //!
 //! macOS 不能在 Aqua 会话里直接 `setsid` 后长期运行：那样的 daemon 会跨用户登出残留，却仍持有
 //! 已销毁 GUI 会话的 bootstrap namespace。用户重新登录后，它虽然还能通过 Unix socket 接收请求，

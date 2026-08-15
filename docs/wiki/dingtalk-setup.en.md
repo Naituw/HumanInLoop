@@ -87,4 +87,3 @@ Click "Test connection": it exchanges a token and sends a test message to that u
 | The bot receives no direct messages | Message-receiving mode isn't Stream; or the app isn't published; or the target user isn't in the availability scope |
 | "Bot has no availability to this user" | The target user isn't in the bot's availability scope (see "2. Publish and availability") |
 | "Auto-detect" never receives the code | DM the 4-digit code from your **target account**; make sure the bot is published and available to you |
-| On Windows, concurrent questions occasionally cross replies | DingTalk allows only **one** Stream connection per app at a time; on Windows, launching multiple questions concurrently may let multiple Streams compete for messages — avoid concurrent questions against the same app |

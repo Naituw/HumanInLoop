@@ -3,7 +3,7 @@
 > 状态：设计完成，待实现。  
 > 关联计划：`docs/plans/im-agent-task-launch.md`  
 > 依赖：四渠道主动命令、通用单选卡、Agent 生命周期追踪、IM watch、daemon keepalive。  
-> 首版平台：macOS；终端：Terminal.app；Agent：Claude Code / Codex / Cursor / Grok。
+> 当前平台：macOS（Terminal.app）与 Windows（Windows Terminal `wt.exe`）；Agent：Claude Code / Codex / Cursor / Grok。Linux 后置。
 
 ## 1. 背景与目标
 
@@ -93,7 +93,7 @@ reporter 只上报 launch id 与 task SHA-256，不上报 task 正文。
 |---|---|---|
 | D1 | 运行形态 | 新图形终端窗口 + 原生交互式 TUI；不使用 print / headless / background |
 | D2 | 生命周期所有权 | 启动后交给既有 lifecycle；本功能不轮询、不停止、不 resume Agent |
-| D3 | 首版范围 | **仅 macOS 系统 Terminal.app**；iTerm2 / Linux / Windows 后置 |
+| D3 | 平台范围 | **macOS 系统 Terminal.app + Windows Terminal `wt.exe`**；iTerm2 与 Linux 后置，Windows Server/RDS 多会话 broker 不在本期。 |
 | D4 | 命令 | 只支持无参 `/new`；Slack 展示 `!new`；`/new <文本>` 回用法错误，不把文本当任务 |
 | D5 | readiness | `/new` 开始先检查 feature/keepalive、Terminal、workspace、Agent；workspace 或 Agent 为 0 即停止 |
 | D6 | Agent 可用判据 | 同时满足：login shell 可解析到真实 executable；lifecycle installed/current；AskHuman 集成 mode 为 CLI/MCP、Rule/skill 已安装且当前 CLI/MCP 通道产物可用 |
@@ -163,7 +163,7 @@ Telegram 在最后一步先发任务来源选择卡。选择「输入新任务�
 `/new` 先并行检查：
 
 1. `agentTasks.enabled`；keepalive + daemon login item 状态；
-2. macOS GUI session 与 Terminal.app；
+2. macOS GUI session 与 Terminal.app，或 Windows 单交互桌面会话与 `wt.exe`；
 3. workspace index：过滤不存在路径；为空或扫描过期时执行一次有界四家冷扫描；
 4. 四家 Agent：固定命令在用户 login shell 中解析为 executable；lifecycle installed/current；
    `agent_mode` 为 CLI/MCP、Rule/skill 已安装，且 CLI timeout Hook / MCP config 通道产物已安装并 current。
@@ -177,7 +177,8 @@ Telegram 在最后一步先发任务来源选择卡。选择「输入新任务�
 - Terminal / keepalive 不可用：停止并给设置修复入口；
 - 不通过启动 Agent 来测试认证；首次启动若需要登录，登录界面留在 Terminal 中。
 
-probe 使用固定命令名，不接受 IM 输入；在用户 login shell 里执行有界 `command -v`，只接受实际可执行
+probe 使用固定命令名，不接受 IM 输入；Unix 在用户 login shell 里执行有界 `command -v`，Windows
+使用系统 PATH 与已知 npm native package 路径解析，只接受实际可执行
 文件，结果短时缓存。helper 运行于 Terminal login shell，使用同一 PATH 语义。
 
 ### 4.3 flow 并发与过期
@@ -276,13 +277,16 @@ LaunchRecord {
 - 不接受 raw path、raw executable、shell flags、command template；
 - helper 设置 `ASKHUMAN_AGENT_TASK_LAUNCH_ID` 供 hook best-effort 精确关联。
 
-## 8. Terminal.app 行为
+## 8. 平台终端行为
 
-- 用 AppleScript 向 Terminal.app 创建**新 window**，不复用 tab，不 `activate` 抢焦点；
-- 使用默认 login shell 执行固定 helper command，使 Agent 获得正常用户 PATH 与真实 TTY；
+- macOS 用 AppleScript 向 Terminal.app 创建**新 window**，不复用 tab，不 `activate` 抢焦点；
+- Windows 用 `wt.exe -w 0 new-tab -- <AskHuman.exe> __agent-launch <uuid>` 的直接 argv 创建新 tab，
+  不把 task/cwd/Agent 拼进 PowerShell 或 cmd 字符串；找不到 Windows Terminal 时返回清楚的安装提示；
+- 使用平台默认终端环境执行固定 helper command，使 Agent 获得正常用户 PATH 与真实 TTY；
 - Agent / helper 退出后 shell 保持，窗口保留终端历史；
-- 设置页「测试 Terminal」只打开自检窗口，不构造 Agent、不发送 prompt，用于提前完成 Automation 授权；
-- Automation 拒绝或 Terminal launch 失败时明确回 IM，绝不退化到后台 headless 任务。
+- 设置页「测试 Terminal」只打开自检窗口，不构造 Agent、不发送 prompt；macOS 用于提前完成 Automation
+  授权，Windows 用于验证 `wt.exe` 解析与启动；
+- Automation 拒绝、Windows Terminal 缺失或 launch 失败时明确回 IM，绝不退化到后台 headless 任务。
 
 ## 9. 自动 watch
 
@@ -343,7 +347,7 @@ workspace 动态状态放 `agent-workspaces.json`，launch record 放短时私�
 - 不接受 IM raw path、任意 command / flags；
 - 不自动安装 lifecycle / permission hook 或 Agent 集成产物；readiness 只检查并引导去设置修复；
 - 首版不支持 iTerm2 / Ghostty / WezTerm / Kitty / 编辑器内置终端；
-- 首版不支持 Linux / Windows；
+- 不支持 Linux；不支持 Windows Server/RDS 多交互会话 broker；
 - 首版 task 仅文本，不把 IM 消息自身的附件映射到 Agent prompt；由其它入口创建的 Todo 附件随
   `/new` 送达 Agent 属后续独立需求，见 `docs/specs/todo-attachments.md`；
 - 不保证自动 watch 一定成功；匹配失败按 D22 明确告警。

@@ -1,6 +1,6 @@
 # 需求：Agent 生命周期追踪 + 状态窗口（实验性功能）
 
-> 状态：已实现（Unix），当前覆盖 Claude Code / Codex / Cursor / Grok。
+> 状态：已实现（macOS/Linux/Windows），当前覆盖 Claude Code / Codex / Cursor / Grok。
 > 关联计划：`docs/plans/agent-lifecycle-tracking.md`
 > 关联调研：`demo/agent-lifecycle/FINDINGS.md`（三家 hook 事件/env、Cursor 双触发去重、进程存活轮询为唯一不漏的结束信号、身份相关结论、各家标题来源——全部实测）
 > 影响面：daemon（新增 agent 注册表 + 存活轮询 + 持久化 + 闲退守卫 + 订阅推送）、IPC（`ipc/mod.rs` 新增消息）、CLI（`cli/mod.rs` 新增 `__agent-hook` 与 `agents` 子命令）、客户端（`client/` ask 顺带上报活动）、新 GUI 窗口（`?view=agents` + `app` 角色 + `commands`）、Hook 集成（新增三家 lifecycle hook 安装/卸载/状态 + Codex 信任哈希 Rust 实现）、配置（`config.rs` 新增 `experimental`）、设置前端（`SettingsView.vue` 实验区 + 新 Tab）、i18n。
@@ -10,6 +10,12 @@
 > `AskHuman agents monitor` 并由统一 GUI Host 承载。生命周期状态现被 IM `/status`、watch、插话、托盘和
 > daemon 闲退共同消费；Grok 的兼容 Hook 双触发由 `agents/report.rs` 去重。后文保留最初三家方案的决策过程，
 > D25–D27 与 §8 是 Codex shared app-server 的现行补充。
+>
+> **Windows 对齐补充（2026-08）**：Hook 通过安全 named pipe 上报；进程父链、命令行、启动时间、
+> session 与可执行路径使用 Toolhelp、QueryFullProcessImageName、NtQueryInformationProcess、
+> ProcessIdToSessionId 和 GetProcessTimes 原生读取，不在热路径启动 PowerShell/WMI。Codex 生成
+> `commandWindows` 并按 Windows 实际命令计算 trusted hash；Claude/Cursor timeout 产物使用
+> PowerShell 5 兼容 `.ps1`。
 
 ## 1. 背景
 
@@ -42,8 +48,8 @@ AskHuman agents status
 | 编号 | 决策项 | 结论 |
 |---|---|---|
 | D1 | 功能边界 | **仅**做「生命周期追踪 + 状态窗口 + Hook 安装开关」。**不含** IM 渠道 attach / 激活逻辑（留给后续激活需求） |
-| D2 | 平台范围 | **macOS + Linux**（daemon / hook / socket 依赖 Unix）。**Windows 完全不显示该设置**（不提示、不报错，等同功能不存在） |
-| D3 | 总架构 | **daemon 为中枢**：内存维护 agent 注册表 + 持久化到 `~/.askhuman/agents.json`；hook 子进程经 daemon socket 上报事件；`agents status` 开一个**长驻订阅** daemon 推送的 GUI 窗口（动态更新） |
+| D2 | 平台范围 | **macOS + Linux + Windows**；三平台共享 daemon、Hook 协议和状态机，操作系统差异限于 IPC 与进程适配。 |
+| D3 | 总架构 | **daemon 为中枢**：内存维护 agent 注册表 + 持久化到 `~/.askhuman/agents.json`；hook 子进程经用户私有 daemon endpoint 上报事件；`agents monitor` 打开一个**长驻订阅** daemon 推送的 GUI 窗口（动态更新），`--text/--json` 返回一次快照。 |
 | D4 | Hook 命令实现 | 统一走二进制隐藏子命令 `AskHuman __agent-hook <agent> <event>`：读 stdin JSON 取 `session_id`、运行时 `detectRunningAgent` 去重、向上 walk 进程树找 agent pid、连 daemon 上报、**exit 0 + 空 stdout**。**不**再写独立 shell 脚本 |
 | D5 | 事件集 | 安装 **sessionStart + turn-start + turn-end + sessionEnd** 四类（Codex 无 sessionEnd，仅前三）。**进程存活轮询是权威的「已结束」判据**（关窗 / kill-9 时 turn-end/sessionEnd 都不触发，全靠它）；turn 起止仅用于切「工作中 / 空闲」 |
 | D6 | 鲁棒性（不依赖 sessionStart） | 任意事件（**尤其 turn-start**）都要做 pid 发现 + **幂等登记**；缺 sessionStart 也能正常追踪 |
@@ -55,7 +61,7 @@ AskHuman agents status
 | D12 | TTL 兜底 | **仅当拿不到 / 无法轮询 pid 时**（如 Linux 上 Claude `CLAUDE_CODE_ENV_SCRUB` 的 PID namespace 隔离）启用：**超过 1 小时无任何活动**即判「已结束」。**任意 hook 事件**与**每次 `AskHuman` 提问调用**都重置该 session 的活动时间（一个 session 跑超过 1h 很正常，期间可能多次提问）。pid 可轮询时以轮询为准、**不**应用 TTL |
 | D13 | 排序 / 分组 | 顶层**按类型分组**（Claude / Codex / Cursor 区块）；区块内**按状态【工作中 → 空闲 → 已结束】**，同状态内按时间倒序（工作中/空闲按「最近活动」，已结束按「结束时间」） |
 | D14 | 显示范围 | **跨项目全部** agent（daemon 为 per-user，能看到所有项目） |
-| D15 | UI 入口 | 「通用」Tab 底部一个隐蔽开关「实验性功能」（持久化 `config.experimental.enabled`）；打开后出现新「实验」Tab，含三家追踪开关。**Windows 完全不渲染**该开关与 Tab |
+| D15 | UI 入口 | 当前入口为常显的「高级」Tab；macOS、Linux 与 Windows 均显示四家追踪开关。早期 `config.experimental.enabled` 只保留配置兼容。 |
 | D16 | per-agent 开关语义 | 开 = 安装用户级 lifecycle hook，关 = 卸载；开关状态以**实际安装状态**为准（同既有 hook 卡的 `*_status`）。与既有 timeout hook **各自独立**（不同标记、可共存）。**隐藏**「实验性功能」开关**不**卸载 hook（仅隐藏 UI；追踪继续） |
 | D17 | 写入方式 | 沿用既有 hook 的**格式保留编辑**（`claude_hook.rs` 的 jsonc CST 风格）：**只增删本功能自己的条目**，绝不改动其它 hook 的字节 / JSON 转义。Cursor=`~/.cursor/hooks.json`、Claude=`~/.claude/settings.json`、Codex=`~/.codex/config.toml` 的 `[hooks]` + `[hooks.state]` `trusted_hash`（**Rust 实现信任哈希**，参考 `FINDINGS §6.2` + `demo/agent-lifecycle/harness/codex-trust.cjs`） |
 | D18 | daemon 闲退 / 持久化 / 重连 | 闲时退出守卫**只受**【工作中 agent 数】与【状态窗口连接】影响（**空闲 agent 不保活**）；**版本更新 graceful-drain 不受 agent 影响**（仅在途 ASK 请求 gate drain，与今一致）；状态持久化 `agents.json`，daemon 重启 / 换新后重载并 `kill-0` 复核、剔除已死；状态窗口断连**自动重连**（必要时拉起 daemon） |
@@ -74,7 +80,7 @@ AskHuman agents status
 ## 5. 非目标（明确不做）
 
 - 不做 IM 渠道的 attach / detach / 激活门控（后续需求）。
-- 不做 Windows 支持（且 UI 完全隐藏）。
+- 不做 Windows RDS 多交互会话 broker；正式 Windows 范围是单个交互式桌面会话。
 - 不做 CLI 端的 enable/disable 与纯文本状态输出。
 - 不追踪 Pre/PostToolUse 等工具级事件（噪音大、对状态判定无必要）。
 - 不在本功能里改既有 timeout hook / 弹窗 / IM 渠道行为。

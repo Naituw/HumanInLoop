@@ -2324,7 +2324,7 @@ pub fn apply_window_effect(app: AppHandle, effect: WindowEffect) {
 }
 
 /// 渠道健康快照（R7）：向 daemon 查询各渠道最近未恢复的故障，设置页渠道 tab 据此显示错误横幅。
-/// daemon 未运行（或非 Unix 无 daemon）→ 空列表。
+/// daemon 未运行或不可达时返回空列表。
 #[tauri::command]
 pub async fn channel_health() -> Vec<crate::ipc::ChannelIssueInfo> {
     crate::client::request_status()

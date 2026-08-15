@@ -3,18 +3,24 @@
 记录需要跨会话保留的未完成 / 延期事项和明确下一步。任务 / 需求完成后删除其 section
 （历史留在 git）。
 
-## 待实施：Windows 功能与架构对齐
+## 待外部验收：Windows 发布候选
 
-现状审计、范围决策与分阶段方案见 `docs/specs/windows-platform-parity.md` 和
-`docs/plans/windows-platform-parity.md`。正式目标为 Windows 10 22H2+/Windows 11 x64、单交互桌面
-会话，以 shared daemon core + Windows named-pipe/platform adapters 补齐 daemon、GUI Host、Agent、
-主动 IM、终端和自更新；zip/npm 必达，Codex Windows 真机 E2E 必达，功能与双 VM 验收完成后最后配置
-Authenticode。ARM64、原生安装器和 RDS 多会话后置。
+功能与架构实现已在 `codex/windows-platform-parity` 完成；设计、实施记录和 Win11 证据见
+`docs/specs/windows-platform-parity.md` 与 `docs/plans/windows-platform-parity.md` §15。当前 Win11
+24H2 VM 已通过 PS5/PS7 install、named-pipe daemon、完整 Rust tests（1088 passed / 2 ignored）、
+Clippy、160 Vitest + 3 Node tests、production build、真实 authenticated Codex 0.147 E2E、卸载维护链和
+未签名 binary fail-closed 检查。
 
-2026-08-15 的 Win11 24H2 VM 基线：`install-windows.ps1` 被 Node 24 直接 spawn `pnpm.cmd` 的
-`EINVAL` 阻断；Rust 970 tests 中 941 通过、27 失败、2 忽略；daemon/GUI Host/Agent lifecycle 等仍报告
-Windows 不支持。下一步从计划 P0 开始：修安装链、清空 Windows 测试失败并把完整 Windows tests 纳入
-CI，再进入 transport/core 抽取。实施完成后删除本节，后置项另行保留。
+发布认证仍依赖仓库外状态：
+
+- 准备干净 Windows 10 22H2 x64 VM 并复跑核心矩阵；
+- 在生产 Azure Artifact Signing account/profile 上产出带 timestamp 的签名 zip/npm binary，验证
+  subject/hash，并在 Win11/Win10 记录 SmartScreen 与 clean upgrade/rollback；
+- 在真实交互式 Windows 桌面验收 tray/WebView2/DPI/多屏/输入法/文件选择/声音/login/logout；
+- 配置至少一个真实 IM 凭据，跑主动命令与重连 smoke。
+
+以上 gate 完成后删除本节。Windows ARM64、原生 installer、Windows Server/RDS 多会话是已确认后置
+项目，不属于当前 release candidate blocker。
 
 ## 待验收：本地 Markdown Mermaid 图表的跨平台实机运行
 

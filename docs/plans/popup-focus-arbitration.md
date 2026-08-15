@@ -1,5 +1,8 @@
 # 实现计划：并发 Popup 焦点仲裁与后方级联
 
+> Windows 注（2026-08）：本文的 Windows 单进程范围声明是首期历史记录；Windows 已接入 shared
+> daemon/GUI Host，焦点仲裁复用同一业务状态机，桌面实机矩阵仍是发布验收 gate。
+
 > 状态：已实现；macOS 真机验收与自动化验证通过。Linux 保留同构仲裁与 best-effort 展示路径，按确认不另记真机验收待办。
 > 范围：macOS 完整实现；Linux 复用 daemon 仲裁与级联位置策略，按窗口管理器能力兼容。
 > Windows 当前走非 Unix 单进程回退路径，不在本轮范围内。

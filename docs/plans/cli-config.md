@@ -1,5 +1,8 @@
 # CLI 配置与 Agent 集成 — 实现计划
 
+> Windows 注（2026-08）：本文保留首期无 daemon 降级步骤；当前 Windows CLI 已连接 shared daemon，
+> channel/detect/doctor/monitor 与 Agent 集成不再走 unsupported 分支。
+
 > 需求见 `docs/specs/cli-config.md`。本计划只描述方案与必要规则，不堆具体代码。
 
 ## 0. 总体思路

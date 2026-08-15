@@ -1,5 +1,8 @@
 # 实现计划：Agent 插话（Interject）
 
+> Windows 注（2026-08）：本文保留首期 Unix 实施步骤；Windows 已由平台对齐项目复用同一 daemon
+> 队列、Hook 与 GUI Host，以下 Unix-only 描述仅作历史记录。
+
 > 需求/调研/定案见 `docs/specs/agent-interject.md`（D1–D9）。本计划按里程碑拆解，
 > 每个里程碑可独立编译、单测通过。Unix only；Grok 全程排除（D1）。
 
