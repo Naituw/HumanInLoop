@@ -669,15 +669,16 @@ fn which_codex() -> Option<PathBuf> {
     candidates.into_iter().find(|path| is_executable(path))
 }
 
+#[cfg(windows)]
 fn codex_system_config_dir() -> PathBuf {
-    #[cfg(windows)]
-    {
-        return std::env::var_os("ProgramData")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
-            .join("OpenAI/Codex");
-    }
-    #[cfg(not(windows))]
+    std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+        .join("OpenAI/Codex")
+}
+
+#[cfg(not(windows))]
+fn codex_system_config_dir() -> PathBuf {
     PathBuf::from("/etc/codex")
 }
 
