@@ -10,15 +10,12 @@
 //! `demo/agent-lifecycle/FINDINGS.md`。
 
 pub mod activity;
-#[cfg(unix)]
 pub mod context_recovery;
 pub mod cursor_vscdb;
 pub mod detect;
 pub mod interject;
 pub mod registry;
-#[cfg(unix)]
 pub mod report;
-#[cfg(unix)]
 pub mod stop;
 pub mod title;
 pub mod transcript_full;

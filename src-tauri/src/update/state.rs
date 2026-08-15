@@ -140,32 +140,8 @@ pub fn set_pending(pending: bool) {
 
 // ===== Cross-process write lock =====
 
-#[cfg(unix)]
-struct LockGuard {
-    _file: std::fs::File,
-}
-
-#[cfg(unix)]
-fn lock_at(path: &Path) -> Option<LockGuard> {
-    use std::os::unix::io::AsRawFd;
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(path)
-        .ok()?;
-    unsafe {
-        libc::flock(file.as_raw_fd(), libc::LOCK_EX);
-    }
-    Some(LockGuard { _file: file })
-}
-
-#[cfg(not(unix))]
-fn lock_at(_path: &Path) -> Option<()> {
-    None
+fn lock_at(path: &Path) -> Option<crate::file_lock::FileLock> {
+    crate::file_lock::FileLock::exclusive(path).ok()
 }
 
 #[cfg(test)]

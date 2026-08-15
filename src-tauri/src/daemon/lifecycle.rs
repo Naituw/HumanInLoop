@@ -302,44 +302,21 @@ pub fn write_meta(meta: &DaemonMeta) -> std::io::Result<()> {
     std::fs::write(meta_path(), data)
 }
 
-/// 持有期间代表「本进程为唯一 Daemon」。Drop（文件关闭）时锁自动释放。
-#[cfg(unix)]
-pub struct LockGuard {
-    _file: std::fs::File,
-}
+/// 持有期间代表「本进程为唯一 Daemon」。Drop 时系统文件锁自动释放。
+pub type LockGuard = crate::file_lock::FileLock;
 
 /// 尝试获取单实例锁（非阻塞）。
 /// - `Ok(Some(guard))`：成功，本进程是唯一 Daemon。
 /// - `Ok(None)`：已有其它 Daemon 持锁。
 /// - `Err`：其它 IO 错误。
-#[cfg(unix)]
 pub fn acquire_lock() -> std::io::Result<Option<LockGuard>> {
     acquire_lock_at(&lock_path())
 }
 
-/// 在指定路径上尝试获取 flock 单实例锁（非阻塞）。供 daemon（`daemon.lock`）与
+/// 在指定路径上尝试获取单实例文件锁（非阻塞）。供 daemon（`daemon.lock`）与
 /// GUI 宿主（`gui-host.lock`）共用。返回值语义同 `acquire_lock`。
-#[cfg(unix)]
 pub fn acquire_lock_at(path: &Path) -> std::io::Result<Option<LockGuard>> {
-    use std::os::unix::io::AsRawFd;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(path)?;
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        // 已被其它进程持有（EWOULDBLOCK 与 EAGAIN 在各 Unix 上同值）。
-        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            return Ok(None);
-        }
-        return Err(err);
-    }
-    Ok(Some(LockGuard { _file: file }))
+    crate::file_lock::FileLock::try_exclusive(path)
 }
 
 #[cfg(test)]

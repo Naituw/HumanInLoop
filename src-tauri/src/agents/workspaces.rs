@@ -9,11 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-#[cfg(unix)]
-use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader};
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -140,41 +136,11 @@ pub fn forget(path: &str) -> Result<(), String> {
     save(&state).map_err(|e| e.to_string())
 }
 
-#[cfg(unix)]
-struct WorkspaceLock(fs::File);
-
-#[cfg(not(unix))]
-struct WorkspaceLock;
+struct WorkspaceLock(crate::file_lock::FileLock);
 
 impl WorkspaceLock {
     fn acquire() -> std::io::Result<Self> {
-        #[cfg(unix)]
-        {
-            if let Some(parent) = paths::agent_workspaces_lock().parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let file = OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(paths::agent_workspaces_lock())?;
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(Self(file))
-        }
-        #[cfg(not(unix))]
-        Ok(Self)
-    }
-}
-
-#[cfg(unix)]
-impl Drop for WorkspaceLock {
-    fn drop(&mut self) {
-        unsafe {
-            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
-        }
+        crate::file_lock::FileLock::exclusive(&paths::agent_workspaces_lock()).map(Self)
     }
 }
 

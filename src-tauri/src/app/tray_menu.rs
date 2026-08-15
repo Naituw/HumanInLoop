@@ -12,8 +12,6 @@
 //! 生产用 [`TauriBackend`] 包 Tauri 菜单对象；单测用 mock 后端记录每步操作，从而既验证 diff 结果、又验证
 //! 操作的**最小性**（见文件末尾测试）。
 
-#![cfg(unix)]
-
 use tauri::menu::{
     IsMenuItem, Menu, MenuItem, MenuItemBuilder, PredefinedMenuItem, Submenu, SubmenuBuilder,
 };

@@ -48,16 +48,7 @@ pub fn run(args: &[String]) {
         return;
     }
     // 不在 hook 侧 walk 进程树（~280ms），改发 ppid 给 daemon 缓存解析。
-    let hint_pid = {
-        #[cfg(unix)]
-        {
-            Some(unsafe { libc::getppid() } as u32)
-        }
-        #[cfg(not(unix))]
-        {
-            None::<u32>
-        }
-    };
+    let hint_pid = detect::parent_pid(std::process::id());
     let cwd = resolve_cwd(&env, stdin.as_ref());
     let launch_id = env
         .get(crate::integrations::agent_launch::LAUNCH_ID_ENV)
@@ -122,7 +113,7 @@ pub(super) fn report_simple_event(
     if session_id.trim().is_empty() {
         return;
     }
-    let hint_pid = Some(unsafe { libc::getppid() } as u32);
+    let hint_pid = detect::parent_pid(std::process::id());
     crate::client::report_agent_event(ClientMsg::AgentEvent {
         agent: intended.as_str().to_string(),
         event: event.as_str().to_string(),

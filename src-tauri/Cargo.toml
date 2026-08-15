@@ -43,6 +43,7 @@ uuid = { version = "1", features = ["v4"] }
 # 会话型渠道公共接口（Telegram/钉钉等共享多问题驱动逻辑）需要 async trait。
 async-trait = "0.1"
 dirs = "6"
+fs2 = "0.4"
 base64 = "0.22"
 anyhow = "1"
 thiserror = "2"
@@ -99,6 +100,7 @@ keyring = { version = "3", default-features = false, features = ["windows-native
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Registry",
   "Win32_System_Threading",
 ] }
 

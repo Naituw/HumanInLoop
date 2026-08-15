@@ -7,7 +7,6 @@
 //! 永远不弹窗”。因此只要 `gui/<uid>` 可用，就统一 bootstrap 到该 domain：既能静默读取登录钥匙串，
 //! 也会在登出时随 GUI domain 一起退出。纯 headless 环境无法 bootstrap 时才回退 setsid。
 
-#[cfg(unix)]
 pub fn spawn_detached() -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -16,7 +15,59 @@ pub fn spawn_detached() -> std::io::Result<()> {
         }
         // GUI 域不可用（纯 headless）→ 回退原 setsid 拉起。
     }
-    spawn_plain_detached()
+    #[cfg(unix)]
+    {
+        spawn_plain_detached()
+    }
+    #[cfg(windows)]
+    {
+        spawn_windows_detached()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "daemon spawning is unsupported on this platform",
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn spawn_windows_detached() -> std::io::Result<()> {
+    use super::lifecycle;
+    use std::process::{Command, Stdio};
+
+    let exe = std::env::current_exe()?;
+    if let Some(dir) = lifecycle::log_path().parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(lifecycle::log_path())?;
+    let log_err = log.try_clone()?;
+    let mut command = Command::new(exe);
+    command
+        .arg("daemon")
+        .arg("run")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_err));
+    configure_background(&mut command);
+    command.spawn().map(|_| ())
+}
+
+/// Prevent background roles from opening a second console while keeping ordinary CLI output.
+pub fn configure_background(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
 }
 
 /// 原始拉起方式：`setsid` 新建会话 + stdio 重定向到 daemon.log，直接继承当前会话上下文。

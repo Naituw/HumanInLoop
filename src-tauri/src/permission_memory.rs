@@ -2263,11 +2263,10 @@ mod tests {
         std::fs::create_dir_all(&codex_home).unwrap();
         let cwd = root.to_string_lossy().to_string();
         let write_config = |command: &str, extra: &str| {
+            let command = toml_edit::Value::from(command).to_string();
             std::fs::write(
                 codex_home.join("config.toml"),
-                format!(
-                    "[mcp_servers.askhuman]\ncommand = \"{command}\"\nargs = [\"mcp\"]\n{extra}"
-                ),
+                format!("[mcp_servers.askhuman]\ncommand = {command}\nargs = [\"mcp\"]\n{extra}"),
             )
             .unwrap();
         };
@@ -2521,8 +2520,8 @@ mod tests {
         std::fs::write(
             codex_home.join("config.toml"),
             format!(
-                "[mcp_servers.askhuman]\ncommand = \"{}\"\n",
-                exe.to_string_lossy()
+                "[mcp_servers.askhuman]\ncommand = {}\n",
+                toml_edit::Value::from(exe.to_string_lossy().as_ref())
             ),
         )
         .unwrap();
@@ -2534,8 +2533,8 @@ mod tests {
         std::fs::write(
             project.join(".codex/config.toml"),
             format!(
-                "[mcp_servers.askhuman]\ncommand = \"{}\"\n",
-                impostor.to_string_lossy()
+                "[mcp_servers.askhuman]\ncommand = {}\n",
+                toml_edit::Value::from(impostor.to_string_lossy().as_ref())
             ),
         )
         .unwrap();
@@ -2775,8 +2774,8 @@ mod tests {
 
         // Mark the project trusted (raw key): project config becomes the target.
         let trusted = format!(
-            "[mcp_servers.github]\ncommand = \"user\"\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
-            root.to_string_lossy()
+            "[mcp_servers.github]\ncommand = \"user\"\n[projects.{}]\ntrust_level = \"trusted\"\n",
+            toml_edit::Value::from(root.to_string_lossy().as_ref())
         );
         std::fs::write(home.path().join("config.toml"), trusted).unwrap();
         let (memory, _) =
@@ -2892,7 +2891,7 @@ mod tests {
         else {
             panic!("expected network rule write");
         };
-        assert!(rules_path.ends_with("/rules/default.rules"));
+        assert!(Path::new(rules_path).ends_with(Path::new("rules").join("default.rules")));
         assert_eq!(host, "api.github.com");
         assert_eq!(protocol, "https");
         // Bridge session rule keeps the port dimension.
@@ -3170,7 +3169,8 @@ mod tests {
             always.native,
             Some(crate::permission_rules::NativeWrite::PrefixRule { ref prefix, ref rules_path })
                 if prefix == &["cargo".to_string(), "build".into()]
-                    && rules_path.ends_with("/rules/default.rules")
+                    && Path::new(rules_path)
+                        .ends_with(Path::new("rules").join("default.rules"))
         ));
         // The plain label carries no implementation detail.
         let always_choice = extra_choices

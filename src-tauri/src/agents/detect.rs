@@ -254,6 +254,14 @@ pub fn walk_any_agent_from_self() -> Option<(AgentKind, u32)> {
     walk_any_agent(std::process::id())
 }
 
+/// Return the direct parent process id using the platform process snapshot.
+pub fn parent_pid(pid: u32) -> Option<u32> {
+    process_chain(pid)
+        .first()
+        .map(|entry| entry.ppid)
+        .filter(|parent| *parent != 0)
+}
+
 /// 识别 `pid` 所在的终端 App：沿进程链向上找首个已知终端祖先，返回稳定标识串
 /// （`apple-terminal` / `iterm2` / `ghostty` / `kitty` / `wezterm` / `alacritty` / `tmux`
 /// / `vscode` / `cursor`）；找不到（或非 unix）返回 `None`。

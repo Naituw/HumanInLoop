@@ -89,31 +89,9 @@ fn ensure_presets_dir() -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-struct LockGuard {
-    _file: std::fs::File,
-}
-
-#[cfg(unix)]
-fn lock_presets() -> Option<LockGuard> {
-    use std::os::unix::io::AsRawFd;
+fn lock_presets() -> Option<crate::file_lock::FileLock> {
     let _ = ensure_presets_dir();
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(lock_path())
-        .ok()?;
-    unsafe {
-        libc::flock(file.as_raw_fd(), libc::LOCK_EX);
-    }
-    Some(LockGuard { _file: file })
-}
-
-#[cfg(not(unix))]
-fn lock_presets() -> Option<()> {
-    let _ = ensure_presets_dir();
-    Some(())
+    crate::file_lock::FileLock::exclusive(&lock_path()).ok()
 }
 
 fn read_index() -> PresetIndex {

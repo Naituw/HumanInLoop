@@ -1223,8 +1223,8 @@ mod tests {
         std::fs::write(
             home.path().join("config.toml"),
             format!(
-                "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
-                root.to_string_lossy()
+                "[projects.{}]\ntrust_level = \"trusted\"\n",
+                toml_edit::Value::from(root.to_string_lossy().as_ref())
             ),
         )
         .unwrap();

@@ -13,7 +13,7 @@ use crate::ipc::{
 use std::io::{Error, ErrorKind};
 use std::time::{Duration, Instant};
 use tokio::io::BufReader;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use transport::{OwnedReadHalf, OwnedWriteHalf};
 
 type Reader = BufReader<OwnedReadHalf>;
 

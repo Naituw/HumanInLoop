@@ -2,10 +2,8 @@
 
 pub mod confirm_coordinator;
 pub mod coordinator;
-#[cfg(unix)]
 pub mod gui_host;
 pub mod terminal_gate;
-#[cfg(unix)]
 pub mod tray_menu;
 
 use crate::channels::dingding::DingTalkChannel;
@@ -74,13 +72,10 @@ enum View {
         all: bool,
     },
     /// 独立项目待办窗口（`AskHuman --todos`）；预选项目取自 `AppState.project`。
-    #[cfg(unix)]
     Todos,
     /// Agent 生命周期状态窗口（实验性功能，spec D13）：订阅 daemon 推送，动态更新。
-    #[cfg(unix)]
     Agents,
     /// 统一 GUI 宿主（菜单栏托盘 + 各窗口单实例，spec D2）：无初始窗口，常驻事件循环。
-    #[cfg(unix)]
     GuiHost,
 }
 
@@ -98,7 +93,6 @@ pub struct PopupIpc {
 
 /// 方案6 预热弹窗的「领用槽」：热进程建窗挂载后停在待命态（`show=None`）；daemon 发来 `Show` 即填入，
 /// 前端经 `popup_init` 读到后渲染、绘制完成才 `show()`。仅预热弹窗进程 manage 本状态。
-#[cfg(unix)]
 pub struct WarmPopup {
     pub show: std::sync::Mutex<Option<crate::ipc::ShowPayload>>,
     pub finalized: AtomicBool,
@@ -767,7 +761,6 @@ pub fn run_history(project: String, all: bool, config: AppConfig) -> ! {
 
 /// 待办窗口模式：独立进程建窗（gui-host 不可用时的兜底；与 `--settings` / `--history` 同机制）。
 /// `project` 为预选项目 key（通常是 CLI cwd 的 git 根），写入 `AppState.project`。
-#[cfg(unix)]
 pub fn run_todos(project: String, config: AppConfig) -> ! {
     let lang = Lang::resolve(&config.general.language);
     let state = AppState {
@@ -800,7 +793,6 @@ pub fn run_todos(project: String, config: AppConfig) -> ! {
 
 /// Agent 状态窗口入口（`AskHuman agents status`，实验性功能 spec D13）：
 /// 创建窗口 + 订阅 daemon 推送，动态展示工作中 / 空闲 / 已结束的 agent。
-#[cfg(unix)]
 pub fn run_agents(config: AppConfig) -> ! {
     let lang = Lang::resolve(&config.general.language);
     let state = AppState {
@@ -835,7 +827,6 @@ pub fn run_agents(config: AppConfig) -> ! {
 ///
 /// 抢宿主单实例锁失败（已有宿主）即直接退出；成功则进入 Tauri 事件循环常驻，
 /// 经自有 IPC 接收开窗请求、订阅 daemon 状态驱动托盘、监听配置热更新。
-#[cfg(unix)]
 pub fn run_gui_host(config: AppConfig) -> ! {
     if !gui_host::acquire_singleton() {
         // 已有宿主在跑（或锁被占）：本进程多余，直接退出。
@@ -869,7 +860,6 @@ pub fn run_gui_host(config: AppConfig) -> ! {
 ///
 /// 流程：连 Daemon → 出示一次性 token → 收 `show` → 本进程主线程跑 Tauri 弹窗；
 /// 用户作答 / 取消经 IPC `answer` 回 Daemon；收到 `cancel` 或连接断开即退出。
-#[cfg(unix)]
 pub fn run_gui_helper(_endpoint: String, token: String, warm: bool) -> ! {
     use crate::ipc::{self, transport, ClientMsg, ServerMsg};
     use tokio::io::BufReader;
@@ -1029,12 +1019,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
     let show_popup = is_helper || state.config.channels.popup.enabled || !messaging_active;
     // 提问模式下抑制「关窗即退出」：收尾 / 等待 Daemon 收尾时弹窗会先关，需留进程主动退出。
     // 设置模式不抑制，关窗即正常退出。宿主模式恒抑制（窗口全关后是否退出由宿主自身判定）。
-    let prevent_autoexit = match view {
-        View::Popup => true,
-        #[cfg(unix)]
-        View::GuiHost => true,
-        _ => false,
-    };
+    let prevent_autoexit = matches!(view, View::Popup | View::GuiHost);
 
     crate::perf::mark_env("gui.build_start");
     let app = tauri::Builder::default()
@@ -1238,7 +1223,6 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                 }
                 _ => {}
             }
-            #[cfg(unix)]
             if matches!(event, WindowEvent::Destroyed) && gui_host::is_hosted_label(window.label())
             {
                 // 插话窗口销毁 → 关闭其 composer 连接（daemon 视为「composer 关闭」，放行等待 hook）。
@@ -1255,12 +1239,9 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
         })
         .on_menu_event(|app, event| {
             // 托盘菜单事件仅在宿主进程内有 HostState；其余进程无托盘、忽略。
-            #[cfg(unix)]
             if app.try_state::<gui_host::HostState>().is_some() {
                 gui_host::on_menu_event(app, event.id().as_ref());
             }
-            #[cfg(not(unix))]
-            let _ = (app, event);
         })
         .setup(move |app| {
             // 方案6：预热弹窗待命期不该入坞——尽早设 accessory（在设 Dock 图标 / 建窗前），避免常驻 Dock 图标。
@@ -1311,7 +1292,6 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                         set_runtime_window_effect_with_bg(&win, window_effect, window_bg);
                         // Todos may be added from the separate manager window, CLI, MCP, or IM
                         // while this question is open. Keep the popup's project list live.
-                        #[cfg(unix)]
                         watch_todos_file(win.clone());
                         // 预热路径：窗口保持隐藏待命，待 `Show` 领用、前端绘制完成后由 `popup_show_window` 上屏。
                         if !warm && !is_helper {
@@ -1345,7 +1325,6 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                                 app: app.handle().clone(),
                             });
                             // 方案6 预热：manage 领用槽（None=待命）；首条 `Show` 经 reader 循环填入并唤醒前端。
-                            #[cfg(unix)]
                             if warm {
                                 app.manage(WarmPopup {
                                     show: std::sync::Mutex::new(None),
@@ -1365,7 +1344,6 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                                         // 方案6 预热领用：首条 `Show` 把请求注入已挂载的待命弹窗。
                                         // 回填 GuiBridge.request_id + 存入领用槽，再 emit 唤醒前端拉取渲染
                                         //（前端 pull `popup_init` 取已领用请求 → 绘制 → 调 `popup_show_window` 上屏）。
-                                        #[cfg(unix)]
                                         Ok(Some(crate::ipc::ServerMsg::Show(show))) => {
                                             use tauri::{Emitter, Manager};
                                             // 方案6 埋点：热 helper 无 perf env，领用时由 Show 注入 perf 上下文，
@@ -1387,7 +1365,6 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                                             }
                                             let _ = app_handle.emit("popup-show", ());
                                         }
-                                        #[cfg(unix)]
                                         Ok(Some(crate::ipc::ServerMsg::PresentPopup {
                                             request_id,
                                             presentation,
@@ -1534,7 +1511,6 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                     // 进程内默认项目（AppState.project = CLI 探测的当前项目）→ 传 None 沿用。
                     create_history_window(app, &config, all, None, None, popup_pin(app, &config))?;
                 }
-                #[cfg(unix)]
                 View::Todos => {
                     let config = AppConfig::load_without_secrets();
                     // 预选项目在 AppState.project（CLI 探测的 cwd git 根）。
@@ -1542,12 +1518,10 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                     let preselect = (!project.is_empty()).then_some(project.as_str());
                     create_todos_window(app, &config, preselect, popup_pin(app, &config))?;
                 }
-                #[cfg(unix)]
                 View::GuiHost => {
                     let config = AppConfig::load_without_secrets();
                     gui_host::setup(app, &config)?;
                 }
-                #[cfg(unix)]
                 View::Agents => {
                     let config = AppConfig::load_without_secrets();
                     create_agents_window(app, &config, None, false)?;
@@ -1567,7 +1541,6 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
     app.run(move |app_handle, event| {
         // 宿主模式：托管窗口全关也不退出（是否退出由宿主自身 evaluate_exit 经 app.exit() 决定）。
         // 故拦下一切「关窗触发」的退出（code=None）；宿主主动退出走 app.exit(code) → code=Some 放行。
-        #[cfg(unix)]
         if app_handle.try_state::<gui_host::HostState>().is_some() {
             if let RunEvent::ExitRequested { code, api, .. } = &event {
                 if code.is_none() {
@@ -2328,7 +2301,6 @@ fn urlencode(s: &str) -> String {
 /// 创建（或聚焦已存在的）Agent 控制台窗口（spec D13 / gui-agent-console）。
 /// `session` 为可选目标会话（R4 可寻址打开）：已开窗经 `agents-goto` 事件选中，
 /// 新建经 URL 参数传递。`pin_above_popup` 与设置/历史窗口同义，保证从置顶弹窗打开时可见。
-#[cfg(unix)]
 pub(crate) fn create_agents_window<R, M>(
     manager: &M,
     config: &AppConfig,
@@ -2378,7 +2350,6 @@ where
 /// 创建（或聚焦已存在的）项目待办窗口（spec todo-whats-next D9）：全局唯一（label `todos`）。
 /// `project_override` 为 Some 时窗口预选该项目（经 URL 参数传递）；None 由前端自选默认项目。
 /// 实时同步：监听 `todos.json` 变化 → `todos-updated` 事件（daemon 不参与，窗口独立可用）。
-#[cfg(unix)]
 pub(crate) fn create_todos_window<R, M>(
     manager: &M,
     config: &AppConfig,
@@ -2427,7 +2398,6 @@ where
 /// 监听 `todos.json` 变更并向目标窗口发 `todos-updated`（待办窗口与提问 Popup 都据此重载；
 /// 写入方可能是任意进程，靠文件监听跨进程感知）。原子写（tmp + rename）换 inode，故监听
 /// **state 目录**再按文件名过滤（与 `watch_history_file` 同思路）。
-#[cfg(unix)]
 fn watch_todos_file<R: tauri::Runtime>(window: tauri::WebviewWindow<R>) {
     use tauri::Emitter;
     std::thread::spawn(move || {
@@ -2479,7 +2449,6 @@ fn watch_todos_file<R: tauri::Runtime>(window: tauri::WebviewWindow<R>) {
 /// （label `newtask`）。`project_override` / `todo_override` 为预选项目 key 与待办 id（经 URL
 /// 参数传递）；已开窗时经 `newtask-goto` 事件更新预选。`todos.json` 变化经 `todos-updated`
 /// 事件驱动前端重载所选项目待办（复用 `watch_todos_file`）。
-#[cfg(unix)]
 pub(crate) fn create_new_task_window<R, M>(
     manager: &M,
     config: &AppConfig,
@@ -2538,7 +2507,6 @@ where
 
 /// Create or retarget the global native-session Fork window. It is independent from `newtask`, so
 /// drafts in either workflow never overwrite the other.
-#[cfg(unix)]
 pub(crate) fn create_fork_task_window<R, M>(
     manager: &M,
     config: &AppConfig,
@@ -2584,7 +2552,6 @@ where
 /// （label 带 session 哈希）。URL 携带 session / agent 家族 / 项目显示名，前端据此渲染头部；
 /// 待送达预填文本由前端经 `interject_init` 向 daemon 查询（连接生命周期与窗口一致）。
 /// `pin_above_popup` 语义同 [`create_settings_window`]。
-#[cfg(unix)]
 pub(crate) fn create_interject_window<R, M>(
     manager: &M,
     config: &AppConfig,
@@ -2638,7 +2605,6 @@ where
 ///   （让 daemon 重推一帧立即快照，避免长命进程里复用旧订阅而首屏长时间 Loading），窗口关闭即停
 ///   （释放 daemon 连接，不再把 daemon 续命）。详见 `gui_host::restart_agents_subscription`。
 /// - **独立 agents 进程 / 弹窗兜底**（随窗口退出的短命进程）：一次性启动即可（进程退出即停）。
-#[cfg(unix)]
 pub(crate) fn start_agents_subscription(app: tauri::AppHandle) {
     if app.try_state::<gui_host::HostState>().is_some() {
         gui_host::restart_agents_subscription(&app);
@@ -2653,20 +2619,17 @@ pub(crate) fn start_agents_subscription(app: tauri::AppHandle) {
 
 /// 控制台焦点槽：`(当前订阅周期的焦点发送端, 最近一次设置的焦点会话)`。
 /// 焦点经订阅连接送达 daemon（spec gui-agent-console C8）；断连重连后按 `.1` 补发恢复。
-#[cfg(unix)]
 type AgentsFocusSlot = std::sync::Mutex<(
     Option<tokio::sync::mpsc::UnboundedSender<Option<String>>>,
     Option<String>,
 )>;
 
-#[cfg(unix)]
 fn agents_focus_slot() -> &'static AgentsFocusSlot {
     static SLOT: std::sync::OnceLock<AgentsFocusSlot> = std::sync::OnceLock::new();
     SLOT.get_or_init(|| std::sync::Mutex::new((None, None)))
 }
 
 /// 设置控制台焦点会话（None＝取消）：记录以供重连补发，并 best-effort 发给当前订阅周期。
-#[cfg(unix)]
 pub(crate) fn set_agents_focus(session_id: Option<String>) {
     let Ok(mut slot) = agents_focus_slot().lock() else {
         return;
@@ -2681,7 +2644,6 @@ pub(crate) fn set_agents_focus(session_id: Option<String>) {
 /// 焦点会话详情帧转成 `agent-detail` 事件（spec gui-agent-console C8）。
 /// 断连后退避重连（必要时 `open_for_subscribe` 会自动拉起 daemon），重连补发当前焦点。
 /// `stop` 为 Some 时（宿主）被通知即整体退出（窗口关闭/重启订阅用）；为 None 时随进程退出。
-#[cfg(unix)]
 pub(crate) fn spawn_agents_subscription(
     app: tauri::AppHandle,
     stop: Option<std::sync::Arc<tokio::sync::Notify>>,

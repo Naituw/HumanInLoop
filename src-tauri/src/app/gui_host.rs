@@ -8,8 +8,6 @@
 //! - 配置监听：菜单栏模式 / 语言变化 → 重建菜单 + 装/卸登录项 + 切活动策略。
 //! - 二进制换新：盘上二进制变化且无窗口时 re-exec / 交 launchd（spec D11）。
 
-#![cfg(unix)]
-
 use crate::app::tray_menu::{Node, TrayMenu};
 use crate::config::{AppConfig, DaemonLifecycleMode, MenuBarIconMode, ThemeMode};
 use crate::daemon::lifecycle::{self, Fingerprint, LockGuard};
@@ -1534,7 +1532,7 @@ fn start_ipc_listener(app: AppHandle) {
     });
 }
 
-async fn handle_host_conn(stream: tokio::net::UnixStream, app: AppHandle) {
+async fn handle_host_conn(stream: transport::Stream, app: AppHandle) {
     let (r, mut w) = stream.into_split();
     let mut reader = BufReader::new(r);
     while let Ok(Some(msg)) = ipc::read_msg::<_, HostMsg>(&mut reader).await {

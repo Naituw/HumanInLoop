@@ -1,4 +1,4 @@
-//! Daemon 主体（Unix）：状态与类型、serve 主循环、连接分发、请求提交与生命周期命令。
+//! Shared daemon server: state, accept loop, request routing, channels, and lifecycle commands.
 //! watch/select/inbound/subs/detect 的自由函数拆为子模块，经 glob 导入保持单一命名空间。
 
 use super::ask_dedup;
@@ -31,8 +31,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::BufReader;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::UnixStream;
+use transport::{OwnedReadHalf, OwnedWriteHalf, Stream};
 
 mod detect;
 mod fork;
@@ -1195,7 +1194,7 @@ enum Control {
     Closed,
 }
 
-async fn handle_conn(stream: UnixStream, state: Arc<ServerState>) {
+async fn handle_conn(stream: Stream, state: Arc<ServerState>) {
     state.active.fetch_add(1, Ordering::SeqCst);
     let (r, w) = stream.into_split();
     let mut reader = BufReader::new(r);
@@ -2717,6 +2716,10 @@ fn tray_supported() -> bool {
     {
         std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
     }
+    #[cfg(windows)]
+    {
+        has_display()
+    }
 }
 
 /// 按配置兜底拉起 GUI 宿主（spec D14）：`menu_bar_icon != off` 且托盘可用时尝试 spawn。
@@ -3592,6 +3595,7 @@ fn spawn_gui_helper(token: &str, perf_id: &str, perf_autodismiss: bool) -> std::
             cmd.env("ASKHUMAN_PERF_AUTODISMISS", "1");
         }
     }
+    crate::daemon::spawn::configure_background(&mut cmd);
     cmd.spawn().map(|_| ())
 }
 
@@ -3608,6 +3612,7 @@ fn spawn_warm_helper() -> std::io::Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    crate::daemon::spawn::configure_background(&mut cmd);
     cmd.spawn().map(|_| ())
 }
 
@@ -3640,6 +3645,12 @@ fn has_display() -> bool {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
+    }
+    #[cfg(windows)]
+    {
+        !std::env::var("SESSIONNAME")
+            .map(|name| name.eq_ignore_ascii_case("services"))
+            .unwrap_or(false)
     }
 }
 
@@ -3742,6 +3753,7 @@ fn recycle_warm(state: &Arc<ServerState>) {
 }
 
 fn cleanup() {
+    #[cfg(unix)]
     let _ = std::fs::remove_file(transport::socket_path());
     let _ = std::fs::remove_file(lifecycle::meta_path());
 }

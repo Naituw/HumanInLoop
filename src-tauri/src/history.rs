@@ -465,43 +465,13 @@ fn harden(_path: &Path) {}
 
 // ===== Cross-process write lock =====
 
-#[cfg(unix)]
-struct LockGuard {
-    _file: std::fs::File,
-}
-
 /// Acquire an exclusive (blocking) advisory lock for the duration of a write. Released on drop.
-#[cfg(unix)]
-fn lock() -> Option<LockGuard> {
+fn lock() -> Option<crate::file_lock::FileLock> {
     lock_strict().ok()
 }
 
-#[cfg(unix)]
-fn lock_strict() -> io::Result<LockGuard> {
-    use std::os::unix::io::AsRawFd;
-    if let Some(dir) = paths::history_lock().parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(paths::history_lock())?;
-    let status = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
-    if status != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(LockGuard { _file: file })
-}
-
-#[cfg(not(unix))]
-fn lock() -> Option<()> {
-    lock_strict().ok()
-}
-
-#[cfg(not(unix))]
-fn lock_strict() -> io::Result<()> {
-    Ok(())
+fn lock_strict() -> io::Result<crate::file_lock::FileLock> {
+    crate::file_lock::FileLock::exclusive(&paths::history_lock())
 }
 
 #[cfg(test)]
