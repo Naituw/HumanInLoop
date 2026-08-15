@@ -166,14 +166,20 @@ describe("renderMermaid", () => {
     ).rejects.toMatchObject({ code: "tooLarge" });
   });
 
-  it("enforces the configured edge limit", async () => {
-    const edges = Array.from(
-      { length: MERMAID_MAX_EDGES + 1 },
-      (_, index) => `N${index}-->N${index + 1}`,
-    ).join("\n");
-    await expect(renderMermaid(`flowchart TD\n${edges}`, "light")).rejects
-      .toMatchObject({ code: "renderFailed" });
-  });
+  it(
+    "enforces the configured edge limit",
+    async () => {
+      const edges = Array.from(
+        { length: MERMAID_MAX_EDGES + 1 },
+        (_, index) => `N${index}-->N${index + 1}`,
+      ).join("\n");
+      await expect(renderMermaid(`flowchart TD\n${edges}`, "light")).rejects
+        .toMatchObject({ code: "renderFailed" });
+    },
+    // Mermaid parses the intentionally oversized graph before rejecting it. Windows CI and
+    // constrained VMs can take longer than Vitest's generic 5-second unit-test default.
+    15_000,
+  );
 
   it("renders and normalizes a real Mermaid flowchart", async () => {
     const result = await renderMermaid(
