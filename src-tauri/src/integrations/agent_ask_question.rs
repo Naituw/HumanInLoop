@@ -37,7 +37,7 @@ struct Preferences {
 
 /// Only Claude Code has a built-in question tool to take over.
 pub fn supported(kind: AgentKind) -> bool {
-    cfg!(unix) && kind == AgentKind::Claude
+    kind == AgentKind::Claude
 }
 
 /// Defaults to on: answering Claude's own questions remotely is the point of AskHuman.

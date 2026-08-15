@@ -106,6 +106,8 @@ pub fn interject_label(session_id: &str) -> String {
     format!("interject-{:016x}", h.finish())
 }
 
+#[cfg(windows)]
+pub use platform_impl::shutdown_if_running;
 pub use platform_impl::{bind, host_open, host_open_history, spawn_detached, spawn_detached_from};
 
 mod platform_impl {
@@ -123,6 +125,17 @@ mod platform_impl {
     /// Connect to the GUI Host's private local endpoint.
     async fn connect() -> std::io::Result<transport::Stream> {
         transport::connect_role("gui-host").await
+    }
+
+    /// Ask an existing GUI Host to exit without starting one when none is running.
+    pub async fn shutdown_if_running() -> bool {
+        let Ok(stream) = connect().await else {
+            return false;
+        };
+        let (_reader, mut writer) = stream.into_split();
+        ipc::write_msg(&mut writer, &HostMsg::Shutdown)
+            .await
+            .is_ok()
     }
 
     /// 后台拉起宿主进程（`AskHuman --gui-host`，detach 新会话脱离调用方终端）。

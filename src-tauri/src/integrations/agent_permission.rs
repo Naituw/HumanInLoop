@@ -72,14 +72,7 @@ pub fn status(target: AgentTarget) -> PermissionStatus {
     if !supported(target) {
         return PermissionStatus {
             supported: false,
-            unsupported_reason: Some(
-                if matches!(target, AgentTarget::ClaudeCode | AgentTarget::Codex) {
-                    "windows_daemon_unsupported"
-                } else {
-                    "native_permission_request_unsupported"
-                }
-                .to_string(),
-            ),
+            unsupported_reason: Some("native_permission_request_unsupported".to_string()),
             enabled: false,
             installed: false,
             outdated: false,
@@ -103,8 +96,11 @@ pub fn status(target: AgentTarget) -> PermissionStatus {
                 if command.contains(MARKER) {
                     installed = true;
                     marker_count += 1;
-                    if command == expected
-                        && handler.get("type").and_then(Value::as_str) == Some("command")
+                    if hook_edit::command_handler_matches(
+                        handler,
+                        &expected,
+                        target == AgentTarget::Codex,
+                    ) && handler.get("type").and_then(Value::as_str) == Some("command")
                         && handler.get("timeout").and_then(Value::as_u64) == Some(TIMEOUT_SECS)
                         && handler.get("statusMessage").and_then(Value::as_str)
                             == Some(STATUS_MESSAGE)
@@ -164,11 +160,12 @@ pub(crate) fn install_unlocked(target: AgentTarget) -> Result<()> {
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
         .unwrap_or("{}");
     let command = hook_command(target)?;
-    let updated = hook_edit::upsert_nested_group(
+    let updated = hook_edit::upsert_nested_group_with_windows(
         existing,
         "PermissionRequest",
         MARKER,
         &command,
+        (target == AgentTarget::Codex).then_some(command.as_str()),
         TIMEOUT_SECS,
         Some(STATUS_MESSAGE),
     )?;
@@ -364,7 +361,14 @@ fn trust_entries(path: &Path, text: &str) -> Result<Vec<TrustEntry>> {
                 if handler.get("async").and_then(Value::as_bool) == Some(true) {
                     continue;
                 }
-                let Some(command) = handler.get("command").and_then(Value::as_str) else {
+                #[cfg(windows)]
+                let command = handler
+                    .get("commandWindows")
+                    .or_else(|| handler.get("command"))
+                    .and_then(Value::as_str);
+                #[cfg(not(windows))]
+                let command = handler.get("command").and_then(Value::as_str);
+                let Some(command) = command else {
                     continue;
                 };
                 let timeout = handler

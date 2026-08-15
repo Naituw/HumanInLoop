@@ -42,16 +42,18 @@ impl Updater for DirectUpdater {
     }
 
     async fn apply(&self, progress: Option<ProgressCb>) -> Result<()> {
-        #[cfg(not(unix))]
-        {
-            let _ = progress;
-            return Err(anyhow!(
-                "auto-update is not supported on this platform yet; please download the latest release manually"
-            ));
-        }
         #[cfg(unix)]
         {
             apply_unix(progress).await
+        }
+        #[cfg(windows)]
+        {
+            apply_windows(progress).await
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = progress;
+            Err(anyhow!("auto-update is unsupported on this platform"))
         }
     }
 }
@@ -94,7 +96,6 @@ fn asset_url_for_triple(release: &Value, triple: &str) -> Option<String> {
 }
 
 /// 纯函数：按资产名精确匹配 `browser_download_url`。
-#[cfg_attr(not(unix), allow(dead_code))] // 非 Unix 无自动更新路径，仅测试使用
 fn asset_url_by_name(release: &Value, name: &str) -> Option<String> {
     let assets = release.get("assets")?.as_array()?;
     assets
@@ -105,7 +106,6 @@ fn asset_url_by_name(release: &Value, name: &str) -> Option<String> {
 }
 
 /// 下载 SHA256SUMS 并校验已下载压缩包的哈希（`sha256sum` 输出格式：`<hex>  <文件名>`）。
-#[cfg(unix)]
 async fn verify_archive_sha256(
     archive: &std::path::Path,
     file_name: &str,
@@ -134,7 +134,6 @@ async fn verify_archive_sha256(
 }
 
 /// 纯函数：从 `sha256sum` 格式文本中取指定文件的哈希（容忍 `*` 二进制标记）。
-#[cfg_attr(not(unix), allow(dead_code))] // 非 Unix 无自动更新路径，仅测试使用
 fn expected_sha256(sums: &str, file_name: &str) -> Option<String> {
     sums.lines().find_map(|line| {
         let (hash, name) = line.trim().split_once(char::is_whitespace)?;
@@ -209,8 +208,217 @@ async fn apply_unix(progress: Option<ProgressCb>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowsUpdateTransaction {
+    target: std::path::PathBuf,
+    worker: std::path::PathBuf,
+    expected_version: String,
+    restart_daemon: bool,
+    restart_gui_host: bool,
+    parent_pid: u32,
+}
+
+#[cfg(windows)]
+async fn apply_windows(progress: Option<ProgressCb>) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+
+    let release = fetch_latest_release(true).await?;
+    let expected_version = super::normalize_version(release["tag_name"].as_str().unwrap_or(""));
+    let url = asset_url_for_current(&release)
+        .ok_or_else(|| anyhow!("未找到当前 Windows 平台的发布资产，请手动下载"))?;
+    if !url.contains("://") {
+        return Err(anyhow!("发布资产地址无效"));
+    }
+
+    let work = std::env::temp_dir().join(format!("askhuman_update_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&work).context("创建临时目录失败")?;
+    let file_name = url
+        .rsplit('/')
+        .next()
+        .unwrap_or("AskHuman-windows.zip")
+        .to_string();
+    let archive = work.join(&file_name);
+    download_with_progress(&url, &archive, progress).await?;
+    if let Some(sums_url) = asset_url_by_name(&release, "SHA256SUMS") {
+        verify_archive_sha256(&archive, &file_name, &sums_url).await?;
+    }
+
+    let extract = work.join("extract");
+    std::fs::create_dir_all(&extract).context("创建解压目录失败")?;
+    extract_archive(&archive, &extract)?;
+    let worker = find_executable(&extract).ok_or_else(|| anyhow!("压缩包中未找到 AskHuman.exe"))?;
+    let version = Command::new(&worker)
+        .arg("version")
+        .stdin(Stdio::null())
+        .output()
+        .context("无法验证下载的 AskHuman.exe")?;
+    if !version.status.success()
+        || !String::from_utf8_lossy(&version.stdout).contains(&expected_version)
+    {
+        return Err(anyhow!("下载的 AskHuman.exe 版本验证失败"));
+    }
+
+    let target = std::env::current_exe().context("无法获取当前可执行文件路径")?;
+    let transaction = WindowsUpdateTransaction {
+        target,
+        worker: worker.clone(),
+        expected_version,
+        restart_daemon: crate::ipc::transport::connect().await.is_ok(),
+        restart_gui_host: crate::ipc::transport::connect_role("gui-host")
+            .await
+            .is_ok(),
+        parent_pid: std::process::id(),
+    };
+    let transaction_path = work.join("transaction.json");
+    crate::integrations::hook_edit::atomic_write_private(
+        &transaction_path,
+        &serde_json::to_vec(&transaction)?,
+    )?;
+    let mut command = Command::new(&worker);
+    command
+        .arg("__update-worker")
+        .arg(&transaction_path)
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.spawn().context("无法启动 Windows 更新 worker")?;
+    Ok(())
+}
+
+/// Hidden Windows updater role. It runs from the verified new binary outside the install path,
+/// drains long-lived processes, replaces the locked target transactionally, verifies it, and
+/// restores the daemon/GUI Host state that existed before the update.
+#[cfg(windows)]
+pub fn run_windows_worker(args: &[String]) -> Result<()> {
+    use std::process::{Command, Stdio};
+
+    let transaction_path = args
+        .first()
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| anyhow!("missing update transaction"))?;
+    let claimed_path = transaction_path.with_extension("claimed");
+    std::fs::rename(&transaction_path, &claimed_path)
+        .context("update transaction is missing or already claimed")?;
+    let transaction: WindowsUpdateTransaction =
+        serde_json::from_slice(&std::fs::read(&claimed_path)?)?;
+    let running_worker = std::fs::canonicalize(std::env::current_exe()?)?;
+    if running_worker != std::fs::canonicalize(&transaction.worker)? {
+        return Err(anyhow!("update worker identity mismatch"));
+    }
+    if transaction
+        .target
+        .file_name()
+        .and_then(|name| name.to_str())
+        != Some("AskHuman.exe")
+    {
+        return Err(anyhow!("refusing to replace an unexpected target"));
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let _ = crate::client::request_stop(false).await;
+        crate::client::wait_until_down(std::time::Duration::from_secs(24 * 60 * 60)).await;
+        let _ = crate::gui_host::shutdown_if_running().await;
+        for _ in 0..300 {
+            if crate::ipc::transport::connect_role("gui-host")
+                .await
+                .is_err()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    });
+
+    let parent_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while crate::agents::detect::pid_alive(transaction.parent_pid)
+        && std::time::Instant::now() < parent_deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    if crate::agents::detect::pid_alive(transaction.parent_pid) {
+        return Err(anyhow!("update caller did not exit"));
+    }
+
+    let directory = transaction
+        .target
+        .parent()
+        .ok_or_else(|| anyhow!("update target has no parent directory"))?;
+    let staged = directory.join(format!(".AskHuman.new-{}.exe", uuid::Uuid::new_v4()));
+    std::fs::copy(&running_worker, &staged).context("failed to stage updated executable")?;
+    let backup = backup_path(&transaction.target)
+        .ok_or_else(|| anyhow!("failed to allocate update backup path"))?;
+    let replace_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10 * 60);
+    loop {
+        match std::fs::rename(&transaction.target, &backup) {
+            Ok(()) => break,
+            Err(error) if std::time::Instant::now() < replace_deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                let _ = error;
+            }
+            Err(error) => return Err(error).context("timed out waiting for AskHuman.exe handles"),
+        }
+    }
+    if let Err(error) = std::fs::rename(&staged, &transaction.target) {
+        let _ = std::fs::rename(&backup, &transaction.target);
+        return Err(error).context("failed to install updated executable; restored backup");
+    }
+
+    let verification = Command::new(&transaction.target)
+        .arg("version")
+        .stdin(Stdio::null())
+        .output();
+    let verified = verification.is_ok_and(|output| {
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout).contains(&transaction.expected_version)
+    });
+    if !verified {
+        let failed = directory.join(format!("AskHuman.failed-{}.exe", uuid::Uuid::new_v4()));
+        let _ = std::fs::rename(&transaction.target, failed);
+        std::fs::rename(&backup, &transaction.target)
+            .context("updated binary verification failed and rollback failed")?;
+        return Err(anyhow!(
+            "updated binary verification failed; restored previous version"
+        ));
+    }
+
+    if transaction.restart_daemon {
+        let _ = Command::new(&transaction.target)
+            .args(["daemon", "start"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    if transaction.restart_gui_host {
+        let mut command = Command::new(&transaction.target);
+        command
+            .arg("--gui-host")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        crate::daemon::spawn::configure_background(&mut command);
+        let _ = command.spawn();
+    }
+    let _ = std::fs::remove_file(claimed_path);
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn run_windows_worker(_args: &[String]) -> Result<()> {
+    Err(anyhow!(
+        "Windows update worker is unavailable on this platform"
+    ))
+}
+
 /// 流式下载到文件，按内容长度回调进度。
-#[cfg(unix)]
 async fn download_with_progress(
     url: &str,
     dest: &std::path::Path,
@@ -247,7 +455,6 @@ async fn download_with_progress(
 }
 
 /// 解压 tar.gz / zip（shell out；mac/Linux 自带 tar / unzip）。
-#[cfg(unix)]
 fn extract_archive(archive: &std::path::Path, dest: &std::path::Path) -> Result<()> {
     use std::process::Command;
     let name = archive
@@ -255,6 +462,9 @@ fn extract_archive(archive: &std::path::Path, dest: &std::path::Path) -> Result<
         .and_then(|n| n.to_str())
         .unwrap_or_default();
     let out = if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        #[cfg(windows)]
+        return Err(anyhow!("Windows release assets must use zip archives"));
+        #[cfg(not(windows))]
         Command::new("tar")
             .args([
                 "-xzf",
@@ -265,15 +475,28 @@ fn extract_archive(archive: &std::path::Path, dest: &std::path::Path) -> Result<
             .output()
             .context("执行 tar 失败")?
     } else if name.ends_with(".zip") {
-        Command::new("unzip")
-            .args([
-                "-o",
-                &archive.to_string_lossy(),
-                "-d",
-                &dest.to_string_lossy(),
-            ])
+        #[cfg(windows)]
+        let command = "tar.exe";
+        #[cfg(not(windows))]
+        let command = "unzip";
+        #[cfg(windows)]
+        let args = vec![
+            "-xf".to_string(),
+            archive.to_string_lossy().to_string(),
+            "-C".to_string(),
+            dest.to_string_lossy().to_string(),
+        ];
+        #[cfg(not(windows))]
+        let args = vec![
+            "-o".to_string(),
+            archive.to_string_lossy().to_string(),
+            "-d".to_string(),
+            dest.to_string_lossy().to_string(),
+        ];
+        Command::new(command)
+            .args(args)
             .output()
-            .context("执行 unzip 失败")?
+            .context("执行 zip 解压工具失败")?
     } else {
         return Err(anyhow!("不支持的压缩格式：{name}"));
     };
@@ -287,7 +510,6 @@ fn extract_archive(archive: &std::path::Path, dest: &std::path::Path) -> Result<
 }
 
 /// 递归查找名为 `AskHuman` 的可执行文件。
-#[cfg(unix)]
 fn find_executable(dir: &std::path::Path) -> Option<std::path::PathBuf> {
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -296,7 +518,13 @@ fn find_executable(dir: &std::path::Path) -> Option<std::path::PathBuf> {
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.file_name().and_then(|n| n.to_str()) == Some("AskHuman") {
+            } else if p.file_name().and_then(|n| n.to_str())
+                == Some(if cfg!(windows) {
+                    "AskHuman.exe"
+                } else {
+                    "AskHuman"
+                })
+            {
                 return Some(p);
             }
         }
@@ -334,7 +562,6 @@ fn verify_macos_signature(path: &std::path::Path) -> Result<()> {
 }
 
 /// 生成备份路径 `<exe>.<版本>.bak`（同名冲突追加序号）。
-#[cfg(unix)]
 fn backup_path(current: &std::path::Path) -> Option<std::path::PathBuf> {
     let dir = current.parent()?;
     let stem = current.file_name()?.to_str()?;

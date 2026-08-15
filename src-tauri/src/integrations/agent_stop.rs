@@ -142,7 +142,10 @@ fn inspect_handler_state(
             let timeout_ok = handler.get("timeout").and_then(Value::as_u64) == Some(TIMEOUT_SECS);
             let loop_ok =
                 kind != AgentKind::Cursor || handler.get("loop_limit").is_some_and(Value::is_null);
-            if command == expected && timeout_ok && loop_ok {
+            if hook_edit::command_handler_matches(&handler, expected, kind == AgentKind::Codex)
+                && timeout_ok
+                && loop_ok
+            {
                 exact_count += 1;
             }
         } else {
@@ -305,6 +308,15 @@ fn apply_handler_state(
             &command,
             TIMEOUT_SECS,
             true,
+        ),
+        AgentKind::Codex => hook_edit::upsert_nested_group_with_windows(
+            &without_stop,
+            "Stop",
+            MARKER,
+            &command,
+            Some(&command),
+            TIMEOUT_SECS,
+            None,
         ),
         _ => hook_edit::upsert_nested_group(
             &without_stop,

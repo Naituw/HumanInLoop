@@ -197,8 +197,8 @@ pub struct GeneralConfig {
     /// 语义：停止新增记录，既有历史保留。
     pub todo_history_limit: u32,
     /// Built-in sound played when a popup appears. Empty string disables it.
-    /// macOS stores a sound name, such as "Glass"; Linux treats any non-empty
-    /// value as enabled and plays a freedesktop notification sound.
+    /// macOS stores a sound name, such as "Glass"; Linux and Windows treat any non-empty
+    /// value as enabled and play the platform notification sound.
     pub popup_sound: String,
     /// Menu bar / tray icon mode (off/active/always, spec D4). Defaults to always.
     pub menu_bar_icon: MenuBarIconMode,

@@ -15,7 +15,7 @@ use jsonc_parser::ParseOptions;
 use serde_json::Value;
 
 /// 识别本应用条目的标记（脚本文件名）。
-pub const MARKER: &str = "askhuman-timeout.sh";
+pub const MARKER: &str = "askhuman-timeout";
 
 /// 抬高的 Bash 超时上限环境变量名。
 pub const BASH_MAX_KEY: &str = "BASH_MAX_TIMEOUT_MS";
@@ -92,9 +92,28 @@ printf '%s\n' "$output"
 exit 0
 "##;
 
-/// 当前平台是否支持（脚本为 bash，仅 unix：macOS/Linux；Windows 不支持）。
+pub const SCRIPT_CONTENT_WINDOWS: &str = r#"# Managed by AskHuman. Do not edit.
+$ErrorActionPreference = 'Stop'
+try {
+  $inputJson = [Console]::In.ReadToEnd()
+  $data = $inputJson | ConvertFrom-Json
+  $command = [string]$data.tool_input.command
+  if ($command -match '(^|[\s;&|()`"''\\/])AskHuman(?=\s|$|["''\\])') {
+    $toolInput = $data.tool_input
+    if ($null -eq $toolInput) { $toolInput = [pscustomobject]@{} }
+    $toolInput | Add-Member -NotePropertyName timeout -NotePropertyValue 86400000 -Force
+    $result = @{ hookSpecificOutput = @{
+      hookEventName = 'PreToolUse'
+      permissionDecision = 'allow'
+      updatedInput = $toolInput
+    }}
+    $result | ConvertTo-Json -Compress -Depth 100
+  } else { '{}' }
+} catch { '{}' }
+"#;
+
 pub fn supported() -> bool {
-    cfg!(unix)
+    cfg!(any(unix, windows))
 }
 
 /// settings.json 是否存在。
@@ -113,7 +132,7 @@ pub fn needs_update() -> bool {
         return false;
     }
     match std::fs::read_to_string(paths::claude_hook_script()) {
-        Ok(content) => content != SCRIPT_CONTENT,
+        Ok(content) => content != desired_script_content(),
         Err(_) => true,
     }
 }
@@ -125,7 +144,7 @@ pub fn install() -> Result<String> {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("failed to create script directory: {}", dir.display()))?;
     }
-    atomic_write(&script, SCRIPT_CONTENT.as_bytes())
+    atomic_write(&script, desired_script_content().as_bytes())
         .with_context(|| format!("failed to write script: {}", script.display()))?;
 
     #[cfg(unix)]
@@ -136,11 +155,30 @@ pub fn install() -> Result<String> {
     }
 
     let text = read_text_or_default();
-    let updated = apply_install(&text, &script.to_string_lossy())?;
+    let updated = apply_install(&text, &script_command(&script))?;
     write_text(&updated)?;
 
     let lang = crate::i18n::Lang::current();
     Ok(crate::i18n::tr(lang, "cmd.hookInstalled").to_string())
+}
+
+fn desired_script_content() -> &'static str {
+    if cfg!(windows) {
+        SCRIPT_CONTENT_WINDOWS
+    } else {
+        SCRIPT_CONTENT
+    }
+}
+
+fn script_command(script: &std::path::Path) -> String {
+    if cfg!(windows) {
+        format!(
+            "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
+            script.to_string_lossy()
+        )
+    } else {
+        script.to_string_lossy().to_string()
+    }
 }
 
 /// 更新：用最新脚本与条目覆盖（复用 install），同时确保 env 上限 ≥ 24h。

@@ -40,7 +40,7 @@ pub fn status(target: AgentTarget) -> GuardStatus {
                 continue;
             }
             marker_count += 1;
-            if command == expected
+            if hook_edit::command_handler_matches(handler, &expected, target == AgentTarget::Codex)
                 && handler.get("type").and_then(Value::as_str) == Some("command")
                 && handler.get("timeout").and_then(Value::as_u64) == Some(TIMEOUT_SECS)
                 && handler.get("statusMessage").is_none()
@@ -91,11 +91,12 @@ fn install_unlocked(target: AgentTarget) -> Result<()> {
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
         .unwrap_or("{}");
     let command = hook_command(target)?;
-    let updated = hook_edit::upsert_nested_group(
+    let updated = hook_edit::upsert_nested_group_with_windows(
         existing,
         "SubagentStart",
         MARKER,
         &command,
+        (target == AgentTarget::Codex).then_some(command.as_str()),
         TIMEOUT_SECS,
         None,
     )?;

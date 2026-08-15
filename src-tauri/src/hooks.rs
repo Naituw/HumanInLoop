@@ -1,13 +1,11 @@
-//! User-level AskHuman hooks: executable scripts under `~/.askhuman/hooks/<event>`
-//! are invoked at specific lifecycle points.
+//! User-level AskHuman hooks under `~/.askhuman/hooks` are invoked at specific lifecycle points.
 //!
 //! Each event maps to a script with the same name, such as `ask-received`.
 //! Short fields are passed through environment variables and the full payload is
 //! written to stdin as JSON. Hooks are fire-and-forget: a background thread waits
 //! on the child process so the long-lived daemon does not leave zombies behind.
-//! Scripts should return quickly and are intended for notifications, sounds, etc.
-//!
-//! Hooks only run on Unix platforms. Other platforms intentionally no-op.
+//! Scripts should return quickly and are intended for notifications, sounds, etc. Unix uses an
+//! executable extensionless file. Windows accepts `<event>.exe`, `.ps1`, `.cmd`, or `.bat`.
 
 use crate::models::AskRequest;
 use crate::paths;
@@ -24,21 +22,13 @@ pub fn hooks_dir() -> PathBuf {
 /// - `env`: additional environment variables with short fields.
 /// - `stdin_json`: full payload written to the script's stdin.
 pub fn fire(event: &str, env: Vec<(String, String)>, stdin_json: String) {
-    #[cfg(unix)]
-    {
-        let script = hooks_dir().join(event);
-        if !is_executable_file(&script) {
-            return;
-        }
-        let event = event.to_string();
-        std::thread::spawn(move || {
-            run_hook(&script, &event, env, &stdin_json);
-        });
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (event, env, stdin_json);
-    }
+    let Some(script) = resolve_hook(event) else {
+        return;
+    };
+    let event = event.to_string();
+    std::thread::spawn(move || {
+        run_hook(&script, &event, env, &stdin_json);
+    });
 }
 
 /// Fire `ask-received` when a question request arrives, regardless of popup state.
@@ -86,19 +76,27 @@ pub fn ensure_sample() {
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
-    let sample = dir.join("ask-received.sample");
+    let sample = dir.join(if cfg!(windows) {
+        "ask-received.sample.ps1"
+    } else {
+        "ask-received.sample"
+    });
     if sample.exists() {
         return;
     }
-    let _ = std::fs::write(&sample, SAMPLE_ASK_RECEIVED);
+    let contents = if cfg!(windows) {
+        SAMPLE_ASK_RECEIVED_WINDOWS
+    } else {
+        SAMPLE_ASK_RECEIVED
+    };
+    let _ = std::fs::write(&sample, contents);
     // Keep the default non-executable permissions so the sample never fires.
 }
 
-#[cfg(unix)]
 fn run_hook(script: &std::path::Path, event: &str, env: Vec<(String, String)>, stdin_json: &str) {
     use std::io::Write;
-    use std::process::{Command, Stdio};
-    let mut cmd = Command::new(script);
+    use std::process::Stdio;
+    let mut cmd = hook_command(script);
     cmd.env("ASKHUMAN_EVENT", event);
     for (k, v) in env {
         cmd.env(k, v);
@@ -114,7 +112,68 @@ fn run_hook(script: &std::path::Path, event: &str, env: Vec<(String, String)>, s
         let _ = si.write_all(stdin_json.as_bytes());
         // Drop stdin so the script sees EOF.
     }
-    let _ = child.wait();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
+        }
+    }
+}
+
+fn hook_command(script: &std::path::Path) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        if script.extension().and_then(|value| value.to_str()) == Some("ps1") {
+            let mut command = std::process::Command::new("powershell.exe");
+            command.args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ]);
+            command.arg(script);
+            return command;
+        }
+    }
+    // Modern Rust invokes .cmd/.bat through cmd.exe with its hardened batch-script quoting.
+    std::process::Command::new(script)
+}
+
+fn resolve_hook(event: &str) -> Option<PathBuf> {
+    if event.is_empty()
+        || !event
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        let path = hooks_dir().join(event);
+        is_executable_file(&path).then_some(path)
+    }
+    #[cfg(windows)]
+    {
+        for extension in ["exe", "ps1", "cmd", "bat"] {
+            let path = hooks_dir().join(format!("{event}.{extension}"));
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+        None
+    }
+    #[cfg(not(any(unix, windows)))]
+    None
 }
 
 /// Return true when the path is a regular executable file.
@@ -174,3 +233,25 @@ const SAMPLE_ASK_RECEIVED: &str = r#"#!/usr/bin/env bash
 
 exit 0
 "#;
+
+const SAMPLE_ASK_RECEIVED_WINDOWS: &str = r#"# AskHuman hook example — event: ask-received
+# To enable, copy this file to ask-received.ps1 in the same directory.
+# AskHuman passes ASKHUMAN_EVENT, ASKHUMAN_REQUEST_ID, ASKHUMAN_SOURCE,
+# ASKHUMAN_PROJECT, and ASKHUMAN_QUESTION_COUNT as environment variables.
+# The complete JSON payload is available on stdin:
+$payload = [Console]::In.ReadToEnd() | ConvertFrom-Json
+
+# Example notification-style output for a custom integration:
+# Write-Host "AskHuman request from $env:ASKHUMAN_SOURCE: $($payload.message.text)"
+"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_event_path_traversal() {
+        assert!(resolve_hook("../ask-received").is_none());
+        assert!(resolve_hook("ask/received").is_none());
+    }
+}

@@ -261,13 +261,27 @@ pub fn dispatch() {
         }
         // Hidden one-time bridge used only by a newly opened Terminal.app window.
         "__agent-launch" => {
-            #[cfg(unix)]
             if let Err(error) = crate::integrations::agent_launch::run_helper(&argv[2..]) {
                 eprintln!("AskHuman: {error:#}");
                 exit(1);
             }
-            #[cfg(not(unix))]
-            exit(1);
+            exit(0);
+        }
+        // Hidden transactional Windows self-update worker.
+        "__update-worker" => {
+            if let Err(error) = crate::update::direct::run_windows_worker(&argv[2..]) {
+                eprintln!("AskHuman update worker: {error:#}");
+                exit(1);
+            }
+            exit(0);
+        }
+        // Hidden Windows npm updater copied outside the package being replaced.
+        "__npm-update-worker" => {
+            if let Err(error) = crate::update::npm::run_windows_worker(&argv[2..]) {
+                eprintln!("AskHuman npm update worker: {error:#}");
+                exit(1);
+            }
+            exit(0);
         }
         // Hidden Stop confirmation hook. Failures emit `{}` so the agent can stop normally.
         "__stop-hook" => {

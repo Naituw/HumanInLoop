@@ -30,7 +30,7 @@ pub struct LifecycleStatus {
     pub installed: bool,
     /// 已安装但需更新（命令路径变化 / 事件缺失 / Codex 信任缺失或不匹配）。
     pub outdated: bool,
-    /// 当前平台是否支持（仅 unix）。
+    /// Whether lifecycle hooks are supported on the current platform.
     pub supported: bool,
 }
 
@@ -303,16 +303,19 @@ fn elem_has_command_marker(elem: &Value, shape: Shape, marker: &str) -> bool {
             .and_then(Value::as_array)
             .is_some_and(|handlers| {
                 handlers.iter().any(|handler| {
-                    handler
-                        .get("command")
-                        .and_then(Value::as_str)
-                        .is_some_and(|command| command.contains(marker))
+                    ["command", "commandWindows"].iter().any(|field| {
+                        handler
+                            .get(*field)
+                            .and_then(Value::as_str)
+                            .is_some_and(|command| command.contains(marker))
+                    })
                 })
             }),
-        Shape::Flat => elem
-            .get("command")
-            .and_then(Value::as_str)
-            .is_some_and(|command| command.contains(marker)),
+        Shape::Flat => ["command", "commandWindows"].iter().any(|field| {
+            elem.get(*field)
+                .and_then(Value::as_str)
+                .is_some_and(|command| command.contains(marker))
+        }),
     }
 }
 
@@ -405,8 +408,16 @@ fn json_presence_with_stop(
             .unwrap_or(false);
         let has_exact = arr
             .map(|a| {
-                a.iter()
-                    .any(|e| elem_matches(e, shape, &want, want_timeout, want_unlimited_loop))
+                a.iter().any(|e| {
+                    elem_matches(
+                        e,
+                        shape,
+                        &want,
+                        want_timeout,
+                        want_unlimited_loop,
+                        kind == AgentKind::Codex,
+                    )
+                })
             })
             .unwrap_or(false);
         if has_ours {
@@ -427,6 +438,7 @@ fn elem_matches(
     want: &str,
     want_timeout: Option<u64>,
     want_unlimited_loop: bool,
+    require_windows_override: bool,
 ) -> bool {
     let timeout_ok = |h: &Value| match want_timeout {
         Some(t) => h.get("timeout").and_then(|v| v.as_u64()) == Some(t),
@@ -438,7 +450,10 @@ fn elem_matches(
             .and_then(|h| h.as_array())
             .map(|arr| {
                 arr.iter().any(|h| {
-                    h.get("command").and_then(|c| c.as_str()) == Some(want) && timeout_ok(h)
+                    h.get("command").and_then(|c| c.as_str()) == Some(want)
+                        && (!require_windows_override
+                            || h.get("commandWindows").and_then(Value::as_str) == Some(want))
+                        && timeout_ok(h)
                 })
             })
             .unwrap_or(false),
@@ -508,6 +523,21 @@ fn apply_json_install_with_stop(
             event_timeout(kind, event_key)
         };
         let entry = match (shape, timeout) {
+            (Shape::Nested, Some(t)) if kind == AgentKind::Codex => json!({
+                "hooks": [ {
+                    "type": "command",
+                    "command": cmd,
+                    "commandWindows": cmd,
+                    "timeout": t
+                } ]
+            }),
+            (Shape::Nested, None) if kind == AgentKind::Codex => json!({
+                "hooks": [ {
+                    "type": "command",
+                    "command": cmd,
+                    "commandWindows": cmd
+                } ]
+            }),
             (Shape::Nested, Some(t)) => {
                 json!({ "hooks": [ { "type": "command", "command": cmd, "timeout": t } ] })
             }
@@ -667,7 +697,13 @@ fn codex_trust_entries(hooks_json: &std::path::Path) -> Result<Vec<(String, Stri
                 continue;
             };
             for (hi, handler) in handlers.iter().enumerate() {
-                let cmd = handler.get("command").and_then(|c| c.as_str());
+                #[cfg(windows)]
+                let cmd = handler
+                    .get("commandWindows")
+                    .or_else(|| handler.get("command"))
+                    .and_then(Value::as_str);
+                #[cfg(not(windows))]
+                let cmd = handler.get("command").and_then(Value::as_str);
                 let is_command = handler.get("type").and_then(|t| t.as_str()) == Some("command");
                 let Some(cmd) = cmd else { continue };
                 if !is_command

@@ -864,17 +864,12 @@ pub(crate) fn whats_next_arguments_value(params: &WhatsNextParams) -> Value {
     Value::Object(object)
 }
 
-#[cfg(unix)]
 async fn register_mcp_instance(mcp_instance_id: String, project: String, server_pid: u32) {
-    let parent_pid_hint = Some(unsafe { libc::getppid() } as u32);
+    let parent_pid_hint = crate::agents::detect::parent_pid(std::process::id());
     crate::client::register_mcp_instance(mcp_instance_id, project, server_pid, parent_pid_hint)
         .await;
 }
 
-#[cfg(not(unix))]
-async fn register_mcp_instance(_mcp_instance_id: String, _project: String, _server_pid: u32) {}
-
-#[cfg(unix)]
 async fn claim_grok_binding(
     mcp_instance_id: String,
     project: String,
@@ -890,17 +885,6 @@ async fn claim_grok_binding(
         server_pid,
     )
     .await
-}
-
-#[cfg(not(unix))]
-async fn claim_grok_binding(
-    _mcp_instance_id: String,
-    _project: String,
-    _tool_name: String,
-    _arguments_sha256: String,
-    _server_pid: u32,
-) -> Option<String> {
-    None
 }
 
 /// Errors from [`capture_output`].

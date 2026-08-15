@@ -13,10 +13,10 @@ use jsonc_parser::ParseOptions;
 use serde_json::Value;
 
 /// 识别本应用条目的标记（脚本文件名）。
-pub const MARKER: &str = "askhuman-timeout.sh";
+pub const MARKER: &str = "askhuman-timeout";
 
 /// 旧版标记，用于识别 / 清理历史安装（向后兼容）。
-pub const LEGACY_MARKER: &str = "humaninloop-timeout.sh";
+pub const LEGACY_MARKER: &str = "humaninloop-timeout";
 
 /// 钩子脚本内容（安装时写入并 chmod 0755）。grep 正则与 Swift 版逐字一致。
 pub const SCRIPT_CONTENT: &str = r##"#!/usr/bin/env bash
@@ -64,9 +64,20 @@ printf '%s\n' "$output"
 exit 0
 "##;
 
-/// 当前平台是否支持 Cursor Hook（仅 unix：macOS/Linux；Windows 不支持）。
+pub const SCRIPT_CONTENT_WINDOWS: &str = r#"# Managed by AskHuman. Do not edit.
+$ErrorActionPreference = 'Stop'
+try {
+  $inputJson = [Console]::In.ReadToEnd()
+  $data = $inputJson | ConvertFrom-Json
+  $command = [string]$data.tool_input.command
+  if ($command -match '(^|[\s;&|()`"''\\/])AskHuman(?=\s|$|["''\\])') {
+    @{ updated_input = @{ timeout = 86400000 } } | ConvertTo-Json -Compress -Depth 10
+  } else { '{}' }
+} catch { '{}' }
+"#;
+
 pub fn supported() -> bool {
-    cfg!(unix)
+    cfg!(any(unix, windows))
 }
 
 /// hooks.json 是否存在。
@@ -85,7 +96,7 @@ pub fn needs_update() -> bool {
         return false;
     }
     match std::fs::read_to_string(paths::cursor_hook_script()) {
-        Ok(content) => content != SCRIPT_CONTENT,
+        Ok(content) => content != desired_script_content(),
         Err(_) => true,
     }
 }
@@ -97,7 +108,7 @@ pub fn install() -> Result<String> {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("failed to create script directory: {}", dir.display()))?;
     }
-    atomic_write(&script, SCRIPT_CONTENT.as_bytes())
+    atomic_write(&script, desired_script_content().as_bytes())
         .with_context(|| format!("failed to write script: {}", script.display()))?;
 
     #[cfg(unix)]
@@ -108,11 +119,30 @@ pub fn install() -> Result<String> {
     }
 
     let text = read_text_or_default();
-    let updated = apply_install(&text, &script.to_string_lossy())?;
+    let updated = apply_install(&text, &script_command(&script))?;
     write_text(&updated)?;
 
     let lang = crate::i18n::Lang::current();
     Ok(crate::i18n::tr(lang, "cmd.hookInstalled").to_string())
+}
+
+fn desired_script_content() -> &'static str {
+    if cfg!(windows) {
+        SCRIPT_CONTENT_WINDOWS
+    } else {
+        SCRIPT_CONTENT
+    }
+}
+
+fn script_command(script: &std::path::Path) -> String {
+    if cfg!(windows) {
+        format!(
+            "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
+            script.to_string_lossy()
+        )
+    } else {
+        script.to_string_lossy().to_string()
+    }
 }
 
 /// 更新：用最新脚本与条目覆盖（复用 install），并清理旧版脚本文件。

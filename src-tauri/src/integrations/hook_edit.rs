@@ -6,17 +6,28 @@ use jsonc_parser::json;
 use jsonc_parser::ParseOptions;
 use serde_json::Value;
 
+pub fn command_handler_matches(
+    handler: &Value,
+    expected: &str,
+    require_windows_override: bool,
+) -> bool {
+    handler.get("command").and_then(Value::as_str) == Some(expected)
+        && (!require_windows_override
+            || handler.get("commandWindows").and_then(Value::as_str) == Some(expected))
+}
+
 fn command_has_marker(value: &Value, marker: &str) -> bool {
     value
         .get("hooks")
         .and_then(Value::as_array)
         .map(|handlers| {
             handlers.iter().any(|handler| {
-                handler
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .map(|command| command.contains(marker))
-                    .unwrap_or(false)
+                ["command", "commandWindows"].iter().any(|field| {
+                    handler
+                        .get(*field)
+                        .and_then(Value::as_str)
+                        .is_some_and(|command| command.contains(marker))
+                })
             })
         })
         .unwrap_or(false)
@@ -25,11 +36,12 @@ fn command_has_marker(value: &Value, marker: &str) -> bool {
 fn handler_node_has_marker(node: &CstNode, marker: &str) -> bool {
     node.to_serde_value()
         .map(|value: Value| {
-            value
-                .get("command")
-                .and_then(Value::as_str)
-                .map(|command| command.contains(marker))
-                .unwrap_or(false)
+            ["command", "commandWindows"].iter().any(|field| {
+                value
+                    .get(*field)
+                    .and_then(Value::as_str)
+                    .is_some_and(|command| command.contains(marker))
+            })
         })
         .unwrap_or(false)
 }
@@ -39,6 +51,18 @@ pub fn upsert_nested_group(
     event: &str,
     marker: &str,
     command: &str,
+    timeout: u64,
+    status_message: Option<&str>,
+) -> Result<String> {
+    upsert_nested_group_with_windows(text, event, marker, command, None, timeout, status_message)
+}
+
+pub fn upsert_nested_group_with_windows(
+    text: &str,
+    event: &str,
+    marker: &str,
+    command: &str,
+    command_windows: Option<&str>,
     timeout: u64,
     status_message: Option<&str>,
 ) -> Result<String> {
@@ -54,14 +78,27 @@ pub fn upsert_nested_group(
     let groups = hooks
         .array_value_or_create(event)
         .ok_or_else(|| anyhow!("hook event '{event}' is not an array"))?;
-    let replacement_handler = match status_message {
-        Some(message) => json!({
+    let replacement_handler = match (command_windows, status_message) {
+        (Some(command_windows), Some(message)) => json!({
+            "type": "command",
+            "command": command,
+            "commandWindows": command_windows,
+            "timeout": timeout,
+            "statusMessage": message
+        }),
+        (Some(command_windows), None) => json!({
+            "type": "command",
+            "command": command,
+            "commandWindows": command_windows,
+            "timeout": timeout
+        }),
+        (None, Some(message)) => json!({
             "type": "command",
             "command": command,
             "timeout": timeout,
             "statusMessage": message
         }),
-        None => json!({ "type": "command", "command": command, "timeout": timeout }),
+        (None, None) => json!({ "type": "command", "command": command, "timeout": timeout }),
     };
     let mut replaced = false;
     for group in groups.elements() {
@@ -103,6 +140,18 @@ pub fn upsert_nested_group_matched(
     command: &str,
     timeout: u64,
 ) -> Result<String> {
+    upsert_nested_group_matched_with_windows(text, event, marker, matcher, command, None, timeout)
+}
+
+pub fn upsert_nested_group_matched_with_windows(
+    text: &str,
+    event: &str,
+    marker: &str,
+    matcher: Option<&str>,
+    command: &str,
+    command_windows: Option<&str>,
+    timeout: u64,
+) -> Result<String> {
     let source = if text.trim().is_empty() { "{}" } else { text };
     let root = CstRootNode::parse(source, &ParseOptions::default())
         .map_err(|error| anyhow!("failed to parse hook config: {error}"))?;
@@ -115,7 +164,15 @@ pub fn upsert_nested_group_matched(
     let groups = hooks
         .array_value_or_create(event)
         .ok_or_else(|| anyhow!("hook event '{event}' is not an array"))?;
-    let handler = json!({ "type": "command", "command": command, "timeout": timeout });
+    let handler = match command_windows {
+        Some(command_windows) => json!({
+            "type": "command",
+            "command": command,
+            "commandWindows": command_windows,
+            "timeout": timeout
+        }),
+        None => json!({ "type": "command", "command": command, "timeout": timeout }),
+    };
     let replacement = match matcher {
         Some(matcher) => json!({ "matcher": matcher, "hooks": [handler] }),
         None => json!({ "hooks": [handler] }),

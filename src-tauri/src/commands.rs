@@ -3781,6 +3781,8 @@ pub async fn update_apply(app: AppHandle) -> Result<(), String> {
     crate::update::state::set_pending(true);
     crate::client::notify_update_applied().await;
     let _ = app.emit("update_apply_finished", ());
+    #[cfg(windows)]
+    app.exit(0);
     Ok(())
 }
 

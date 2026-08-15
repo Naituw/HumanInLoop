@@ -305,7 +305,6 @@ pub fn canonical_tool_arguments_sha256(tool_name: &str, arguments: &Value) -> Op
     Some(canonical_arguments_sha256(&normalized))
 }
 
-#[cfg(unix)]
 pub fn record_grok_pending(
     session_id: &str,
     qualified_tool_name: &str,
@@ -325,7 +324,7 @@ pub fn record_grok_pending(
         .into_iter()
         .find_map(|key| hook_input.get(key).and_then(Value::as_str))
         .map(str::to_string);
-    let hook_parent_hint = Some(unsafe { libc::getppid() } as u32);
+    let hook_parent_hint = crate::agents::detect::parent_pid(std::process::id());
     crate::client::report_grok_binding_pending(crate::ipc::ClientMsg::GrokBindingPending {
         agent_session_id: session_id.to_string(),
         qualified_tool_name: qualified_tool_name.to_string(),
@@ -337,7 +336,6 @@ pub fn record_grok_pending(
     });
 }
 
-#[cfg(unix)]
 fn super_project(env: &HashMap<String, String>, input: &Value) -> String {
     let cwd = crate::agents::report::resolve_cwd(env, Some(input))
         .map(PathBuf::from)
@@ -347,17 +345,6 @@ fn super_project(env: &HashMap<String, String>, input: &Value) -> String {
     } else {
         crate::project::detect_from(&cwd)
     }
-}
-
-#[cfg(not(unix))]
-pub fn record_grok_pending(
-    _session_id: &str,
-    _qualified_tool_name: &str,
-    _tool_name: &str,
-    _arguments: &Value,
-    _hook_input: &Value,
-    _env: &HashMap<String, String>,
-) {
 }
 
 /// Create a private 128-bit random token. The native session id never enters the Agent transcript.
@@ -466,10 +453,10 @@ mod tests {
         assert!(consume_token_at(dir.path(), &wrong, "ask").is_none());
 
         let token = create_token_at(dir.path(), "cursor", "conversation", "show_last").unwrap();
-        let token_path = token_path_at(dir.path(), &token).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            let token_path = token_path_at(dir.path(), &token).unwrap();
             assert_eq!(
                 std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
                 0o700

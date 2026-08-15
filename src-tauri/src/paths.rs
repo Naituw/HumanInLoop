@@ -192,9 +192,13 @@ pub fn cursor_hooks_json() -> PathBuf {
     cursor_dir().join("hooks.json")
 }
 
-/// `~/.cursor/hooks/askhuman-timeout.sh`。
+/// AskHuman-owned Cursor timeout hook (`.sh` on Unix, `.ps1` on Windows).
 pub fn cursor_hook_script() -> PathBuf {
-    cursor_dir().join("hooks").join("askhuman-timeout.sh")
+    cursor_dir().join("hooks").join(if cfg!(windows) {
+        "askhuman-timeout.ps1"
+    } else {
+        "askhuman-timeout.sh"
+    })
 }
 
 /// 旧版 hook 脚本 `~/.cursor/hooks/humaninloop-timeout.sh`（仅用于向后兼容清理）。
@@ -238,9 +242,13 @@ pub fn claude_json() -> PathBuf {
     home().join(".claude.json")
 }
 
-/// Claude Code hook 脚本 `~/.claude/hooks/askhuman-timeout.sh`。
+/// AskHuman-owned Claude Code timeout hook (`.sh` on Unix, `.ps1` on Windows).
 pub fn claude_hook_script() -> PathBuf {
-    claude_dir().join("hooks").join("askhuman-timeout.sh")
+    claude_dir().join("hooks").join(if cfg!(windows) {
+        "askhuman-timeout.ps1"
+    } else {
+        "askhuman-timeout.sh"
+    })
 }
 
 /// Codex 配置目录 `~/.codex`。
