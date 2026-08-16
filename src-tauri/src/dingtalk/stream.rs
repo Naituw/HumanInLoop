@@ -199,35 +199,6 @@ fn heartbeat_interval() -> Interval {
     interval
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::Duration;
-
-    #[tokio::test(start_paused = true)]
-    async fn missed_heartbeats_preserve_full_pong_window() {
-        let mut heartbeat = heartbeat_interval();
-
-        // Model a suspended runtime that misses more than two heartbeat periods.
-        time::advance(HEARTBEAT_INTERVAL * 3).await;
-        heartbeat.tick().await;
-
-        // recv() sends Ping on the overdue tick above. The following tick is the
-        // earliest point at which awaiting_pong can trigger a reconnect, so it must
-        // remain pending for the entire response window.
-        let mut next_tick = Box::pin(heartbeat.tick());
-        time::advance(HEARTBEAT_INTERVAL - Duration::from_millis(1)).await;
-        tokio::select! {
-            biased;
-            _ = &mut next_tick => panic!("heartbeat fired before the pong window elapsed"),
-            _ = tokio::task::yield_now() => {}
-        }
-
-        time::advance(Duration::from_millis(1)).await;
-        next_tick.await;
-    }
-}
-
 /// 注册长连接 + 建 WebSocket。
 async fn open_ws(
     http: &reqwest::Client,
@@ -278,4 +249,33 @@ async fn open_ws(
         .await
         .map_err(|e| DingTalkError::Network(format!("WebSocket connection failed: {}", e)))?;
     Ok(ws)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn missed_heartbeats_preserve_full_pong_window() {
+        let mut heartbeat = heartbeat_interval();
+
+        // Model a suspended runtime that misses more than two heartbeat periods.
+        time::advance(HEARTBEAT_INTERVAL * 3).await;
+        heartbeat.tick().await;
+
+        // recv() sends Ping on the overdue tick above. The following tick is the
+        // earliest point at which awaiting_pong can trigger a reconnect, so it must
+        // remain pending for the entire response window.
+        let mut next_tick = Box::pin(heartbeat.tick());
+        time::advance(HEARTBEAT_INTERVAL - Duration::from_millis(1)).await;
+        tokio::select! {
+            biased;
+            _ = &mut next_tick => panic!("heartbeat fired before the pong window elapsed"),
+            _ = tokio::task::yield_now() => {}
+        }
+
+        time::advance(Duration::from_millis(1)).await;
+        next_tick.await;
+    }
 }
