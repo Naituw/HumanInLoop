@@ -296,7 +296,7 @@ pub fn run_windows_worker(args: &[String]) -> Result<()> {
     let verified = output.status.success()
         && crate::update::direct::verify_windows_authenticode(&transaction.target).is_ok()
         && Command::new(&transaction.target)
-            .arg("version")
+            .arg("--version")
             .stdin(Stdio::null())
             .output()
             .is_ok_and(|output| {

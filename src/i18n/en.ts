@@ -367,7 +367,7 @@ export default {
       updateAll: "Update all",
       updatesAvailable: "Updates available",
       uninstall: "Remove",
-      windowsUnsupported: "This hook is not supported on Windows",
+      hookUnsupported: "This Agent does not support a managed timeout hook.",
       permissionTitle: "Permission approval",
       askQuestionTitle: "Take over the native question tool",
       askQuestionHint:
@@ -376,7 +376,7 @@ export default {
       stopHint:
         "When this Agent naturally finishes a turn, ask through the active popup or IM whether to continue or end. Errors and manual cancellations are not intercepted.",
       stopUnsupported:
-        "This Agent cannot continue from a blocking Stop hook. Grok is not supported in this release; Windows is waiting for daemon support.",
+        "This Agent cannot continue from a blocking Stop hook. Grok is not supported in this release.",
       stopCoexist:
         "Other visible Stop handlers were found. They run concurrently and may independently continue or stop the Agent.",
       permissionUnsupported:

@@ -215,6 +215,10 @@ struct WindowsUpdateTransaction {
     target: std::path::PathBuf,
     worker: std::path::PathBuf,
     expected_version: String,
+    #[serde(default)]
+    expected_sha256: Option<String>,
+    #[serde(default)]
+    preserve_runtime_state: bool,
     restart_daemon: bool,
     restart_gui_host: bool,
     parent_pid: u32,
@@ -254,7 +258,7 @@ async fn apply_windows(progress: Option<ProgressCb>) -> Result<()> {
     let worker = find_executable(&extract).ok_or_else(|| anyhow!("压缩包中未找到 AskHuman.exe"))?;
     verify_windows_authenticode(&worker)?;
     let version = Command::new(&worker)
-        .arg("version")
+        .arg("--version")
         .stdin(Stdio::null())
         .output()
         .context("无法验证下载的 AskHuman.exe")?;
@@ -269,6 +273,8 @@ async fn apply_windows(progress: Option<ProgressCb>) -> Result<()> {
         target,
         worker: worker.clone(),
         expected_version,
+        expected_sha256: file_sha256(&worker).ok(),
+        preserve_runtime_state: false,
         restart_daemon: crate::ipc::transport::connect().await.is_ok(),
         restart_gui_host: crate::ipc::transport::connect_role("gui-host")
             .await
@@ -380,7 +386,11 @@ pub fn run_windows_worker(args: &[String]) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async {
+    let (daemon_was_running, gui_host_was_running) = runtime.block_on(async {
+        let daemon_was_running = crate::ipc::transport::connect().await.is_ok();
+        let gui_host_was_running = crate::ipc::transport::connect_role("gui-host")
+            .await
+            .is_ok();
         let _ = crate::client::request_stop(false).await;
         crate::client::wait_until_down(std::time::Duration::from_secs(24 * 60 * 60)).await;
         let _ = crate::gui_host::shutdown_if_running().await;
@@ -393,7 +403,12 @@ pub fn run_windows_worker(args: &[String]) -> Result<()> {
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+        (daemon_was_running, gui_host_was_running)
     });
+    let restart_daemon =
+        transaction.restart_daemon || (transaction.preserve_runtime_state && daemon_was_running);
+    let restart_gui_host = transaction.restart_gui_host
+        || (transaction.preserve_runtime_state && gui_host_was_running);
 
     let parent_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while crate::agents::detect::pid_alive(transaction.parent_pid)
@@ -411,43 +426,61 @@ pub fn run_windows_worker(args: &[String]) -> Result<()> {
         .ok_or_else(|| anyhow!("update target has no parent directory"))?;
     let staged = directory.join(format!(".AskHuman.new-{}.exe", uuid::Uuid::new_v4()));
     std::fs::copy(&running_worker, &staged).context("failed to stage updated executable")?;
-    let backup = backup_path(&transaction.target)
-        .ok_or_else(|| anyhow!("failed to allocate update backup path"))?;
-    let replace_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10 * 60);
-    loop {
-        match std::fs::rename(&transaction.target, &backup) {
-            Ok(()) => break,
-            Err(error) if std::time::Instant::now() < replace_deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(250));
-                let _ = error;
+    let backup = if transaction.target.exists() {
+        let backup = backup_path(&transaction.target)
+            .ok_or_else(|| anyhow!("failed to allocate update backup path"))?;
+        let replace_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10 * 60);
+        loop {
+            match std::fs::rename(&transaction.target, &backup) {
+                Ok(()) => break,
+                Err(error) if std::time::Instant::now() < replace_deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    let _ = error;
+                }
+                Err(error) => {
+                    return Err(error).context("timed out waiting for AskHuman.exe handles");
+                }
             }
-            Err(error) => return Err(error).context("timed out waiting for AskHuman.exe handles"),
         }
-    }
+        Some(backup)
+    } else {
+        None
+    };
     if let Err(error) = std::fs::rename(&staged, &transaction.target) {
-        let _ = std::fs::rename(&backup, &transaction.target);
+        if let Some(backup) = backup.as_ref() {
+            let _ = std::fs::rename(backup, &transaction.target);
+        }
         return Err(error).context("failed to install updated executable; restored backup");
     }
 
     let verification = Command::new(&transaction.target)
-        .arg("version")
+        .arg("--version")
         .stdin(Stdio::null())
         .output();
-    let verified = verification.is_ok_and(|output| {
+    let version_verified = verification.is_ok_and(|output| {
         output.status.success()
             && String::from_utf8_lossy(&output.stdout).contains(&transaction.expected_version)
     });
+    let hash_verified = transaction.expected_sha256.as_ref().is_none_or(|expected| {
+        expected.len() == 64
+            && expected.chars().all(|ch| ch.is_ascii_hexdigit())
+            && file_sha256(&transaction.target)
+                .is_ok_and(|actual| actual.eq_ignore_ascii_case(expected))
+    });
+    let verified = version_verified && hash_verified;
     if !verified {
         let failed = directory.join(format!("AskHuman.failed-{}.exe", uuid::Uuid::new_v4()));
         let _ = std::fs::rename(&transaction.target, failed);
-        std::fs::rename(&backup, &transaction.target)
-            .context("updated binary verification failed and rollback failed")?;
+        if let Some(backup) = backup.as_ref() {
+            std::fs::rename(backup, &transaction.target)
+                .context("updated binary verification failed and rollback failed")?;
+        }
         return Err(anyhow!(
             "updated binary verification failed; restored previous version"
         ));
     }
 
-    if transaction.restart_daemon {
+    if restart_daemon {
         let _ = Command::new(&transaction.target)
             .args(["daemon", "start"])
             .stdin(Stdio::null())
@@ -455,7 +488,7 @@ pub fn run_windows_worker(args: &[String]) -> Result<()> {
             .stderr(Stdio::null())
             .status();
     }
-    if transaction.restart_gui_host {
+    if restart_gui_host {
         let mut command = Command::new(&transaction.target);
         command
             .arg("--gui-host")
@@ -467,6 +500,24 @@ pub fn run_windows_worker(args: &[String]) -> Result<()> {
     }
     let _ = std::fs::remove_file(claimed_path);
     Ok(())
+}
+
+#[cfg(windows)]
+fn file_sha256(path: &std::path::Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 #[cfg(not(windows))]

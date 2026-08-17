@@ -106,7 +106,6 @@ pub fn interject_label(session_id: &str) -> String {
     format!("interject-{:016x}", h.finish())
 }
 
-#[cfg(windows)]
 pub use platform_impl::shutdown_if_running;
 pub use platform_impl::{bind, host_open, host_open_history, spawn_detached, spawn_detached_from};
 

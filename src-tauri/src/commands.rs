@@ -1,14 +1,12 @@
 //! 前端可调用的 Tauri 命令（弹窗模式）。
 
-use crate::app::coordinator::Coordinator;
 use crate::app::AppState;
 use crate::config::{AppConfig, ThemeMode, WindowEffect};
 use crate::integrations::cursor_hook;
-use crate::models::{ChannelAction, ChannelResult, InteractionRequest, QuestionAnswer};
+use crate::models::{InteractionRequest, QuestionAnswer};
 use crate::telegram::TelegramClient;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -60,7 +58,7 @@ pub struct PopupInit {
 #[tauri::command]
 pub fn popup_init(app: AppHandle, state: State<AppState>) -> PopupInit {
     // 方案6 预热弹窗：内容来自领用槽（`WarmPopup.show`）——`Some`=已领用、`None`=待命（request 返回 null，
-    // 前端等 `popup-show` 唤醒后再 pull）。冷 / 单进程：内容在构建时已注入 `AppState`。
+    // 前端等 `popup-show` 唤醒后再 pull）。冷 helper 的内容在构建时已注入 `AppState`。
     // language：预热弹窗进程长期存活、`state.config` 可能滞后，故领用时优先用 `Show.lang`（已解析的
     // en/zh）；其余路径用本进程 config 的原始值（auto/en/zh）。
     let default_lang = state.config.general.language.clone();
@@ -117,7 +115,7 @@ pub fn popup_init(app: AppHandle, state: State<AppState>) -> PopupInit {
         )
     };
     // 预热进程长存、`state.config` 可能滞后：领用时按最新 config 取主题/置顶/语音（无钥匙串）；
-    // 其余路径（刚 spawn 的冷 helper / 单进程）用本进程 config 即可。
+    // 刚 spawn 的冷 helper 直接使用本进程 config。
     let fresh = if warm {
         Some(AppConfig::load_without_secrets())
     } else {
@@ -131,7 +129,7 @@ pub fn popup_init(app: AppHandle, state: State<AppState>) -> PopupInit {
         popup_edit,
         theme: theme_str(cfg.general.theme),
         always_on_top: cfg.general.always_on_top,
-        // GUI Helper 模式下来源名由 Daemon 上送（A11）；单进程 / 设置回退取本进程环境。
+        // Popup helper source metadata is supplied by the daemon.
         source_name: source,
         project,
         project_name,
@@ -263,6 +261,7 @@ pub fn popup_agent_terminal(pid: u32) -> Option<String> {
 pub struct PushedAgent {
     pub kind: Option<String>,
     pub pid: Option<u32>,
+    pub launch_id: Option<String>,
 }
 
 static PUSHED_AGENT: std::sync::OnceLock<std::sync::Mutex<PushedAgent>> =
@@ -919,19 +918,8 @@ pub struct PopupSubmission {
 
 #[tauri::command]
 pub fn submit_popup(app: AppHandle, submission: PopupSubmission) {
-    // GUI Helper 模式：经 IPC 回传 Daemon。
     if let Some(bridge) = app.try_state::<crate::app::GuiBridge>() {
         bridge.send_answer(submission.answers);
-        return;
-    }
-    // 单进程（非 unix 回退）模式：投递本地协调器。
-    let result = ChannelResult {
-        action: ChannelAction::Send,
-        answers: submission.answers,
-        source_channel_id: "popup".to_string(),
-    };
-    if let Some(c) = app.try_state::<Arc<Coordinator>>() {
-        c.submit(result);
     }
 }
 
@@ -961,10 +949,6 @@ pub fn confirm_popup_ready(app: AppHandle) -> Result<(), String> {
 pub fn cancel_popup(app: AppHandle) {
     if let Some(bridge) = app.try_state::<crate::app::GuiBridge>() {
         bridge.send_cancel();
-        return;
-    }
-    if let Some(c) = app.try_state::<Arc<Coordinator>>() {
-        c.submit(ChannelResult::cancel("popup"));
     }
 }
 
@@ -2695,11 +2679,11 @@ pub fn agent_lifecycle_uninstall(app: AppHandle, agent: String) -> Result<String
     Ok(msg)
 }
 
-/// 聚焦某 Agent 所在的终端（实验性，macOS：Terminal.app / iTerm2）。由 Agent 状态窗口逐行调用，
-/// 传入该会话的 agent 进程 pid；失败（无 tty / 不支持的终端 / 未授权 / 找不到）返回 Err。
+/// Focus an Agent's registered terminal surface. macOS resolves an exact TTY from `pid`; Windows
+/// resolves the exact AskHuman-created Windows Terminal window from `launch_id`.
 #[tauri::command]
-pub fn focus_agent_terminal(pid: u32) -> Result<(), String> {
-    crate::integrations::terminal_focus::focus_agent_terminal(pid)
+pub fn focus_agent_terminal(pid: Option<u32>, launch_id: Option<String>) -> Result<(), String> {
+    crate::integrations::terminal_focus::focus_agent_terminal(pid, launch_id.as_deref())
 }
 
 /// 手动把某 agent 置为「空闲」（状态窗口纠正漏 hook 卡「工作中」场景）：向 daemon 发一条

@@ -506,13 +506,15 @@ export interface AgentRecord {
   cwd?: string | null;
   /** Direct parent session for a branch created by AskHuman's native Fork flow. */
   forkedFromSessionId?: string | null;
+  /** AskHuman-created terminal task UUID; required for exact Windows Terminal focus. */
+  launchId?: string | null;
   /** Runtime-probed native Fork capability for this active source session. */
   forkReady?: boolean;
   startedAt: number;
   lastActivity: number;
   state: AgentRunState;
   endedAt?: number | null;
-  /** 所在终端类型（apple-terminal/iterm2/vscode/…/other）；用于「聚焦终端」按钮显隐。 */
+  /** 所在终端类型（apple-terminal/iterm2/windows-terminal/vscode/…）；用于聚焦按钮显隐。 */
   terminal?: string | null;
   /** 实时「当前工具」（hook 上报，仅 snapshot、不落盘）：`{name, object?, at}`。GUI 暂不消费。 */
   currentTool?: { name: string; object?: string | null; at: number } | null;
@@ -930,6 +932,7 @@ export interface PushedUpdateState {
 export interface PushedAgent {
   kind?: string | null;
   pid?: number | null;
+  launchId?: string | null;
 }
 
 export interface RuleStatus {

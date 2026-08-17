@@ -34,27 +34,55 @@ pub fn spawn_detached() -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn spawn_windows_detached() -> std::io::Result<()> {
-    use super::lifecycle;
-    use std::process::{Command, Stdio};
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, PROCESS_INFORMATION,
+        STARTUPINFOW,
+    };
 
     let exe = std::env::current_exe()?;
-    if let Some(dir) = lifecycle::log_path().parent() {
-        std::fs::create_dir_all(dir)?;
+    let mut application: Vec<u16> = exe.as_os_str().encode_wide().collect();
+    application.push(0);
+
+    // `std::process::Command` must enable handle inheritance when it wires redirected stdio.
+    // On Windows that can retain an unrelated caller pipeline in the daemon and its GUI children,
+    // so a script capturing `AskHuman daemon start` never observes EOF. Create the background role
+    // with inheritance explicitly disabled; `--background` makes the child append logs itself.
+    let mut command_line = Vec::new();
+    command_line.push(b'"' as u16);
+    command_line.extend(exe.as_os_str().encode_wide());
+    command_line.push(b'"' as u16);
+    command_line.extend(" daemon run --background".encode_utf16());
+    command_line.push(0);
+
+    let startup = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut process = PROCESS_INFORMATION::default();
+    let created = unsafe {
+        CreateProcessW(
+            application.as_ptr(),
+            command_line.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+            std::ptr::null(),
+            std::ptr::null(),
+            &startup,
+            &mut process,
+        )
+    };
+    if created == 0 {
+        return Err(std::io::Error::last_os_error());
     }
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(lifecycle::log_path())?;
-    let log_err = log.try_clone()?;
-    let mut command = Command::new(exe);
-    command
-        .arg("daemon")
-        .arg("run")
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log))
-        .stderr(Stdio::from(log_err));
-    configure_background(&mut command);
-    command.spawn().map(|_| ())
+    unsafe {
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+    Ok(())
 }
 
 /// Prevent background roles from opening a second console while keeping ordinary CLI output.

@@ -1,6 +1,7 @@
 //! Comment-preserving JSONC edits for nested command-hook groups.
 
 use anyhow::{anyhow, Result};
+use base64::Engine;
 use jsonc_parser::cst::{CstNode, CstRootNode};
 use jsonc_parser::json;
 use jsonc_parser::ParseOptions;
@@ -9,11 +10,30 @@ use serde_json::Value;
 pub fn command_handler_matches(
     handler: &Value,
     expected: &str,
-    require_windows_override: bool,
+    expected_windows: Option<&str>,
 ) -> bool {
     handler.get("command").and_then(Value::as_str) == Some(expected)
-        && (!require_windows_override
-            || handler.get("commandWindows").and_then(Value::as_str) == Some(expected))
+        && expected_windows.is_none_or(|expected_windows| {
+            handler.get("commandWindows").and_then(Value::as_str) == Some(expected_windows)
+        })
+}
+
+/// Build a Windows hook command that is independent of the outer session shell chosen by Codex.
+/// `-EncodedCommand` avoids a second round of cmd.exe/PowerShell quoting and expansion for paths
+/// containing spaces, apostrophes, dollar signs, or other shell metacharacters.
+pub fn powershell_command(executable: &str, args: &[&str]) -> String {
+    fn literal(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
+    let mut script = format!("& {}", literal(executable));
+    for arg in args {
+        script.push(' ');
+        script.push_str(&literal(arg));
+    }
+    let utf16le: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(utf16le);
+    format!("powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}")
 }
 
 fn command_has_marker(value: &Value, marker: &str) -> bool {
@@ -393,6 +413,29 @@ pub fn atomic_write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn powershell_command_round_trips_shell_metacharacters_without_outer_quoting() {
+        let command = powershell_command(
+            r"C:\Users\O'Brien $dev\Ask Human.exe",
+            &["__agent-hook", "codex", "activity"],
+        );
+        let encoded = command.split_whitespace().last().unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
+        assert_eq!(
+            String::from_utf16(&units).unwrap(),
+            "& 'C:\\Users\\O''Brien $dev\\Ask Human.exe' '__agent-hook' 'codex' 'activity'"
+        );
+        assert!(!command.contains("Ask Human.exe"));
+        assert!(command
+            .starts_with("powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand "));
+    }
 
     #[test]
     fn upsert_appends_and_preserves_other_groups_and_comments() {

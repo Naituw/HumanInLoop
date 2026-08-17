@@ -1,4 +1,4 @@
-//! Native Agent session fork flow shared by IM commands and watch-card actions.
+//! Native Agent session fork flow shared by IM commands and watch-card actions in the runtime.
 
 use super::*;
 

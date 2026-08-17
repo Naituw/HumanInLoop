@@ -592,6 +592,7 @@ export function usePopupCore() {
   // 来源 agent：家族标识 + pid + 所在终端类型（决定 badge 是否可点击激活 tab）。
   const agentKind = ref("");
   const agentPid = ref<number | null>(null);
+  const agentLaunchId = ref<string | null>(null);
   const agentConsoleSessionId = ref("");
   const agentTerminal = ref<string | null>(null);
   // agent badge 文案：本地化家族名（Claude Code / Codex / Cursor / Grok）；未知家族回退原始标识。
@@ -601,9 +602,11 @@ export function usePopupCore() {
     const label = t(`agents.kind.${k}`);
     return label === `agents.kind.${k}` ? k : label;
   });
-  // agent badge 是否可点击：所在终端可激活 tab 且有 pid。
+  // macOS uses a pid/TTY; Windows uses a daemon-registered launch UUID.
   const agentFocusable = computed(
-    () => !!agentPid.value && isFocusableTerminal(agentTerminal.value)
+    () =>
+      (!!agentPid.value || !!agentLaunchId.value) &&
+      isFocusableTerminal(agentTerminal.value)
   );
   const agentConsoleAvailable = computed(
     () => agentConsoleSessionId.value.length > 0
@@ -611,9 +614,9 @@ export function usePopupCore() {
 
   // 点击 agent badge：聚焦该 agent 所在终端的 tab（失败静默，仅日志）。
   async function onFocusAgentTerminal() {
-    if (!agentFocusable.value || agentPid.value == null) return;
+    if (!agentFocusable.value) return;
     try {
-      await focusAgentTerminal(agentPid.value);
+      await focusAgentTerminal(agentPid.value, agentLaunchId.value);
     } catch (err) {
       console.warn("focus agent terminal failed", err);
     }
@@ -2279,17 +2282,27 @@ export function usePopupCore() {
     // 升级成「可点 + ↗」（终端类型探测仍要跑进程链 ps，故也在此渲染后异步进行）。旧 daemon 可能随
     // popup_init 直接带 pid → 一并处理。
     if (init.agentPid != null) {
-      void applyAgentResolved(init.agentKind, init.agentPid);
+      void applyAgentResolved(init.agentKind, init.agentPid, undefined);
     }
-    unlistenAgent = await listen<{ kind?: string | null; pid?: number | null }>(
+    unlistenAgent = await listen<{
+      kind?: string | null;
+      pid?: number | null;
+      launchId?: string | null;
+    }>(
       "agent-resolved",
       (e) => {
-        void applyAgentResolved(e.payload.kind, e.payload.pid);
+        void applyAgentResolved(
+          e.payload.kind,
+          e.payload.pid,
+          e.payload.launchId
+        );
       },
     );
     try {
       const r = await popupAgentResolved();
-      if (r.kind || r.pid != null) void applyAgentResolved(r.kind, r.pid);
+      if (r.kind || r.pid != null || r.launchId) {
+        void applyAgentResolved(r.kind, r.pid, r.launchId);
+      }
     } catch {
       /* 无 daemon / 单进程回退：忽略 */
     }
@@ -2305,11 +2318,17 @@ export function usePopupCore() {
   /// 「可点 + ↗」。幂等：pull 初值与事件可能各触发一次，重复设值无副作用。
   async function applyAgentResolved(
     kind: string | null | undefined,
-    pid: number | null | undefined
+    pid: number | null | undefined,
+    launchId: string | null | undefined
   ) {
     if (kind && !agentKind.value) agentKind.value = kind;
+    if (launchId) {
+      agentLaunchId.value = launchId;
+      agentTerminal.value = "windows-terminal";
+    }
     if (pid != null) {
       agentPid.value = pid;
+      if (launchId) return;
       try {
         agentTerminal.value = (await popupAgentTerminal(pid)) ?? null;
       } catch {

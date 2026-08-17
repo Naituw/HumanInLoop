@@ -256,6 +256,60 @@ pub fn log_guard_audit(audit: GuardAudit<'_>) {
     let _ = line;
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeEventLine<'a> {
+    timestamp_ms: u64,
+    pid: u32,
+    event: &'static str,
+    component: &'a str,
+    action: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<&'a str>,
+}
+
+/// Append one privacy-safe process/window lifecycle event to `daemon.log` (best-effort).
+///
+/// Only fixed action labels and an opaque request UUID are accepted. Prompt text, answers,
+/// attachments, paths, channel identities, and arbitrary error strings must not use this API.
+pub fn log_runtime_event(component: &str, action: &str, request_id: Option<&str>) {
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    let Ok(mut line) = serde_json::to_string(&RuntimeEventLine {
+        timestamp_ms,
+        pid: std::process::id(),
+        event: "askhuman_runtime",
+        component,
+        action,
+        request_id,
+    }) else {
+        return;
+    };
+    line.push('\n');
+
+    #[cfg(not(test))]
+    {
+        use std::io::Write;
+
+        let path = log_path();
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
+}
+
 /// daemon.log 轮转阈值：超过即把现有内容挪到 `daemon.log.1`（覆盖上一代）并清空当前文件。
 /// 上限约束为「两代 × 5MB」，正常运行量级下够追溯数周。
 const LOG_ROTATE_LIMIT: u64 = 5 * 1024 * 1024;

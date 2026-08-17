@@ -337,9 +337,11 @@ export const agentLifecycleInstall = (agent: AgentKind) =>
 export const agentLifecycleUninstall = (agent: AgentKind) =>
   invoke<string>("agent_lifecycle_uninstall", { agent });
 
-/** 聚焦某 Agent 所在终端（v1 仅 macOS / Terminal.app）。失败抛错由调用方静默处理。 */
-export const focusAgentTerminal = (pid: number) =>
-  invoke<void>("focus_agent_terminal", { pid });
+/** Focus the exact registered terminal surface. Failures are handled silently by callers. */
+export const focusAgentTerminal = (
+  pid?: number | null,
+  launchId?: string | null
+) => invoke<void>("focus_agent_terminal", { pid, launchId });
 
 /** 手动把某 agent 置为「空闲」（纠正漏 hook 卡「工作中」）。即发即走，daemon 改后推回新快照。 */
 export const agentForceIdle = (sessionId: string) =>

@@ -321,6 +321,9 @@ fn terminal_of_entry(e: &ProcEntry) -> Option<&'static str> {
     if s.contains("iterm.app/") || s.contains("iterm2") {
         return Some("iterm2");
     }
+    if s.contains("windowsterminal.exe") || s.contains("windows terminal") {
+        return Some("windows-terminal");
+    }
     if s.contains("ghostty") {
         return Some("ghostty");
     }
@@ -732,6 +735,18 @@ mod tests {
         };
         assert!(matches_agent(&e, AgentKind::Cursor));
         assert!(!matches_agent(&e, AgentKind::Claude));
+    }
+
+    #[test]
+    fn terminal_detection_recognizes_windows_terminal_process() {
+        let entry = ProcEntry {
+            pid: 42,
+            ppid: 1,
+            comm: r"C:\Program Files\WindowsApps\Microsoft.WindowsTerminal\WindowsTerminal.exe"
+                .to_string(),
+            command: "Windows Terminal".to_string(),
+        };
+        assert_eq!(terminal_of_entry(&entry), Some("windows-terminal"));
     }
 
     #[test]

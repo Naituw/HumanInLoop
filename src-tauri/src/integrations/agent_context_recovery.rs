@@ -144,8 +144,13 @@ fn status_from_text(target: AgentTarget, mode: Mode, text: &str, trust_ok: bool)
             marker_count += 1;
             if desired(target, mode, *spec) {
                 let expected = hook_command(target, spec.runtime_event).unwrap_or_default();
-                let windows_override_ok =
-                    target != AgentTarget::Codex || command_windows == Some(expected.as_str());
+                let expected_windows = (target == AgentTarget::Codex)
+                    .then(|| windows_hook_command(target, spec.runtime_event))
+                    .transpose()
+                    .unwrap_or_default();
+                let windows_override_ok = expected_windows
+                    .as_deref()
+                    .is_none_or(|expected_windows| command_windows == Some(expected_windows));
                 if command == Some(expected.as_str())
                     && windows_override_ok
                     && timeout == Some(TIMEOUT_SECS)
@@ -224,6 +229,9 @@ fn reconcile_text(target: AgentTarget, mode: Mode, text: &str) -> Result<String>
     for spec in all_specs(target) {
         if desired(target, mode, *spec) {
             let command = hook_command(target, spec.runtime_event)?;
+            let command_windows = (target == AgentTarget::Codex)
+                .then(|| windows_hook_command(target, spec.runtime_event))
+                .transpose()?;
             updated = if spec.flat {
                 hook_edit::upsert_flat_handler(
                     &updated,
@@ -240,7 +248,7 @@ fn reconcile_text(target: AgentTarget, mode: Mode, text: &str) -> Result<String>
                     MARKER,
                     spec.matcher,
                     &command,
-                    (target == AgentTarget::Codex).then_some(command.as_str()),
+                    command_windows.as_deref(),
                     TIMEOUT_SECS,
                 )?
             };
@@ -275,6 +283,20 @@ fn hook_command(target: AgentTarget, event: &str) -> Result<String> {
     Ok(format!(
         "\"{}\" {MARKER} {agent} {event}",
         executable.to_string_lossy()
+    ))
+}
+
+fn windows_hook_command(target: AgentTarget, event: &str) -> Result<String> {
+    let executable = std::env::current_exe().context("failed to resolve current executable")?;
+    let agent = match target {
+        AgentTarget::ClaudeCode => "claude",
+        AgentTarget::Codex => "codex",
+        AgentTarget::Cursor => "cursor",
+        AgentTarget::Grok => "grok",
+    };
+    Ok(hook_edit::powershell_command(
+        &executable.to_string_lossy(),
+        &[MARKER, agent, event],
     ))
 }
 

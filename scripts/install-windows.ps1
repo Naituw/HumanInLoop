@@ -1,6 +1,7 @@
 ﻿[CmdletBinding()]
 param(
-  [switch]$Release
+  [switch]$Release,
+  [switch]$Global
 )
 
 # 构建并安装 AskHuman 到用户目录（Windows）。
@@ -8,11 +9,42 @@ $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $ScriptDir
-$UsesDefaultInstallDir = [string]::IsNullOrWhiteSpace($env:INSTALL_DIR)
-$InstallDir = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "Programs\AskHuman" }
+$ExplicitInstallDir = -not [string]::IsNullOrWhiteSpace($env:INSTALL_DIR)
+$DefaultInstallDir = Join-Path $env:LOCALAPPDATA "Programs\AskHuman"
+$DevRoot = $null
+$Cursor = [IO.Path]::GetFullPath($RepoRoot)
+while (-not [string]::IsNullOrWhiteSpace($Cursor)) {
+  if (Test-Path -LiteralPath (Join-Path $Cursor ".askhuman-dev\enabled") -PathType Leaf) {
+    $DevRoot = $Cursor
+    break
+  }
+  $Parent = Split-Path -Parent $Cursor
+  if ([string]::IsNullOrWhiteSpace($Parent) -or $Parent -eq $Cursor) { break }
+  $Cursor = $Parent
+}
+$IsDevInstall = -not $ExplicitInstallDir -and -not $Global -and $null -ne $DevRoot
+$InstallDir = if ($ExplicitInstallDir) {
+  $env:INSTALL_DIR
+} elseif ($IsDevInstall) {
+  Join-Path $DevRoot ".askhuman-dev\bin"
+} else {
+  $DefaultInstallDir
+}
+$UsesDefaultInstallDir = -not $ExplicitInstallDir -and -not $IsDevInstall
+$InstalledBin = Join-Path $InstallDir "AskHuman.exe"
 $BuildProfile = if ($Release) { "release" } else { "local-install" }
 Set-Location $RepoRoot
 . (Join-Path $ScriptDir "windows-user-path.ps1")
+
+if ($IsDevInstall) {
+  $InstanceHome = Join-Path $DevRoot ".askhuman-dev\home"
+  New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+  New-Item -ItemType Directory -Force -Path $InstanceHome | Out-Null
+  $env:ASKHUMAN_HOME = $InstanceHome
+  $env:ASKHUMAN_NO_KEYCHAIN = "1"
+  Write-Host "==> Dev Instance 检测到: $DevRoot"
+  Write-Host "    安装目标: $InstallDir"
+}
 
 if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
   Write-Error "需要 pnpm（npm i -g pnpm）"; exit 1
@@ -22,10 +54,13 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 }
 
 # Show the same in-flight request warning as install.sh before replacing the binary.
-if (Get-Command AskHuman -ErrorAction SilentlyContinue) {
-  $StatusOut = & AskHuman daemon status 2>$null
-  if ($LASTEXITCODE -eq 0 -and $StatusOut -match 'requests\s+(\d+) active' -and [int]$Matches[1] -gt 0) {
-    Write-Host "提示: daemon 当前有 $($Matches[1]) 个在途请求；安装后将在它们完结后自动换新（期间新提问会等待）。"
+if (Test-Path -LiteralPath $InstalledBin) {
+  $StatusOut = & $InstalledBin daemon status 2>$null
+  $StatusExitCode = $LASTEXITCODE
+  $StatusMatch = [regex]::Match(($StatusOut | Out-String), 'requests\s+(\d+) active')
+  if ($StatusExitCode -eq 0 -and $StatusMatch.Success -and [int]$StatusMatch.Groups[1].Value -gt 0) {
+    $ActiveRequests = $StatusMatch.Groups[1].Value
+    Write-Host "提示: daemon 当前有 $ActiveRequests 个在途请求；安装后将在它们完结后自动换新（期间新提问会等待）。"
     Write-Host "      立即换新: AskHuman daemon restart --force（会打断在途请求）"
   }
 }
@@ -47,7 +82,6 @@ if (-not (Test-Path $Bin)) { Write-Error "未找到编译产物 $Bin"; exit 1 }
 
 Write-Host "==> 安装到 $InstallDir"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-$InstalledBin = Join-Path $InstallDir "AskHuman.exe"
 $InstallState = Join-Path $InstallDir ".askhuman-install-state"
 $SourceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Bin).Hash.ToLowerInvariant()
 $SkipCopy = $false
@@ -64,18 +98,46 @@ if ((Test-Path -LiteralPath $InstalledBin) -and (Test-Path -LiteralPath $Install
 }
 
 if (-not $SkipCopy) {
-  $StagedBin = Join-Path $InstallDir ".AskHuman.new.$PID.exe"
+  $WorkerBin = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $Bin).Path)
+  $TargetBin = [IO.Path]::GetFullPath($InstalledBin)
+  if ($WorkerBin.Equals($TargetBin, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Build output and install target must be different files"
+  }
+  $VersionOut = (& $WorkerBin --version | Out-String).Trim()
+  $VersionExitCode = $LASTEXITCODE
+  $VersionMatch = [regex]::Match($VersionOut, '(\d+\.\d+\.\d+)')
+  if ($VersionExitCode -ne 0 -or -not $VersionMatch.Success) {
+    throw "Built AskHuman.exe did not report a valid version"
+  }
+  $ExpectedVersion = $VersionMatch.Groups[1].Value
+  $TransactionRoot = Join-Path ([IO.Path]::GetTempPath()) ("askhuman_install_" + [guid]::NewGuid().ToString("N"))
+  $TransactionPath = Join-Path $TransactionRoot "transaction.json"
   try {
-    Copy-Item -LiteralPath $Bin -Destination $StagedBin -Force
-    $StagedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $StagedBin).Hash.ToLowerInvariant()
-    if ($StagedHash -ne $SourceHash) {
-      throw "Staged AskHuman.exe hash does not match the build output"
+    New-Item -ItemType Directory -Force -Path $TransactionRoot | Out-Null
+    $Transaction = [ordered]@{
+      target = $TargetBin
+      worker = $WorkerBin
+      expectedVersion = $ExpectedVersion
+      expectedSha256 = $SourceHash
+      preserveRuntimeState = $true
+      restartDaemon = $false
+      restartGuiHost = $false
+      parentPid = 0
     }
-    Move-Item -LiteralPath $StagedBin -Destination $InstalledBin -Force
+    $Json = $Transaction | ConvertTo-Json -Compress
+    [IO.File]::WriteAllText($TransactionPath, $Json, (New-Object Text.UTF8Encoding($false)))
+    Write-Host "    正在安全排空后台进程并事务式替换二进制"
+    & $WorkerBin __update-worker $TransactionPath
+    if ($LASTEXITCODE -ne 0) {
+      throw "AskHuman Windows install worker failed with exit code $LASTEXITCODE"
+    }
   } finally {
-    Remove-Item -LiteralPath $StagedBin -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $TransactionRoot -Recurse -Force -ErrorAction SilentlyContinue
   }
   $InstalledHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $InstalledBin).Hash.ToLowerInvariant()
+  if ($InstalledHash -ne $SourceHash) {
+    throw "Installed AskHuman.exe hash does not match the build output"
+  }
   $StateTemp = "$InstallState.tmp.$PID"
   @("source=$SourceHash", "installed=$InstalledHash") | Set-Content -LiteralPath $StateTemp -Encoding ASCII
   Move-Item -LiteralPath $StateTemp -Destination $InstallState -Force
@@ -120,7 +182,9 @@ Enforce-ProfileBudget "dev" "src-tauri\target\debug" 6144
 Enforce-ProfileBudget "full-debug" "src-tauri\target\full-debug" 6144
 Enforce-ProfileBudget "release" "src-tauri\target\release" 4096
 
-Add-AskHumanUserPath $InstallDir
+if (-not $IsDevInstall) {
+  Add-AskHumanUserPath $InstallDir
+}
 if ($UsesDefaultInstallDir) {
   $LauncherDir = Join-Path $env:LOCALAPPDATA "Microsoft\WindowsApps"
   $KnownPath = "$env:Path;$([Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::User))"
@@ -130,4 +194,8 @@ if ($UsesDefaultInstallDir) {
   Install-AskHumanCommandLauncher $InstallDir $LauncherDir | Out-Null
 }
 Write-Host "==> 完成：$InstallDir\AskHuman.exe"
-Write-Host "==> AskHuman 命令已就绪；可直接运行 AskHuman --version。"
+if ($IsDevInstall) {
+  Write-Host "==> Dev Instance 已安装；在本 worktree 内运行 AskHuman 会自动改道到此二进制。"
+} else {
+  Write-Host "==> AskHuman 命令已就绪；可直接运行 AskHuman --version。"
+}

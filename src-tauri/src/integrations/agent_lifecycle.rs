@@ -196,6 +196,19 @@ fn hook_command(
     format!("\"{}\" {} {} {}", exe, MARKER, kind.as_str(), lc_event)
 }
 
+fn windows_hook_command(
+    exe: &str,
+    kind: AgentKind,
+    event_key: &str,
+    lc_event: &str,
+    stop_confirm: bool,
+) -> String {
+    if is_stop_event(kind, event_key) {
+        return super::agent_stop::windows_hook_command_for(exe, kind, true, stop_confirm);
+    }
+    super::hook_edit::powershell_command(exe, &[MARKER, kind.as_str(), lc_event])
+}
+
 fn is_stop_event(kind: AgentKind, event_key: &str) -> bool {
     kind != AgentKind::Grok
         && matches!((kind, event_key), (AgentKind::Cursor, "stop") | (_, "Stop"))
@@ -394,6 +407,8 @@ fn json_presence_with_stop(
     let mut complete = true;
     for (event_key, lc) in events(kind) {
         let want = hook_command(exe, kind, event_key, lc, stop_confirm);
+        let want_windows = (kind == AgentKind::Codex)
+            .then(|| windows_hook_command(exe, kind, event_key, lc, stop_confirm));
         let want_timeout = if is_stop_event(kind, event_key) {
             Some(super::agent_stop::TIMEOUT_SECS)
         } else {
@@ -413,9 +428,9 @@ fn json_presence_with_stop(
                         e,
                         shape,
                         &want,
+                        want_windows.as_deref(),
                         want_timeout,
                         want_unlimited_loop,
-                        kind == AgentKind::Codex,
                     )
                 })
             })
@@ -436,9 +451,9 @@ fn elem_matches(
     elem: &Value,
     shape: Shape,
     want: &str,
+    want_windows: Option<&str>,
     want_timeout: Option<u64>,
     want_unlimited_loop: bool,
-    require_windows_override: bool,
 ) -> bool {
     let timeout_ok = |h: &Value| match want_timeout {
         Some(t) => h.get("timeout").and_then(|v| v.as_u64()) == Some(t),
@@ -451,8 +466,9 @@ fn elem_matches(
             .map(|arr| {
                 arr.iter().any(|h| {
                     h.get("command").and_then(|c| c.as_str()) == Some(want)
-                        && (!require_windows_override
-                            || h.get("commandWindows").and_then(Value::as_str) == Some(want))
+                        && want_windows.is_none_or(|want_windows| {
+                            h.get("commandWindows").and_then(Value::as_str) == Some(want_windows)
+                        })
                         && timeout_ok(h)
                 })
             })
@@ -516,6 +532,9 @@ fn apply_json_install_with_stop(
     for (event_key, lc) in events(kind) {
         let command = hook_command(exe, kind, event_key, lc, stop_confirm);
         let cmd = command.as_str();
+        let command_windows = (kind == AgentKind::Codex)
+            .then(|| windows_hook_command(exe, kind, event_key, lc, stop_confirm));
+        let cmd_windows = command_windows.as_deref().unwrap_or(cmd);
         // Stop confirmation and PreToolUse interjection waits both need a 24-hour hook timeout.
         let timeout = if is_stop_event(kind, event_key) {
             Some(super::agent_stop::TIMEOUT_SECS)
@@ -527,7 +546,7 @@ fn apply_json_install_with_stop(
                 "hooks": [ {
                     "type": "command",
                     "command": cmd,
-                    "commandWindows": cmd,
+                    "commandWindows": cmd_windows,
                     "timeout": t
                 } ]
             }),
@@ -535,7 +554,7 @@ fn apply_json_install_with_stop(
                 "hooks": [ {
                     "type": "command",
                     "command": cmd,
-                    "commandWindows": cmd
+                    "commandWindows": cmd_windows
                 } ]
             }),
             (Shape::Nested, Some(t)) => {
@@ -706,9 +725,15 @@ fn codex_trust_entries(hooks_json: &std::path::Path) -> Result<Vec<(String, Stri
                 let cmd = handler.get("command").and_then(Value::as_str);
                 let is_command = handler.get("type").and_then(|t| t.as_str()) == Some("command");
                 let Some(cmd) = cmd else { continue };
-                if !is_command
-                    || (!cmd.contains(MARKER) && !cmd.contains(super::agent_stop::MARKER))
-                {
+                let owned = ["command", "commandWindows"].iter().any(|field| {
+                    handler
+                        .get(*field)
+                        .and_then(Value::as_str)
+                        .is_some_and(|command| {
+                            command.contains(MARKER) || command.contains(super::agent_stop::MARKER)
+                        })
+                });
+                if !is_command || !owned {
                     continue;
                 }
                 let key = format!("{abs_str}:{label}:{gi}:{hi}");

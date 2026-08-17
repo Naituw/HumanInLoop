@@ -12,5 +12,5 @@ pub fn dispatch(args: &[String]) -> ! {
     std::process::exit(server_impl::dispatch(args));
 }
 
-#[path = "unix_impl/mod.rs"]
+#[path = "runtime/mod.rs"]
 mod server_impl;

@@ -1,4 +1,4 @@
-//! Tauri 运行时：创建窗口、并行启动 Channel、汇集结果并退出。
+//! Tauri runtime for daemon-backed popups and shared desktop windows.
 
 pub mod confirm_coordinator;
 pub mod coordinator;
@@ -7,12 +7,6 @@ mod invoke;
 pub mod terminal_gate;
 pub mod tray_menu;
 
-use crate::channels::dingding::DingTalkChannel;
-use crate::channels::feishu::FeishuChannel;
-use crate::channels::popup::PopupChannel;
-use crate::channels::slack::SlackChannel;
-use crate::channels::telegram::TelegramChannel;
-use crate::channels::Channel;
 use crate::cli::{image_writer, output};
 use crate::config::{AppConfig, ThemeMode, WindowEffect};
 use crate::dingtalk::client::DingTalkClient;
@@ -21,9 +15,7 @@ use crate::i18n::{self, Lang};
 use crate::models::{AskRequest, ChannelAction, ChannelResult, InteractionRequest, QuestionAnswer};
 use crate::slack::client::SlackClient;
 use crate::telegram::TelegramClient;
-use coordinator::Coordinator;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 #[cfg(target_os = "macos")]
 use tauri::window::{Effect, EffectState, EffectsBuilder};
 use tauri::{Manager, RunEvent, WebviewUrl, WebviewWindowBuilder, WindowEvent};
@@ -34,11 +26,11 @@ pub struct AppState {
     /// Native edit intent used only by the local permission popup.
     pub popup_edit: Option<Box<crate::permission_diff::PermissionEditIntent>>,
     pub config: AppConfig,
-    /// 来源名（弹窗标题「Question from {source}」）。Daemon 模式由调用方上送（A11）；
-    /// 设置 / 非 Daemon 回退路径取本进程环境。
+    /// Source shown in the popup title. Popup helpers receive it from the daemon; standalone
+    /// desktop windows derive it from the current process.
     pub source: String,
-    /// 当前项目 key（回复历史归类 / 历史窗口默认过滤）。Daemon 模式由调用方上送；
-    /// 单进程 / 独立窗口在本进程计算（向上找 .git 根、回退 cwd）。
+    /// Project key used for reply history and default filtering. Popup helpers receive it from
+    /// the daemon; standalone desktop windows derive it from the current process.
     pub project: String,
     /// 发起本次提问的 agent 家族（claude/codex/cursor/grok），仅弹窗（Daemon 上送）有值；其它窗口为 None。
     pub agent_kind: Option<String>,
@@ -51,17 +43,9 @@ pub struct AppState {
     pub agent_pid: Option<u32>,
     /// 已严格匹配到 AgentRegistry 活动记录的会话 ID。仅用于弹窗打开并定位 Agent 状态窗口。
     pub agent_console_session_id: Option<String>,
-    /// 提问创建时刻（epoch 毫秒）：弹窗相对时间的锚点。冷/单进程路径取弹窗构造时刻；GUI helper 取 `Show`
-    /// 透传的创建时刻。非弹窗窗口（设置/历史/Agents/GuiHost）不使用，置 0。
+    /// Question creation time in epoch milliseconds. Popup helpers receive it in `Show`; other
+    /// desktop windows do not use it and set it to zero.
     pub created_at_ms: u64,
-}
-
-impl AppState {
-    fn ask_request(&self) -> &AskRequest {
-        self.interaction
-            .ask()
-            .expect("non-daemon popup state must carry an ask request")
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -99,8 +83,8 @@ pub struct WarmPopup {
     pub finalized: AtomicBool,
 }
 
-/// 弹窗作答 → Daemon 的桥：把前端 `submit_popup` / `cancel_popup` 转成 IPC `answer` 发回 Daemon。
-/// 仅 GUI Helper 模式存在；单进程（非 unix 回退）路径用 `Coordinator`。
+/// Bridges popup submissions and cancellations back to the daemon over IPC.
+/// Every product popup uses this bridge; there is no single-process data path.
 pub struct GuiBridge {
     tx: tokio::sync::mpsc::UnboundedSender<crate::ipc::ClientMsg>,
     /// Daemon 分配的 request_id（回带在 `answer` 中）。预热弹窗领用前为空，收到 `Show` 时由 reader 循环填入，
@@ -125,10 +109,31 @@ impl GuiBridge {
 
     fn terminal(&self, message: crate::ipc::ClientMsg) {
         if self.done.swap(true, Ordering::SeqCst) {
+            crate::daemon::lifecycle::log_runtime_event(
+                "popup_helper",
+                "terminal_ignored_already_done",
+                Some(&self.request_id()),
+            );
             return;
         }
-        let _ = self.tx.send(message);
-        // 即时关窗，视觉上与单进程一致（进程随后由 Daemon 关闭连接 / 安全网驱动退出）。
+        let action = match &message {
+            crate::ipc::ClientMsg::Answer {
+                action: ChannelAction::Cancel,
+                ..
+            } => "terminal_cancel",
+            crate::ipc::ClientMsg::Answer { .. } => "terminal_answer",
+            crate::ipc::ClientMsg::ConfirmAnswer { .. } => "terminal_confirm_answer",
+            _ => "terminal_other",
+        };
+        let request_id = self.request_id();
+        let sent = self.tx.send(message).is_ok();
+        crate::daemon::lifecycle::log_runtime_event(
+            "popup_helper",
+            if sent { action } else { "terminal_send_failed" },
+            Some(&request_id),
+        );
+        // Close immediately for responsive visual feedback; the daemon closes IPC after channel
+        // finalizers complete, and the bounded safety timer handles a lost acknowledgement.
         if let Some(w) = self.app.get_webview_window("popup") {
             let _ = w.close();
         }
@@ -171,10 +176,54 @@ impl GuiBridge {
 
     pub fn send_popup_dismissed(&self) {
         if !self.ready_sent.load(Ordering::SeqCst) {
+            crate::daemon::lifecycle::log_runtime_event(
+                "popup_helper",
+                "dismissed_skipped_not_ready",
+                Some(&self.request_id()),
+            );
             return;
         }
-        let _ = self.tx.send(crate::ipc::ClientMsg::PopupDismissed {
-            request_id: self.request_id(),
+        let request_id = self.request_id();
+        let sent = self
+            .tx
+            .send(crate::ipc::ClientMsg::PopupDismissed {
+                request_id: request_id.clone(),
+            })
+            .is_ok();
+        crate::daemon::lifecycle::log_runtime_event(
+            "popup_helper",
+            if sent {
+                "dismissed_sent"
+            } else {
+                "dismissed_send_failed"
+            },
+            Some(&request_id),
+        );
+    }
+
+    /// A destroyed native popup is terminal even when the frontend never submitted an action.
+    /// This covers platform/window-manager destruction paths that bypass CloseRequested. If an
+    /// answer was already sent, only acknowledge dismissal so the daemon can release focus.
+    pub fn popup_destroyed(&self) {
+        let request_id = self.request_id();
+        if self.done.load(Ordering::SeqCst) {
+            crate::daemon::lifecycle::log_runtime_event(
+                "popup_helper",
+                "destroyed_after_terminal",
+                Some(&request_id),
+            );
+            self.send_popup_dismissed();
+            return;
+        }
+        crate::daemon::lifecycle::log_runtime_event(
+            "popup_helper",
+            "destroyed_without_terminal",
+            Some(&request_id),
+        );
+        self.terminal(crate::ipc::ClientMsg::Answer {
+            request_id,
+            action: ChannelAction::Cancel,
+            answers: Vec::new(),
         });
     }
 
@@ -354,346 +403,37 @@ pub(crate) fn finalize_popup_show(
     crate::sound::play(&config.general.popup_sound);
 }
 
-/// 无任何可用通信 Channel 时的退出码（供下游据此降级）。
+/// Exit code used when no configured channel can handle a request.
 pub const EXIT_NO_CHANNEL: i32 = 3;
 
-/// 提问模式入口：按 Channel 可用性分流到 GUI 弹窗或 headless 消息渠道。
-///
-/// 决策（在创建任何窗口前）：
-/// - 需要弹窗且 GUI 可用 → GUI 路径（弹窗 + 可选会话型渠道抢答）；
-/// - 否则若存在可用会话型渠道（Telegram/钉钉）→ headless 路径（不进 Tauri）；
-/// - 都不可用 → stderr 报原因 + 退出码 `EXIT_NO_CHANNEL`。
-pub fn run_ask(request: AskRequest, config: AppConfig) -> ! {
-    let lang = Lang::resolve(&config.general.language);
-    let messaging_active = has_active_messaging(&config);
-    let popup_wanted = config.channels.popup.enabled;
-    let gui = gui_available(lang);
-
-    if popup_wanted && gui.is_ok() {
-        run_gui_ask(request, config, messaging_active);
-    } else if messaging_active {
-        if popup_wanted {
-            if let Err(reason) = &gui {
-                stderr_redirect::eprintln_real(
-                    &i18n::tr(lang, "app.popupUnavailableFellBack").replace("{reason}", reason),
-                );
-            }
-        }
-        run_headless(request, config);
-    } else {
-        let reason = match (popup_wanted, &gui) {
-            (true, Err(r)) => {
-                i18n::tr(lang, "app.popupUnavailableNoChannel").replace("{reason}", r)
-            }
-            (false, _) => i18n::tr(lang, "app.popupDisabledNoChannel").to_string(),
-            (true, Ok(())) => unreachable!(),
-        };
-        stderr_redirect::eprintln_real(&format!(
-            "{}{}",
-            i18n::err_prefix(lang),
-            i18n::tr(lang, "app.noChannel").replace("{reason}", &reason)
-        ));
-        std::process::exit(EXIT_NO_CHANNEL);
-    }
-}
-
-/// Telegram 是否已配置且可用（构造 client 成功即视为可用）。
+/// Returns whether the Telegram channel has complete, valid connection settings.
 pub(crate) fn is_telegram_active(config: &AppConfig) -> bool {
-    let tg = &config.channels.telegram;
-    tg.enabled
+    let telegram = &config.channels.telegram;
+    telegram.enabled
         && TelegramClient::new(
-            tg.bot_token.clone(),
-            tg.chat_id.clone(),
-            tg.api_base_url.clone(),
+            telegram.bot_token.clone(),
+            telegram.chat_id.clone(),
+            telegram.api_base_url.clone(),
         )
         .is_ok()
 }
 
-/// 钉钉是否已配置且可用（构造 client 成功——即三项非空——即视为可用）。
+/// Returns whether the DingTalk channel has complete, valid connection settings.
 pub(crate) fn is_dingding_active(config: &AppConfig) -> bool {
-    let dd = &config.channels.dingding;
-    dd.enabled && DingTalkClient::new(dd).is_ok()
+    let dingding = &config.channels.dingding;
+    dingding.enabled && DingTalkClient::new(dingding).is_ok()
 }
 
-/// 飞书是否已配置且可用（构造 client 成功且 open_id 非空——即四项齐备——即视为可用）。
+/// Returns whether the Feishu channel has complete, valid connection settings.
 pub(crate) fn is_feishu_active(config: &AppConfig) -> bool {
-    let fs = &config.channels.feishu;
-    fs.enabled && !fs.open_id.trim().is_empty() && FeishuClient::new(fs).is_ok()
+    let feishu = &config.channels.feishu;
+    feishu.enabled && !feishu.open_id.trim().is_empty() && FeishuClient::new(feishu).is_ok()
 }
 
-/// Slack 是否已配置且可用（构造 client 成功——双 token 齐备——且 user_id 非空即视为可用）。
+/// Returns whether the Slack channel has complete, valid connection settings.
 pub(crate) fn is_slack_active(config: &AppConfig) -> bool {
-    let sl = &config.channels.slack;
-    sl.enabled && !sl.user_id.trim().is_empty() && SlackClient::new(sl).is_ok()
-}
-
-/// 是否存在任一可用的会话型消息渠道。
-fn has_active_messaging(config: &AppConfig) -> bool {
-    is_telegram_active(config)
-        || is_dingding_active(config)
-        || is_feishu_active(config)
-        || is_slack_active(config)
-}
-
-/// 收集全部可用的会话型渠道外层（供 GUI 路径注册并行抢答）。
-fn active_messaging_channels(config: &AppConfig) -> Vec<Arc<dyn Channel>> {
-    let mut channels: Vec<Arc<dyn Channel>> = Vec::new();
-    if is_telegram_active(config) {
-        channels.push(Arc::new(TelegramChannel::new(
-            config.channels.telegram.clone(),
-        )));
-    }
-    if is_dingding_active(config) {
-        channels.push(Arc::new(DingTalkChannel::new(
-            config.channels.dingding.clone(),
-        )));
-    }
-    if is_feishu_active(config) {
-        channels.push(Arc::new(FeishuChannel::new(config.channels.feishu.clone())));
-    }
-    if is_slack_active(config) {
-        channels.push(Arc::new(SlackChannel::new(config.channels.slack.clone())));
-    }
-    channels
-}
-
-/// GUI 弹窗路径；若 Tauri 构建失败（GUI 不可用），按消息渠道是否可用兜底。
-fn run_gui_ask(request: AskRequest, config: AppConfig, messaging_active: bool) -> ! {
-    let lang = Lang::resolve(&config.general.language);
-    let caller = crate::cli::caller_context();
-    let state = AppState {
-        interaction: InteractionRequest::Ask(request.clone()),
-        popup_edit: None,
-        config: config.clone(),
-        source: crate::models::source_name(),
-        project: crate::project::detect(),
-        agent_kind: caller.agent_kind,
-        agent_session_id: caller.agent_session_id,
-        mcp_instance_id: caller.mcp_instance_id,
-        agent_pid: None,
-        agent_console_session_id: None,
-        // 单进程弹窗无 daemon：以构造时刻为提问时间锚点。
-        created_at_ms: crate::perf::now_ms() as u64,
-    };
-    match launch(state, View::Popup, None) {
-        Ok(()) => std::process::exit(0), // 成功路径已在 launch 内退出，此处不可达
-        Err(e) => {
-            if messaging_active {
-                stderr_redirect::eprintln_real(
-                    &i18n::tr(lang, "app.popupStartFailedFellBack").replace("{e}", &e.to_string()),
-                );
-                run_headless(request, config);
-            } else {
-                stderr_redirect::eprintln_real(&format!(
-                    "{}{}",
-                    i18n::err_prefix(lang),
-                    i18n::tr(lang, "app.popupStartFailedNoChannel").replace("{e}", &e.to_string())
-                ));
-                std::process::exit(EXIT_NO_CHANNEL);
-            }
-        }
-    }
-}
-
-/// headless 路径：不进入 Tauri 事件循环，用 tokio 并行跑全部可用会话型渠道。
-///
-/// 直接驱动各渠道会话并 `await` 全部结束：任一渠道完成回复即 `submit` → `process::exit`；
-/// 全部会话结束仍无结果 → 报错并以 `EXIT_NO_CHANNEL` 退出（避免静默挂起）。
-fn run_headless(request: AskRequest, config: AppConfig) -> ! {
-    use crate::channels::conversation::{run_conversation, MessagingChannel};
-
-    let lang = Lang::resolve(&config.general.language);
-    let rt = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            stderr_redirect::eprintln_real(&format!(
-                "{}{}",
-                i18n::err_prefix(lang),
-                i18n::tr(lang, "app.runtimeCreateFailed").replace("{e}", &e.to_string())
-            ));
-            std::process::exit(1);
-        }
-    };
-
-    // 并行消息渠道数（用于抢答收尾计算落败端数）+ 共享抢答信号。
-    let messaging_count = is_telegram_active(&config) as usize
-        + is_dingding_active(&config) as usize
-        + is_feishu_active(&config) as usize
-        + is_slack_active(&config) as usize;
-    let preempt = Arc::new(crate::channels::Preemption::new());
-    let project = crate::project::detect();
-    let source = crate::models::source_name();
-    let origin = crate::channels::ConversationOrigin::new(&source, None, &project);
-    let coordinator = Coordinator::new_headless(
-        request.clone(),
-        preempt.clone(),
-        messaging_count,
-        project,
-        source,
-    );
-
-    rt.block_on(async move {
-        let mut handles = Vec::new();
-
-        if is_telegram_active(&config) {
-            use crate::channels::telegram::TelegramSession;
-            use crate::telegram::router::TgRouter;
-            let cfg = config.channels.telegram.clone();
-            let req = request.clone();
-            let sink = coordinator.clone();
-            let preempt = preempt.clone();
-            let origin = origin.clone();
-            handles.push(tokio::spawn(async move {
-                // 单进程：每进程起一个仅挂本会话的 Router（统一走 Router 路径，单一 offset）。
-                let router = match TgRouter::connect(&cfg).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        stderr_redirect::eprintln_real(&format!(
-                            "{}{}",
-                            i18n::warn_prefix(lang),
-                            i18n::tr(lang, "app.telegramInvalid").replace("{e}", &e)
-                        ));
-                        return;
-                    }
-                };
-                let events = router.register();
-                let mut session = TelegramSession::new(cfg, events);
-                if let Err(e) = session.open().await {
-                    stderr_redirect::eprintln_real(&format!(
-                        "{}{}",
-                        i18n::warn_prefix(lang),
-                        i18n::tr(lang, "app.telegramInvalid").replace("{e}", &e.to_string())
-                    ));
-                    return;
-                }
-                run_conversation(&mut session, &req, &origin, preempt, sink).await;
-            }));
-        }
-
-        if is_dingding_active(&config) {
-            use crate::channels::dingding::DingTalkSession;
-            use crate::dingtalk::router::DdRouter;
-            let cfg = config.channels.dingding.clone();
-            let req = request.clone();
-            let sink = coordinator.clone();
-            let preempt = preempt.clone();
-            let origin = origin.clone();
-            handles.push(tokio::spawn(async move {
-                // 单进程：每进程起一个仅挂本会话的 Router（统一走 Router 路径）。
-                let router =
-                    match DdRouter::connect(cfg.client_id.trim(), cfg.client_secret.trim()).await {
-                        Ok(r) => r,
-                        Err(e) => {
-                            stderr_redirect::eprintln_real(&format!(
-                                "{}{}",
-                                i18n::warn_prefix(lang),
-                                i18n::tr(lang, "app.dingtalkInvalid").replace("{e}", &e)
-                            ));
-                            return;
-                        }
-                    };
-                let events = router.register();
-                let mut session = DingTalkSession::new(cfg, events);
-                if let Err(e) = session.open().await {
-                    stderr_redirect::eprintln_real(&format!(
-                        "{}{}",
-                        i18n::warn_prefix(lang),
-                        i18n::tr(lang, "app.dingtalkInvalid").replace("{e}", &e.to_string())
-                    ));
-                    return;
-                }
-                run_conversation(&mut session, &req, &origin, preempt, sink).await;
-            }));
-        }
-
-        if is_feishu_active(&config) {
-            use crate::channels::feishu::FeishuSession;
-            use crate::feishu::router::FsRouter;
-            let cfg = config.channels.feishu.clone();
-            let req = request.clone();
-            let sink = coordinator.clone();
-            let preempt = preempt.clone();
-            let origin = origin.clone();
-            handles.push(tokio::spawn(async move {
-                // 单进程：每进程起一个仅挂本会话的 Router（统一走 Router 路径）。
-                let router = match FsRouter::connect(&cfg).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        stderr_redirect::eprintln_real(&format!(
-                            "{}{}",
-                            i18n::warn_prefix(lang),
-                            i18n::tr(lang, "app.feishuInvalid").replace("{e}", &e)
-                        ));
-                        return;
-                    }
-                };
-                let events = router.register();
-                let mut session = FeishuSession::new(cfg, events);
-                if let Err(e) = session.open().await {
-                    stderr_redirect::eprintln_real(&format!(
-                        "{}{}",
-                        i18n::warn_prefix(lang),
-                        i18n::tr(lang, "app.feishuInvalid").replace("{e}", &e)
-                    ));
-                    return;
-                }
-                run_conversation(&mut session, &req, &origin, preempt, sink).await;
-            }));
-        }
-
-        if is_slack_active(&config) {
-            use crate::channels::slack::SlackSession;
-            use crate::slack::router::SlRouter;
-            let cfg = config.channels.slack.clone();
-            let req = request.clone();
-            let sink = coordinator.clone();
-            let preempt = preempt.clone();
-            let origin = origin.clone();
-            handles.push(tokio::spawn(async move {
-                // 单进程：每进程起一个仅挂本会话的 Router（统一走 Router 路径，独占一条 Socket Mode 连接）。
-                let router = match SlRouter::connect(&cfg).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        stderr_redirect::eprintln_real(&format!(
-                            "{}{}",
-                            i18n::warn_prefix(lang),
-                            i18n::tr(lang, "app.slackInvalid").replace("{e}", &e)
-                        ));
-                        return;
-                    }
-                };
-                let events = router.register();
-                let mut session = SlackSession::new(cfg, events);
-                if let Err(e) = session.open().await {
-                    stderr_redirect::eprintln_real(&format!(
-                        "{}{}",
-                        i18n::warn_prefix(lang),
-                        i18n::tr(lang, "app.slackInvalid").replace("{e}", &e)
-                    ));
-                    return;
-                }
-                run_conversation(&mut session, &req, &origin, preempt, sink).await;
-            }));
-        }
-
-        for h in handles {
-            let _ = h.await;
-        }
-
-        // 全部会话结束：若已有结果则输出并退出（不返回）；否则返回交由下方兜底报错。
-        coordinator.finish();
-    });
-
-    // 正常情况下用户完成回复 → submit → 进程已退出；走到此处说明全部会话结束仍未获结果。
-    stderr_redirect::eprintln_real(&format!(
-        "{}{}",
-        i18n::err_prefix(lang),
-        i18n::tr(lang, "app.sessionEndedNoResult")
-    ));
-    std::process::exit(EXIT_NO_CHANNEL);
+    let slack = &config.channels.slack;
+    slack.enabled && !slack.user_id.trim().is_empty() && SlackClient::new(slack).is_ok()
 }
 
 /// 设置模式：创建设置窗口。
@@ -1002,21 +742,8 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
     let always_on_top = state.config.general.always_on_top;
     let window_effect = state.config.general.window_effect;
     let effective_window_effect = effective_window_effect(window_effect);
-    #[cfg(target_os = "macos")]
-    let appear_behavior = state
-        .config
-        .general
-        .appear_animation
-        .ns_animation_behavior();
-
-    // GUI Helper 模式（Daemon 拉起的弹窗进程）：弹窗是唯一渠道，恒显示窗口；作答经 IPC 回 Daemon。
-    let is_helper = popup_ipc.is_some();
     // 方案6 预热弹窗：建窗后隐藏待命、不带请求，由首条 `Show` 领用上屏（延后 show）。
     let warm = popup_ipc.as_ref().map(|i| i.warm).unwrap_or(false);
-    // 通道启用判定（仅单进程提问模式使用）。
-    let messaging_active = has_active_messaging(&state.config);
-    // Helper：恒开弹窗。单进程：弹窗禁用且无可用消息渠道时兜底仍开弹窗，避免进程挂起。
-    let show_popup = is_helper || state.config.channels.popup.enabled || !messaging_active;
     // 提问模式下抑制「关窗即退出」：收尾 / 等待 Daemon 收尾时弹窗会先关，需留进程主动退出。
     // 设置模式不抑制，关窗即正常退出。宿主模式恒抑制（窗口全关后是否退出由宿主自身判定）。
     let prevent_autoexit = matches!(view, View::Popup | View::GuiHost);
@@ -1039,11 +766,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                         let finishing = app
                             .try_state::<GuiBridge>()
                             .map(|b| b.is_done())
-                            .unwrap_or(false)
-                            || app
-                                .try_state::<Arc<Coordinator>>()
-                                .map(|c| c.is_finalizing())
-                                .unwrap_or(false);
+                            .unwrap_or(false);
                         if !finishing {
                             // 原生关闭按钮：与 ⌘W 一致——阻止本次关闭，交前端决定（有输入则二次确认）。
                             api.prevent_close();
@@ -1058,7 +781,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                     }
                     WindowEvent::Destroyed => {
                         if let Some(bridge) = window.app_handle().try_state::<GuiBridge>() {
-                            bridge.send_popup_dismissed();
+                            bridge.popup_destroyed();
                         }
                     }
                     _ => {}
@@ -1105,19 +828,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             crate::macos_dock_icon::set_dock_icon();
             match view {
                 View::Popup => {
-                    // Dock 跳动 + 角标提问数（冷路径有请求；预热路径延后到 `popup_show_window` 领用时）。
-                    #[cfg(target_os = "macos")]
-                    if !warm && !is_helper {
-                        let count = app
-                            .state::<AppState>()
-                            .interaction
-                            .ask()
-                            .map(|request| request.questions.len())
-                            .unwrap_or(1);
-                        crate::macos_dock_icon::announce_questions(count);
-                    }
-
-                    if show_popup || warm {
+                    {
                         let mut url = String::from("index.html?view=popup");
                         append_window_effect_query(&mut url, effective_window_effect);
                         let builder =
@@ -1143,18 +854,6 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                         // Todos may be added from the separate manager window, CLI, MCP, or IM
                         // while this question is open. Keep the popup's project list live.
                         watch_todos_file(win.clone());
-                        // 预热路径：窗口保持隐藏待命，待 `Show` 领用、前端绘制完成后由 `popup_show_window` 上屏。
-                        if !warm && !is_helper {
-                            // macOS：隐藏构建后先设原生出现动画（样式由设置决定），再 show()。
-                            #[cfg(target_os = "macos")]
-                            if let Ok(ns) = win.ns_window() {
-                                crate::macos_window_anim::set_appear_animation(ns, appear_behavior);
-                            }
-                            let _ = win.show();
-                            crate::perf::mark_env("gui.win_show");
-                            // Play the configured popup sound after the window becomes visible.
-                            crate::sound::play(&app.state::<AppState>().config.general.popup_sound);
-                        }
                     }
 
                     match popup_ipc {
@@ -1290,10 +989,14 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                                         Ok(Some(crate::ipc::ServerMsg::AgentResolved {
                                             kind,
                                             pid,
+                                            launch_id,
                                         })) => {
                                             use tauri::Emitter;
-                                            let payload =
-                                                crate::commands::PushedAgent { kind, pid };
+                                            let payload = crate::commands::PushedAgent {
+                                                kind,
+                                                pid,
+                                                launch_id,
+                                            };
                                             crate::commands::set_pushed_agent(payload.clone());
                                             let _ = app_handle.emit("agent-resolved", payload);
                                         }
@@ -1318,35 +1021,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                                 }
                             });
                         }
-                        // —— 单进程模式（非 unix 回退）：协调器 + 弹窗 Channel + 并行消息渠道 ——
-                        None => {
-                            let request = app.state::<AppState>().ask_request().clone();
-                            let project = app.state::<AppState>().project.clone();
-                            let source = app.state::<AppState>().source.clone();
-                            let agent_kind = app.state::<AppState>().agent_kind.clone();
-                            let origin = crate::channels::ConversationOrigin::new(
-                                &source,
-                                agent_kind.as_deref(),
-                                &project,
-                            );
-                            let coordinator = Coordinator::new(
-                                app.handle().clone(),
-                                request.clone(),
-                                project,
-                                source,
-                                agent_kind,
-                            );
-                            if show_popup {
-                                coordinator
-                                    .register(Arc::new(PopupChannel::new(app.handle().clone())));
-                            }
-                            let config = app.state::<AppState>().config.clone();
-                            for ch in active_messaging_channels(&config) {
-                                coordinator.register(ch.clone());
-                                ch.start(&request, &origin, coordinator.clone());
-                            }
-                            app.manage(coordinator);
-                        }
+                        None => unreachable!("popup view requires daemon IPC"),
                     }
                 }
                 View::Settings => {
@@ -1399,25 +1074,16 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
             }
             return;
         }
-        // 提问模式：拦下关窗触发的退出（code=None），由协调器 / GUI Helper 逻辑决定真正退出时机。
-        // 设置模式不拦，关窗即正常退出。
+        // Popup helpers keep the process alive until the daemon acknowledges cancellation and
+        // closes the IPC stream. Standalone settings windows retain normal close-to-exit behavior.
         if prevent_autoexit {
             if let RunEvent::ExitRequested { code, api, .. } = &event {
                 if code.is_none() {
                     if let Some(bridge) = app_handle.try_state::<GuiBridge>() {
-                        // GUI Helper：关窗 / Cmd+Q → 通知 Daemon 取消，等其收尾关闭连接后由
-                        // reader 驱动 `app.exit(0)`（或安全网超时），确保取消已送达 Daemon。
+                        // Native close or application quit asks the daemon to cancel. The reader
+                        // exits after daemon-side channel finalizers have completed.
                         api.prevent_exit();
                         bridge.send_cancel();
-                    } else {
-                        // 单进程：仅在收尾阶段拦下，放行协调器 `app.exit(code)` 先输出结果。
-                        let finalizing = app_handle
-                            .try_state::<Arc<Coordinator>>()
-                            .map(|c| c.is_finalizing())
-                            .unwrap_or(false);
-                        if finalizing {
-                            api.prevent_exit();
-                        }
                     }
                 }
             }
@@ -1428,8 +1094,8 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
 
 /// 渲染结果：把一个终态 `ChannelResult` 转成「给 stdout 的文本 / 给 stderr 的错误 + 退出码」。
 ///
-/// 纯函数（除图片落盘的 IO 外），不打印、不退出，便于 Daemon 复用后经 IPC 回传 CLI。
-/// 单进程路径由 `emit_result` 包一层做实际打印 / 退出。
+/// Pure rendering function apart from attachment writes. The daemon returns its result to the
+/// CLI over IPC; `emit_result` remains a process-output adapter for internal callers and tests.
 #[derive(Debug, Clone)]
 pub struct RenderOutcome {
     /// 给 CLI stdout 的结果区块文本（不含尾换行；打印方负责换行）。

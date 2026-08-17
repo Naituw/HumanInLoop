@@ -4,7 +4,8 @@
 //! - macOS：`~/Library/LaunchAgents/<id>.guihost.plist`（`RunAtLoad` + `KeepAlive`）。
 //!   `KeepAlive` 兼作宿主二进制换新的守护——宿主退出后由 launchd 用**新二进制**重启。
 //! - Linux：`~/.config/autostart/askhuman-guihost.desktop`（`X-GNOME-Autostart-enabled=true`）。
-//! - Windows：当前用户 `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`。
+//! - Windows：当前用户 Run registry 指向受管 wscript.exe launcher；launcher 再以 hidden
+//!   window style 启动 console-subsystem EXE，登录时不闪控制台。
 //!
 //! 全部 best-effort：写文件 + 尽力 load/unload；失败不阻塞模式切换（图标仍可由 daemon 兜底拉起）。
 
@@ -182,13 +183,102 @@ mod windows_run {
 }
 
 #[cfg(windows)]
-fn windows_command(args: &[&str]) -> String {
-    let exe = current_exe();
-    if args.is_empty() {
-        format!(r#""{exe}""#)
-    } else {
-        format!(r#""{exe}" {}"#, args.join(" "))
+const WINDOWS_LAUNCHER_NAME: &str = "askhuman-login.vbs";
+
+#[cfg(windows)]
+fn windows_launcher_path() -> std::path::PathBuf {
+    crate::paths::config_dir().join(WINDOWS_LAUNCHER_NAME)
+}
+
+#[cfg(windows)]
+fn windows_script_host() -> std::path::PathBuf {
+    std::env::var_os("WINDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
+        .join("System32")
+        .join("wscript.exe")
+}
+
+#[cfg(windows)]
+fn windows_launcher_contents(exe: &str) -> String {
+    let exe = exe.replace('"', "\"\"");
+    format!(
+        "Option Explicit\r\n\
+Dim mode, command, shell\r\n\
+If WScript.Arguments.Count <> 1 Then WScript.Quit 2\r\n\
+mode = LCase(WScript.Arguments(0))\r\n\
+If mode = \"gui-host\" Then\r\n\
+  command = \"\"\"{exe}\"\" --gui-host\"\r\n\
+ElseIf mode = \"daemon\" Then\r\n\
+  command = \"\"\"{exe}\"\" daemon run\"\r\n\
+Else\r\n\
+  WScript.Quit 2\r\n\
+End If\r\n\
+Set shell = CreateObject(\"WScript.Shell\")\r\n\
+shell.Run command, 0, False\r\n"
+    )
+}
+
+#[cfg(windows)]
+fn windows_launcher_bytes(exe: &str) -> Vec<u8> {
+    let mut bytes = vec![0xff, 0xfe];
+    for unit in windows_launcher_contents(exe).encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
     }
+    bytes
+}
+
+#[cfg(windows)]
+fn windows_launcher_is_current() -> bool {
+    std::fs::read(windows_launcher_path())
+        .is_ok_and(|installed| installed == windows_launcher_bytes(&current_exe()))
+}
+
+#[cfg(windows)]
+fn ensure_windows_launcher() -> std::io::Result<()> {
+    let path = windows_launcher_path();
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Windows login launcher has no parent directory",
+        )
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let bytes = windows_launcher_bytes(&current_exe());
+    if std::fs::read(&path).is_ok_and(|installed| installed == bytes) {
+        return Ok(());
+    }
+    let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
+    std::fs::write(&temporary, bytes)?;
+    if std::fs::rename(&temporary, &path).is_err() {
+        let _ = std::fs::remove_file(&path);
+        if let Err(error) = std::fs::rename(&temporary, &path) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_command(role: &str) -> String {
+    format!(
+        r#""{}" //B //NoLogo "{}" {}"#,
+        windows_script_host().display(),
+        windows_launcher_path().display(),
+        role
+    )
+}
+
+#[cfg(windows)]
+fn remove_windows_launcher_if_unused() -> std::io::Result<()> {
+    let gui_absent = windows_run::read(WINDOWS_GUI_VALUE)?.is_none();
+    let daemon_absent = windows_run::read(WINDOWS_DAEMON_VALUE)?.is_none();
+    let path = windows_launcher_path();
+    if gui_absent && daemon_absent && path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -196,7 +286,8 @@ pub fn install() -> std::io::Result<()> {
     if is_dev_instance_context() {
         return Ok(());
     }
-    windows_run::write(WINDOWS_GUI_VALUE, &windows_command(&["--gui-host"]))
+    ensure_windows_launcher()?;
+    windows_run::write(WINDOWS_GUI_VALUE, &windows_command("gui-host"))
 }
 
 #[cfg(windows)]
@@ -204,7 +295,8 @@ pub fn uninstall() -> std::io::Result<()> {
     if is_dev_instance_context() {
         return Ok(());
     }
-    windows_run::remove(WINDOWS_GUI_VALUE)
+    windows_run::remove(WINDOWS_GUI_VALUE)?;
+    remove_windows_launcher_if_unused()
 }
 
 // ===== macOS：LaunchAgent plist =====
@@ -472,7 +564,9 @@ pub fn daemon_is_installed() -> bool {
 #[cfg(windows)]
 pub fn daemon_needs_update() -> bool {
     match windows_run::read(WINDOWS_DAEMON_VALUE) {
-        Ok(Some(installed)) => installed != windows_command(&["daemon", "run"]),
+        Ok(Some(installed)) => {
+            installed != windows_command("daemon") || !windows_launcher_is_current()
+        }
         Ok(None) => false,
         Err(_) => true,
     }
@@ -483,7 +577,8 @@ pub fn install_daemon() -> std::io::Result<()> {
     if is_dev_instance_context() {
         return Ok(());
     }
-    windows_run::write(WINDOWS_DAEMON_VALUE, &windows_command(&["daemon", "run"]))
+    ensure_windows_launcher()?;
+    windows_run::write(WINDOWS_DAEMON_VALUE, &windows_command("daemon"))
 }
 
 #[cfg(windows)]
@@ -491,7 +586,8 @@ pub fn uninstall_daemon() -> std::io::Result<()> {
     if is_dev_instance_context() {
         return Ok(());
     }
-    windows_run::remove(WINDOWS_DAEMON_VALUE)
+    windows_run::remove(WINDOWS_DAEMON_VALUE)?;
+    remove_windows_launcher_if_unused()
 }
 
 /// 让 daemon 登录项与「是否保活」一致：保活→写/刷新文件、否则→删文件。幂等，供 daemon 启动 /
@@ -565,7 +661,9 @@ pub fn is_installed() -> bool {
 #[cfg(windows)]
 pub fn needs_update() -> bool {
     match windows_run::read(WINDOWS_GUI_VALUE) {
-        Ok(Some(installed)) => installed != windows_command(&["--gui-host"]),
+        Ok(Some(installed)) => {
+            installed != windows_command("gui-host") || !windows_launcher_is_current()
+        }
         Ok(None) => false,
         Err(_) => true,
     }
@@ -638,12 +736,20 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_commands_quote_the_executable() {
-        let gui = windows_command(&["--gui-host"]);
-        let daemon = windows_command(&["daemon", "run"]);
-        assert!(gui.starts_with('"'));
-        assert!(gui.ends_with("\" --gui-host"));
-        assert!(daemon.ends_with("\" daemon run"));
+    fn windows_login_commands_use_managed_hidden_launcher() {
+        let gui = windows_command("gui-host");
+        let daemon = windows_command("daemon");
+        assert!(gui
+            .to_ascii_lowercase()
+            .contains("wscript.exe\" //b //nologo"));
+        assert!(gui.ends_with("askhuman-login.vbs\" gui-host"));
+        assert!(daemon.ends_with("askhuman-login.vbs\" daemon"));
+
+        let script = windows_launcher_contents(r"C:\Program Files\AskHuman\AskHuman.exe");
+        assert!(script.contains(
+            "command = \"\"\"C:\\Program Files\\AskHuman\\AskHuman.exe\"\" --gui-host\""
+        ));
+        assert!(script.contains("shell.Run command, 0, False"));
     }
 
     /// Dev 实例上下文判定（防生产登录项劫持，用户实证 2026-07-25）：`ASKHUMAN_HOME` 置位

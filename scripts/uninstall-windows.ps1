@@ -40,6 +40,8 @@ if (Test-Path $RunKey) {
   Remove-ItemProperty -Path $RunKey -Name "AskHuman GUI Host" -ErrorAction SilentlyContinue
   Remove-ItemProperty -Path $RunKey -Name "AskHuman Daemon" -ErrorAction SilentlyContinue
 }
+$LoginLauncher = Join-Path $env:USERPROFILE ".askhuman\askhuman-login.vbs"
+Remove-Item -LiteralPath $LoginLauncher -Force -ErrorAction SilentlyContinue
 
 foreach ($pattern in @("askhuman_update_*", "askhuman_npm_update_*")) {
   Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter $pattern -ErrorAction SilentlyContinue |

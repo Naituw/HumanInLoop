@@ -444,7 +444,14 @@ impl MessagingChannel for FeishuSession {
             todo_text_prefix,
             todo_badge_prefix,
         );
-        let _ = client.patch_card(&message_id, &finalized).await;
+        let finalize_action = match client.patch_card(&message_id, &finalized).await {
+            Ok(()) => "card_finalize_succeeded",
+            Err(error) => {
+                eprintln!("[feishu] failed to finalize interrupted card: {error}");
+                "card_finalize_failed"
+            }
+        };
+        crate::daemon::lifecycle::log_runtime_event("channel_feishu", finalize_action, None);
         events.clear_active(Some(&message_id), &open_id);
         None
     }

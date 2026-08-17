@@ -1,4 +1,4 @@
-//! Watch 订阅：持久化、tick 刷新、路由挂载、四渠道卡片回调与启动后自动关注。
+//! Watch persistence, tick refresh, routing, channel callbacks, and automatic subscriptions.
 
 use super::*;
 

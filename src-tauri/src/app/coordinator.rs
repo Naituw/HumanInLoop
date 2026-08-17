@@ -309,12 +309,8 @@ impl Coordinator {
 
         // 收尾窗口：等落败端收尾完成（pending 归零）或 2s 超时后输出并退出。
         let me = Arc::clone(self);
-        let pending = self.pending.clone();
         let waiter = async move {
-            let deadline = Instant::now() + FINALIZE_TIMEOUT;
-            while pending.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
+            me.wait_for_finalizers().await;
             me.finish();
         };
         match exiter {
@@ -337,6 +333,18 @@ impl Coordinator {
             return;
         }
         let inner = self.inner.lock().unwrap();
+        let pending_count = match &inner.headless {
+            Some((_, count)) => *count,
+            None => inner
+                .channels
+                .iter()
+                .filter(|channel| channel.id() != "popup")
+                .count(),
+        };
+        // Caller disconnect cancellation has no result waiter to keep the request handler alive.
+        // Count IM finalizers before interrupting them so the daemon can retain the coordinator
+        // until every card reaches a terminal state (or the bounded timeout expires).
+        self.pending.store(pending_count, Ordering::SeqCst);
         let reason = Interruption::Cancelled(source);
         match &inner.headless {
             Some((preempt, _)) => preempt.interrupt(reason),
@@ -353,6 +361,18 @@ impl Coordinator {
             &ChannelResult::cancel(source_channel_id),
             &[],
         );
+    }
+
+    /// Wait for interrupted IM channels to finish their terminal card updates.
+    ///
+    /// This is shared by normal first-answer finalization and caller-disconnect cancellation.
+    /// The timeout keeps a broken network integration from retaining a daemon request forever.
+    pub async fn wait_for_finalizers(&self) -> bool {
+        let deadline = Instant::now() + FINALIZE_TIMEOUT;
+        while self.pending.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        self.pending.load(Ordering::SeqCst) == 0
     }
 
     /// 一个落败渠道完成收尾时调用：未归零则减一（用于提前结束收尾窗口）。
@@ -494,7 +514,31 @@ fn display_name(id: &str, lang: Lang) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::channels::ConversationOrigin;
     use crate::models::{MessagePrompt, Question, QuestionAnswer};
+
+    struct InterruptChannel {
+        id: &'static str,
+        interrupted: Arc<AtomicBool>,
+    }
+
+    impl Channel for InterruptChannel {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn start(
+            &self,
+            _request: &AskRequest,
+            _origin: &ConversationOrigin,
+            _sink: Arc<Coordinator>,
+        ) {
+        }
+
+        fn interrupt(&self, _reason: &Interruption) {
+            self.interrupted.store(true, Ordering::SeqCst);
+        }
+    }
 
     fn coordinator() -> Arc<Coordinator> {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -563,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn single_process_coordinators_keep_cross_platform_caller_binding() {
+    fn coordinator_bindings_keep_cross_platform_caller_context() {
         let caller = crate::cli::CallerContext {
             agent_kind: Some("codex".into()),
             agent_session_id: Some("thread".into()),
@@ -586,5 +630,28 @@ mod tests {
                 mcp_instance_id: Some("instance".into()),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn caller_cancellation_waits_for_im_finalizers_but_not_popup() {
+        let coordinator = coordinator();
+        let popup_interrupted = Arc::new(AtomicBool::new(false));
+        let im_interrupted = Arc::new(AtomicBool::new(false));
+        coordinator.register(Arc::new(InterruptChannel {
+            id: "popup",
+            interrupted: popup_interrupted.clone(),
+        }));
+        coordinator.register(Arc::new(InterruptChannel {
+            id: "feishu",
+            interrupted: im_interrupted.clone(),
+        }));
+
+        coordinator.cancel_request("Caller".into(), "caller");
+
+        assert!(popup_interrupted.load(Ordering::SeqCst));
+        assert!(im_interrupted.load(Ordering::SeqCst));
+        assert_eq!(coordinator.pending.load(Ordering::SeqCst), 1);
+        coordinator.notify_finalized();
+        assert!(coordinator.wait_for_finalizers().await);
     }
 }

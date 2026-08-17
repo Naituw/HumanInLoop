@@ -1,4 +1,4 @@
-//! IM 入站命令层：监听、消息提取、共享命令（msg/new/export/stage 等）与回复。
+//! IM inbound listeners, message extraction, shared commands, and replies.
 
 use super::*;
 

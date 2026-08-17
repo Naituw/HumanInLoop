@@ -529,8 +529,9 @@ end run"#;
     Ok(())
 }
 
-/// Open a new Windows Terminal window and pass only the trusted AskHuman executable plus the
-/// opaque launch token. The task itself remains in the private one-time launch record.
+/// Open a uniquely named Windows Terminal window and pass only the trusted AskHuman executable
+/// plus the opaque launch token. A fixed, application-suppressed tab title gives the focus adapter
+/// an exact target without exposing the task or relying on a mutable tab index.
 #[cfg(target_os = "windows")]
 pub fn open_terminal(record: &LaunchRecord) -> Result<()> {
     use std::os::windows::process::CommandExt;
@@ -538,9 +539,12 @@ pub fn open_terminal(record: &LaunchRecord) -> Result<()> {
 
     let terminal = resolve_windows_terminal()
         .ok_or_else(|| anyhow!("Windows Terminal (wt.exe) is required to launch Agent tasks"))?;
+    let (window_name, tab_title) =
+        super::terminal_focus::windows_terminal_identity(&record.id).map_err(anyhow::Error::msg)?;
     let mut command = Command::new(terminal);
     command
-        .args(["-w", "new", "new-tab", "--title", "AskHuman"])
+        .args(["-w", &window_name, "new-tab", "--title", &tab_title])
+        .arg("--suppressApplicationTitle")
         .arg("--startingDirectory")
         .arg(&record.cwd)
         .arg(&record.askhuman_executable)
@@ -583,6 +587,16 @@ pub fn run_helper(args: &[String]) -> Result<()> {
         .ok_or_else(|| anyhow!("missing launch token"))?;
     let record = claim_record(token)?;
     validate_claim(&record, token)?;
+    #[cfg(windows)]
+    {
+        let action = if super::terminal_focus::register_windows_terminal_window(&record.id).is_ok()
+        {
+            "window_registered"
+        } else {
+            "window_registration_failed"
+        };
+        crate::daemon::lifecycle::log_runtime_event("windows_terminal", action, None);
+    }
     std::env::set_current_dir(&record.cwd).context("failed to enter workspace")?;
     let mut command = Command::new(&record.executable);
     command.env(LAUNCH_ID_ENV, &record.id);
@@ -898,7 +912,7 @@ fn resolve_login_shell_executable(name: &str) -> Option<String> {
 }
 
 #[cfg(windows)]
-fn resolve_windows_terminal() -> Option<String> {
+pub(crate) fn resolve_windows_terminal() -> Option<String> {
     // Microsoft Store execution aliases are zero-byte reparse points. Rust canonicalization can
     // reject them even though CreateProcess resolves them correctly, so prefer the fixed per-user
     // WindowsApps alias instead of treating it like a regular Agent executable.
@@ -929,8 +943,11 @@ fn resolve_windows_executable(name: &str) -> Option<String> {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(PathBuf::from)
+        // npm installs both an extensionless POSIX shim and a `.cmd` launcher. `where.exe`
+        // returns the POSIX shim first, but CreateProcess rejects it with ERROR_BAD_EXE_FORMAT.
+        .filter(|path| is_windows_launchable(path))
         .find_map(|path| fs::canonicalize(path).ok())
-        .filter(|path| is_executable(path))
+        .filter(|path| is_windows_launchable(path))
         .map(|path| path.to_string_lossy().to_string())
 }
 
@@ -991,7 +1008,25 @@ fn is_executable(path: &Path) -> bool {
     path.is_file() && fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
 }
 
-#[cfg(not(unix))]
+fn is_windows_launchable(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "exe" | "com" | "cmd" | "bat"
+                )
+            })
+}
+
+#[cfg(windows)]
+fn is_executable(path: &Path) -> bool {
+    is_windows_launchable(path)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
@@ -1098,6 +1133,22 @@ mod tests {
             terminal_helper_command("/tmp/Ask Human", "launch-id"),
             "  '/tmp/Ask Human' __agent-launch 'launch-id'"
         );
+    }
+
+    #[test]
+    fn windows_launchable_paths_reject_posix_npm_shims() {
+        let temp = tempfile::tempdir().unwrap();
+        let posix_shim = temp.path().join("codex");
+        let command_shim = temp.path().join("codex.CMD");
+        let executable = temp.path().join("codex.exe");
+        let powershell = temp.path().join("codex.ps1");
+        for path in [&posix_shim, &command_shim, &executable, &powershell] {
+            fs::write(path, b"placeholder").unwrap();
+        }
+        assert!(!is_windows_launchable(&posix_shim));
+        assert!(is_windows_launchable(&command_shim));
+        assert!(is_windows_launchable(&executable));
+        assert!(!is_windows_launchable(&powershell));
     }
 
     /// Task boundary validation happens before any filesystem/readiness side effect

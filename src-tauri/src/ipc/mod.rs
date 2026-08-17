@@ -319,13 +319,15 @@ pub struct TrayAgentInfo {
     /// 有待送达的插话消息。
     #[serde(default)]
     pub pending_interject: bool,
-    /// 「聚焦终端」可用（有 pid 且所在终端受支持）。
+    /// 「聚焦终端」可用（macOS 有 pid；Windows 有已登记的 launch UUID）。
     #[serde(default)]
     pub focusable: bool,
     #[serde(default)]
     pub forkable: bool,
     #[serde(default)]
     pub pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_id: Option<String>,
 }
 
 /// Daemon → GUI Helper 的题目下发（show 是 submit 的子集 + Daemon 分配的 request_id + 上下文）。
@@ -684,6 +686,8 @@ pub enum ServerMsg {
         kind: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pid: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        launch_id: Option<String>,
     },
     /// Agent 注册表全量快照（D→状态窗口订阅者，spec D20）。变化时推 + 周期心跳推。
     /// `agents` 为记录数组，前端按类型分组、按状态排序渲染。
@@ -1094,6 +1098,7 @@ mod tests {
                 focusable: true,
                 forkable: false,
                 pid: Some(7),
+                launch_id: Some("123e4567-e89b-12d3-a456-426614174000".to_string()),
             }],
             channel_issues: vec![ChannelIssueInfo {
                 channel: "slack".to_string(),

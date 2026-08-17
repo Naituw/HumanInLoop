@@ -427,7 +427,7 @@ const {
             v-if="!modes[a.id].timeoutHookSupported"
             class="result err"
           >
-            {{ t("settings.integration.windowsUnsupported") }}
+            {{ t("settings.integration.hookUnsupported") }}
           </p>
         </template>
         <template v-else>

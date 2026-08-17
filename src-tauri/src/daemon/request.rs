@@ -25,6 +25,7 @@ pub type GuiSlot = Arc<Mutex<Option<UnboundedSender<ServerMsg>>>>;
 pub struct ResolvedAgent {
     pub kind: Option<String>,
     pub pid: Option<u32>,
+    pub launch_id: Option<String>,
 }
 
 /// 一个活动请求的共享状态。

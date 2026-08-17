@@ -357,7 +357,7 @@ export default {
       updateAll: "全部更新",
       updatesAvailable: "有可用更新",
       uninstall: "移除",
-      windowsUnsupported: "Windows 暂不支持该 Hook",
+      hookUnsupported: "该 Agent 不支持受管超时 Hook。",
       permissionTitle: "权限审批",
       askQuestionTitle: "接管原生提问工具",
       askQuestionHint:

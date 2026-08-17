@@ -378,7 +378,67 @@ fn apply_activation_policy(app: &AppHandle, mode: MenuBarIconMode) {
 // ===== 托盘图标 / 菜单 =====
 
 fn decode_icon(bytes: &'static [u8]) -> Option<Image<'static>> {
-    Image::from_bytes(bytes).ok()
+    let image = Image::from_bytes(bytes).ok()?;
+    #[cfg(target_os = "windows")]
+    {
+        Some(compact_windows_tray_icon(image))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Some(image)
+    }
+}
+
+/// Trim transparent pixels and place the result on a square canvas with a one-pixel safety edge.
+/// Windows scales the whole source canvas into the notification area, so the macOS-oriented 4:3
+/// artwork otherwise appears visibly smaller than neighboring tray icons.
+#[cfg(any(target_os = "windows", test))]
+fn compact_windows_tray_icon(image: Image<'static>) -> Image<'static> {
+    const PADDING: u32 = 1;
+
+    let width = image.width();
+    let height = image.height();
+    let rgba = image.rgba();
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0;
+    let mut max_y = 0;
+    let mut found = false;
+
+    for y in 0..height {
+        for x in 0..width {
+            let alpha = rgba[((y * width + x) * 4 + 3) as usize];
+            if alpha == 0 {
+                continue;
+            }
+            found = true;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+
+    if !found {
+        return image;
+    }
+
+    let content_width = max_x - min_x + 1;
+    let content_height = max_y - min_y + 1;
+    let side = content_width.max(content_height) + PADDING * 2;
+    let target_x = (side - content_width) / 2;
+    let target_y = (side - content_height) / 2;
+    let mut compact = vec![0; (side * side * 4) as usize];
+
+    for row in 0..content_height {
+        let source_start = (((min_y + row) * width + min_x) * 4) as usize;
+        let source_end = source_start + (content_width * 4) as usize;
+        let target_start = (((target_y + row) * side + target_x) * 4) as usize;
+        compact[target_start..target_start + (content_width * 4) as usize]
+            .copy_from_slice(&rgba[source_start..source_end]);
+    }
+
+    Image::new_owned(compact, side, side)
 }
 
 fn icon_source(
@@ -1181,18 +1241,21 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
     }
     // Agent 子菜单「聚焦终端」：AppleScript 可能阻塞（授权弹窗等），放后台线程。
     if let Some(session_id) = id.strip_prefix("term:") {
-        let pid = app.try_state::<HostState>().and_then(|s| {
+        let focus = app.try_state::<HostState>().and_then(|s| {
             s.data
                 .lock()
                 .unwrap()
                 .agents
                 .iter()
                 .find(|a| a.session_id == session_id)
-                .and_then(|a| a.pid)
+                .map(|a| (a.pid, a.launch_id.clone()))
         });
-        if let Some(pid) = pid {
+        if let Some((pid, launch_id)) = focus {
             std::thread::spawn(move || {
-                let _ = crate::integrations::terminal_focus::focus_agent_terminal(pid);
+                let _ = crate::integrations::terminal_focus::focus_agent_terminal(
+                    pid,
+                    launch_id.as_deref(),
+                );
             });
         }
         return;
@@ -1985,6 +2048,7 @@ mod tests {
                     focusable: true,
                     forkable: true,
                     pid: Some(42),
+                    launch_id: None,
                 }],
                 ..Default::default()
             },
@@ -2240,5 +2304,40 @@ mod tests {
         assert_eq!(icon_source(true, 0, true), icon_bytes::IDLE_ATTENTION);
         assert_eq!(icon_source(true, 1, true), icon_bytes::ACTIVE);
         assert_eq!(icon_source(true, 0, false), icon_bytes::IDLE);
+    }
+
+    #[test]
+    fn windows_tray_compaction_trims_and_centers_rectangular_artwork() {
+        let mut rgba = vec![0; 8 * 6 * 4];
+        for y in 2..4 {
+            for x in 2..6 {
+                rgba[(y * 8 + x) * 4 + 3] = 255;
+            }
+        }
+
+        let compact = compact_windows_tray_icon(Image::new_owned(rgba, 8, 6));
+        assert_eq!((compact.width(), compact.height()), (6, 6));
+
+        let alpha = |x: usize, y: usize| compact.rgba()[(y * 6 + x) * 4 + 3];
+        assert_eq!(alpha(0, 2), 0);
+        assert_eq!(alpha(1, 2), 255);
+        assert_eq!(alpha(4, 3), 255);
+        assert_eq!(alpha(5, 3), 0);
+    }
+
+    #[test]
+    fn windows_tray_compaction_enlarges_the_shipped_artwork_canvas_share() {
+        let idle = Image::from_bytes(icon_bytes::IDLE).unwrap();
+        assert_eq!((idle.width(), idle.height()), (48, 36));
+
+        let compact = compact_windows_tray_icon(idle);
+        assert_eq!((compact.width(), compact.height()), (38, 38));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn non_windows_tray_decode_preserves_the_designed_canvas() {
+        let idle = decode_icon(icon_bytes::IDLE).unwrap();
+        assert_eq!((idle.width(), idle.height()), (48, 36));
     }
 }
