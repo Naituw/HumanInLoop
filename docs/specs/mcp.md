@@ -9,6 +9,10 @@
 > caller pid 上送 Daemon；Daemon 进程树探测只按 pid 刷新**已有** lifecycle session，绝不新建会话。
 > rmcp cancellation 会终止子 CLI，socket EOF 再取消 Daemon 请求。Codex 配置还把 `mcp__askhuman`
 > 最小加入 Code Mode `direct_only_tool_namespaces`，确保 ask 在顶层阻塞；所有权记录防止卸载用户原有项。
+> Codex CLI 0.147 的 Ctrl+C 实测可能在本地丢弃 tool call、只向精确 rollout turn 写
+> `turn_aborted`，而不发送 MCP `notifications/cancelled`。AskHuman 因此仅在 metadata 同时提供精确
+> `session_id` 与 `turn_id` 时，从调用开始的 rollout EOF 监听该 turn 的 abort 作为兼容保险；原生 MCP
+> cancellation 仍是主路径，其他 Agent、其他 turn 和历史 abort 均不能取消当前调用。
 >
 > **实现期补充（2026-07-23）**：Codex 桌面版 Suggested prompts 使用
 > `thread_source=system` 的内部 thread。AskHuman 对 Codex 每次 `tools/call._meta` 做前置检查，命中

@@ -74,7 +74,7 @@ daemon 是**刻意「无 GUI」**的：不初始化 AppKit/GTK/Win32 WebView、�
 | D9 | 菜单语言热切换 | 宿主监听配置变更（界面语言）→ **即时重建菜单为新语言**。 |
 | D10 | 状态新鲜度 | daemon 新增「**托盘状态订阅**」（**非保活**）：宿主连上即推一帧整合 `TrayState`，之后相关变化即推（提问受理/完结、IM 连接变化、agent 变化、更新态、进入排空）。图标据 `active_requests` 与「daemon 在否」切换三态；菜单文字用最近一帧。更新待生效时，运行中版本下方据 `pending + draining + active_requests` 显示具体等待原因。**该订阅不计入 daemon 保活**（见 D5）。 |
 | D11 | 宿主二进制换新 | 宿主长寿（尤其 always），需随二进制更新换到新版。复用 daemon 的「盘上二进制变化 → pending」信号（经 `TrayState` 下发）。检测到新二进制后，**在『无打开窗口』时换新**（不打断在用窗口）：always 经 launchd `KeepAlive`/autostart 重启或自我 re-exec；active 自我 re-exec 或由 daemon 下次拉起。always 模式下 daemon 因换新退出后，宿主立即重新拉起新版 daemon 并重连。 |
-| D12 | 开机自启（仅 always，Q2=含自启） | 切到 **always** 安装登录项、切走移除：macOS `~/Library/LaunchAgents/<id>.plist`（`RunAtLoad`+`KeepAlive`）；Linux `~/.config/autostart/<id>.desktop`；Windows `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`。使「重启系统后/daemon 没起时」图标也一直在。 |
+| D12 | 开机自启（仅 always，Q2=含自启） | 切到 **always** 安装登录项、切走移除：macOS `~/Library/LaunchAgents/<id>.plist`（`RunAtLoad`+`KeepAlive`）；Linux `~/.config/autostart/<id>.desktop`；Windows `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 指向 AskHuman 受管 `wscript.exe //B //NoLogo` launcher，再以 hidden window style 拉起 GUI Host，避免 console-subsystem EXE 在登录时闪窗。切走/卸载会精确移除 Run value 与受管 launcher。使「重启系统后/daemon 没起时」图标也一直在。 |
 | D13 | 单实例 + 宿主自有 IPC | 宿主用跨进程 `gui-host.lock` 单实例。宿主自带 IPC（Unix `gui-host.sock` / Windows named pipe，复用 NDJSON 编解码）接收「打开窗口/关闭/刷新」请求——**与 daemon 解耦**，使 daemon 未运行时也能打开设置/历史。Windows endpoint 继承与 daemon 相同的 SID/会话/配置目录隔离和受保护 DACL。宿主另作为 daemon 客户端：一条**非保活**状态订阅 + 「有窗口时」一条**计活**保活连接（实现 D5）。 |
 | D14 | daemon 集成 | `menuBarIcon != off` 时，daemon 启动 / 配置变更尝试拉起宿主（单实例去重，作兜底；always 主要靠登录项）。新增 `ClientMsg::TraySubscribe` / `ServerMsg::TrayState`（非保活）。`PROTOCOL_VERSION` 保持 1（增量、旧端忽略未知变体）。 |
 | D15 | Agent 集成更新提醒 | GUI Host 启动与 daemon 停→运行时按 Agents 设置页同一口径复查；待更新时显示可点击单行灯泡提示，单项列 Agent 名、多项只显示数量。无待答时 template 图标右上显示带挖空的小实心圆，有待答时问号优先。点击打开 Agents tab；设置内更新成功后即时清除。状态由 Host 本地缓存，不扩展 `TrayState`。 |
@@ -101,7 +101,7 @@ daemon 是**刻意「无 GUI」**的：不初始化 AppKit/GTK/Win32 WebView、�
 7. **语言热切换（D9）**：界面语言切换后，菜单文字即时变为新语言。
 8. **宿主二进制换新（D11）**：更新落盘后，宿主在「无打开窗口」时换到新版（always 下经登录项/KeepAlive 或自我 re-exec）；有窗口时不打断、待窗口关闭后换新；always 下 daemon 换新退出后图标短暂「停止」再恢复，最终 daemon 与宿主均为新版。
 9. **Linux 桌面**：支持托盘的桌面环境功能同 macOS；headless 开启 → 无图标、无报错、daemon 正常。
-10. **Windows**：三态设置、托盘菜单、窗口单例、named-pipe 路由与 HKCU Run 登录项行为与 D1–D15 一致；注销后后台角色不跨交互会话残留。RDS 多会话不在本验收范围。
+10. **Windows**：三态设置、托盘菜单、窗口单例、named-pipe 路由与 HKCU Run 登录项行为与 D1–D15 一致；注销后后台角色不跨交互会话残留。Win11 自动重登实测中 Explorer 从 Session 2 重建为 Session 1，GUI Host、daemon 与 warm popup 均在新 session 恢复；登录前 6 秒的 60 帧桌面截图和逐帧可见窗口审计没有出现 conhost/PowerShell/cmd/AskHuman 控制台窗口。RDS 多会话不在本验收范围。
 11. **回归**：提问/抢答/drain/自更新/IM 自动激活/历史/Agent 订阅等既有功能不受影响；daemon 空闲退出/指纹换新/排空语义不变。
 12. **Agent 集成提醒（D15）**：制造任一当前模式产物过期后，换新 GUI Host 或启动 daemon，菜单出现灯泡提示（单项列名、多项计数）；无待答时图标显示右上实心圆，有待答时仍显示问号；点击定位 Agents tab；在设置中更新后提示与圆点立即消失。
 

@@ -2,7 +2,7 @@
 
 对应规格：[`../specs/windows-platform-parity.md`](../specs/windows-platform-parity.md)
 
-状态：**P0–P6 主链路已实现；P7 对齐复审与缺口收口进行中；P8 等待外部发布验收**
+状态：**P0–P7 代码级完成；P8 等待外部发布验收**
 
 策略：长期开发分支，小提交、阶段 gate，完整验收后一次合并主线
 
@@ -571,35 +571,70 @@ NTFS profile ACL 继承、`MessageBeep`、named pipe、HKCU Run；未安装 Wind
 
 #### C3. Windows Terminal focus
 
-- 先用 VM 当前 `wt.exe` 版本验证稳定 window name、tab title 和 `focus-tab` 能力；启动 AskHuman task 时
-  生成不可碰撞 identity 并记入 Agent launch/registry；
-- focus 只能使用已登记 identity 找到目标 window/tab，不通过模糊标题或任意子进程 PID 猜测；
+- VM 当前 Windows Terminal 1.18 支持命名 window、固定 tab title 与 `focus-tab`；每个 AskHuman task
+  使用独占命名窗口与 `--suppressApplicationTitle` 固定 tab 0 标题，并把 launch UUID 持久化进
+  AgentRegistry；
+- launch helper 在 Agent 启动前按固定标题与 `WindowsTerminal.exe` owner 唯一匹配顶层窗口，持久化
+  `{launch UUID, HWND, owner PID}`。focus 先验证 HWND 仍存在、PID 未变化且 owner 仍为 Windows Terminal，
+  只有验证通过后才对该已知存活的命名窗口调用 `focus-tab -t 0`，从而既能从非活动 tab 切回，又不会因
+  `wt -w <name>` 的隐式创建语义产生幽灵窗口；
+- tab 0 激活后必须在有界时间内恢复固定标题，再 restore/foreground 同一 HWND；Windows 拒绝后台激活时，
+  仅在真实点击调用中临时附加 foreground/target input queue 后重试，并保证 detach；
 - 覆盖窗口被关、tab 被改名、Terminal 重启、多 task/多 workspace 与 Terminal 未安装；失败时 GUI/IM
   返回相同错误类别。
+
+Win11 桌面证据（Windows Terminal 1.18.10301）：登记 HWND `1442890` 后先把同一命名窗口切到 tab 1，
+活动标题为 `Windows PowerShell`；点击真实 AskHuman Popup 的 `Codex ↗` badge 后，同一 HWND 的活动标题
+恢复为 `AskHuman Agent [afbc362b-e50f-4c3c-a23d-b3eea303f409]`，且 foreground HWND 精确等于登记 HWND。
+
+#### C4. Ctrl+C 与多渠道终结
+
+- Popup 窗口生命周期是本地取消的主信号：请求尚未 terminal 时窗口销毁必须向 daemon 发送 Cancel；
+  已 terminal 后销毁只发送 dismissal，不重复改变结果；
+- 标准 MCP `notifications/cancelled` 仍是协议主路径。Codex CLI 0.147 在 Ctrl+C 时可能只在精确 rollout
+  turn 写入 `turn_aborted` 而不发 MCP cancellation，因此 AskHuman MCP 仅对带精确 Codex
+  `{session_id, turn_id}` metadata 的调用，从调用开始时的 rollout EOF 位置监听匹配事件作为兼容保险；
+  不匹配的 session/turn、普通文本与其他 Agent 均不得触发；
+- caller disconnect 时 daemon 先从请求 registry 移除并关闭 Popup，再等待所有非 Popup 渠道的 terminal
+  card finalizer（沿用 5 秒有界窗口）；飞书成功/失败只记录无敏感信息的固定 action；
+- Win11 真实 Codex 0.147 + 飞书验证：Ctrl+C 后 rollout 命中，Popup 销毁，飞书卡片 PATCH 成功，daemon
+  记录 `cancellation finalized`，未走 timeout。
 
 ### 17.6 工作流 D：Dev Instance、GUI Host 启动与 shared 架构
 
 #### D1. Windows Dev Instance
 
-- 把 `cli/dev_cmd.rs` 的 daemon/host 操作接到跨平台 lifecycle API，删除 Windows n/a；
-- `install-windows.ps1/.cmd` 识别 worktree Dev Instance，安装到隔离的 `.askhuman-dev/bin`，保持 pipe、锁、
-  配置、日志与正式实例隔离；
-- 按 `agent-worktree-setup.md` 的既有语义支持 channel preset 询问、enable/status/disable/uninstall；添加
-  两个 worktree 并存测试，禁止覆盖主实例二进制或 hooks。
+- `cli/dev_cmd.rs` 的 status/stop 已接到跨平台 lifecycle；disable 同时关闭本实例 daemon 与 GUI Host，
+  Windows 优雅退出超时后仅按规范化 Dev EXE 精确路径收口残留 helper，再等待锁释放后 purge；
+- `install-windows.ps1/.cmd` 已识别 worktree Dev Instance，默认安装到隔离的
+  `.askhuman-dev/bin/AskHuman.exe`，保持 named pipe、锁、配置、日志与正式实例隔离；显式 `-Global`
+  是生产安装逃生口，显式 `INSTALL_DIR` 仍优先；
+- Windows detached daemon 使用禁止 handle inheritance 的 `CreateProcessW` 路径，并由后台 role 自写日志，
+  PowerShell/CI 捕获 `daemon start` 输出时可正常收到 EOF；installer 的多行 daemon status 使用显式 regex
+  match，不依赖 PowerShell 集合匹配的全局 `$Matches`；
+- Win11 PS5 真实全流程通过：Dev bin 安装、独立 pipe daemon start/status、生产逃生口事务安装、disable
+  purge。断言 `devInstallPreservedProductionBinary`、`globalInstalledStateMatches`、生产 config、launcher、
+  user PATH 不变、Dev 目录删除均为 `True`；channel preset 沿用既有跨平台实现与租约测试。
 
 #### D2. 登录启动无闪窗
 
-- 在 Win11 真实注销/登录观察 daemon 与 GUI Host 是否出现控制台闪窗，记录 HKCU Run 命令、父进程、
-  GUI session 和恢复状态；
-- 若直接 console-subsystem EXE 会闪窗，引入受管 hidden launcher（或等价 Windows API 启动层），所有
-  login entry 带所有权标记，升级/卸载/Dev Instance 可精确清理；
-- 验证 tray off/active/always 与 daemon on-demand/keep-alive 的组合，不因隐藏 console 吞掉 CLI 输出。
+- HKCU Run 不再直接启动 console-subsystem EXE；GUI Host 与 keepalive daemon 共用配置目录内受管的
+  UTF-16 `askhuman-login.vbs`，注册表以 `wscript.exe //B //NoLogo` 调用固定 `gui-host`/`daemon` 角色，
+  VBScript 用 hidden window style 异步拉起 EXE；CLI 自身仍保留正常控制台输出；
+- launcher 内容包含当前安装 EXE，升级/路径变化时随 login item 幂等刷新；两项 Run value 都移除后删除
+  launcher，Windows uninstaller 也显式清理；Dev Instance 继续被全局登录项 guard 拒绝；
+- Win11 真实注销后重启自动登录：Explorer 从 Session 2/PID 9032 变为 Session 1/PID 5588，GUI Host、
+  daemon 与 warm popup 均在 Session 1 恢复。登录最初 6 秒采集 60 帧截图并逐帧枚举可见顶层窗口，未出现
+  conhost/PowerShell/cmd/AskHuman 控制台；Run 项均为受管 wscript 命令，临时审计项完成后自删。
 
 #### D3. shared daemon 目录归位
 
-- 先锁定协议/行为测试，再把 `daemon/unix_impl` 机械迁移为 `daemon/runtime` 或 `daemon/server`；
-- socket/named-pipe、Unix signal、Windows control/process 等真实差异仅留在 platform adapter；
-- 迁移提交只做模块/路径/注释变化，不夹带功能修复；三平台测试结果必须逐项相同。
+- shared server core 已从历史 `daemon/unix_impl` 机械迁移到平台中性的 `daemon/runtime`，`daemon/mod.rs`
+  直接映射该模块；子模块 detect/fork/inbound/select/subs/todo/watch 同步迁移，无协议或状态机改动；
+- socket/named-pipe、Unix session 与 Windows process/login 等真实差异仍位于 transport/lifecycle/spawn/
+  integration adapter，不以目录名伪装 shared core；
+- 迁移后 macOS 本机 `cargo fmt --check`、`cargo check` 与 Rust full suite 通过：1129 passed、0 failed、
+  2 ignored；Windows 原生最终矩阵也已通过，证据见 §17.9。
 
 ### 17.7 实施顺序与提交边界
 
@@ -641,7 +676,33 @@ NTFS profile ACL 继承、`MessageBeep`、named pipe、HKCU Run；未安装 Wind
 - 干净 Win10 22H2 核心矩阵；
 - 生产 Authenticode + timestamp + SmartScreen；
 - 最终签名包 direct/npm update/rollback；
-- 若飞书以外渠道没有真实凭据，至少一个真实渠道 smoke，其余保持 mock 标记。
+- 飞书真实凭据 smoke 已完成；其余渠道保持 deterministic mock 覆盖与未做真实凭据 smoke 的明确标记。
 
-只有本节所有代码/Win11 项通过、外部项继续清晰列为发布 blocker，且 overview/spec/README 与实际行为一致
-时，才能把状态改回“代码级 P7 完成”。
+所有代码级项与 Win11 主链路通过、未完成外部项继续清晰列为发布 blocker，且
+overview/spec/README 与实际行为一致时，可以把状态改为“代码级 P7 完成”；完整发布认证仍须完成
+下列外部 gate。
+
+### 17.9 完成记录（2026-08-18）
+
+本轮 C1–C12 已全部收口，Windows 所有公开入口只走 shared daemon / GUI Host 路径，历史产品级
+single-process ask fallback 已删除；shared server core 已从 `daemon/unix_impl` 迁至平台中性的
+`daemon/runtime`。README、overview、spec、配置说明与界面 unsupported 文案已按最终能力同步。
+
+最终自动化矩阵：
+
+- macOS：Vitest 26 files / 165 tests、Node 5 tests、production build、Rust 1129 passed / 0 failed /
+  2 ignored、`cargo fmt --check`、strict Clippy 与 `git diff --check` 全部通过；
+- Windows 11 Home 24H2 x64：Vitest 26 files / 165 tests、Node 5 tests、production build、Rust
+  1115 passed / 0 failed / 2 ignored、strict Clippy、`cargo build --release --features custom-protocol`
+  全部通过；Windows PowerShell 5.1 与 PowerShell 7 installer 均成功安装 `AskHuman v0.12.2`；
+- 安装态 smoke：named-pipe daemon start/status、`agents monitor --json`、`doctor --json` 通过；临时隔离
+  `CODEX_HOME` 的真实 authenticated Codex 0.147 E2E 返回 `WINDOWS_CODEX_FINAL_E2E_OK`。
+
+Win11 交互式桌面证据覆盖：统一图标、Ctrl 快捷键与 Advanced 能力、设置栈溢出修复、真实飞书取消
+终结、Windows Terminal 同一 HWND/tab 精确前置、隔离 Dev Instance 全生命周期，以及注销/自动登录后
+daemon + GUI Host 恢复。登录最初 6 秒的 60 帧截图与窗口枚举均未出现 console flash。测试计划任务、
+脚本、传输包和 VM 截屏目录在验收后均已按精确路径清理。
+
+因此 P7 退出条件中的代码与 Win11 主链路已经满足。P8 仍被干净 Win10 22H2 复跑、生产
+Authenticode/timestamp/SmartScreen、签名 direct/npm update 与 rollback，以及 DPI/多屏/输入法/文件选择/
+声音的完整桌面矩阵阻断；这些是外部发布认证，不再需要保留 Windows 架构或功能 fallback。

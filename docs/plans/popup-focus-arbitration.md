@@ -366,7 +366,7 @@ Linux 至少做一次双 Popup 验收：新窗口不由代码显式请求 focus�
 ## 13. 预估影响文件
 
 - `src-tauri/src/daemon/popup_focus.rs`（新）：纯仲裁状态机。
-- `src-tauri/src/daemon/unix_impl/mod.rs`：ServerState、dispatch、GUI 服务循环、终态/断连、托盘 focus 接线。
+- `src-tauri/src/daemon/runtime/mod.rs`：ServerState、dispatch、GUI 服务循环、终态/断连、托盘 focus 接线。
 - `src-tauri/src/daemon/request.rs`：按 seq 暴露/统一 GUI surface 登记与移除辅助。
 - `src-tauri/src/ipc/mod.rs`：ready/focused/dismissed/presentation 消息与模型。
 - `src-tauri/src/app/mod.rs`：冷/热隐藏建窗、reader 消息、WindowEvent、统一展示。

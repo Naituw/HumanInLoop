@@ -52,7 +52,7 @@ IM `/new` 已支持从四种 IM 选择 workspace / Agent / 权限并在 macOS �
        Agent：Claude Code ✓ / Codex ✓ / Cursor ✗(原因) / Grok ✗(原因)
        权限：Agent 默认 / YOLO（仅 permissionPrompt=ask 时显示单选）
        [启动任务]
-  → 新 Terminal.app 窗口或 Windows Terminal tab 启动 Agent TUI 并执行任务
+  → 新 Terminal.app 窗口或独占 Windows Terminal 窗口启动 Agent TUI 并执行任务
   → 该待办出队进执行历史；窗口自动关闭
 ```
 
@@ -107,6 +107,9 @@ IM `/new` 已支持从四种 IM 选择 workspace / Agent / 权限并在 macOS �
 8. 组合任务（待办原文 + 空行 + 补充）超 3000 字符时禁止提交。
 9. 窗口全局唯一：重复入口聚焦既有窗口并更新预选。
 10. 自动化测试不启动真实 Agent（沿用 IM D27）。
+11. Windows 启动的任务把 launch UUID 关联到 AgentRegistry；状态窗口、Popup badge 与托盘均只按该
+    已登记 identity 精确聚焦原窗口。目标窗口已关闭、HWND 被复用或 owner identity 变化时返回失败，
+    不创建替代窗口；其他 tab 当前处于活动状态不是失败，聚焦会定向切回固定的 Agent tab 0。
 
 ## 7. 反馈记录
 

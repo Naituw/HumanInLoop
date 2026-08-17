@@ -522,7 +522,7 @@ LaunchRecord {
 
 ### 7.4 IM `/new`
 
-`daemon/unix_impl/inbound.rs` 的 task input submit：
+`daemon/runtime/inbound.rs` 的 task input submit：
 
 - 选 Todo 时从 `TaskInputSourcePayload` 取 attachments snapshot；
 - permission / workspace 流程结束、真正 launch 前做 delivery；

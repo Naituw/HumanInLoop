@@ -14,8 +14,8 @@
   - `theme`、`language`、`alwaysOnTop`、`appearAnimation`、`windowEffect`（`solid|blur|glass`；配置默认 `blur`，显式 `glass` 在 macOS 26 以下有效值自动解析为 `blur`）
   - `speechLanguage`、`speechShortcut`
   - `historyLimit`（默认 200）与 `popupSound`
-  - `menuBarIcon`（`off|active|always`，默认 `always`，仅 macOS/Linux 桌面；已有显式值保持不变）
-  - `popupPrewarm`（默认 `true`，Unix）
+  - `menuBarIcon`（`off|active|always`，默认 `always`，macOS/Linux/Windows 桌面；已有显式值保持不变）
+  - `popupPrewarm`（默认 `true`，macOS/Linux/Windows 桌面）
   - `daemonLifecycle`（`activity|keepalive`，默认 `activity`，macOS/Linux/Windows）
 - `channels.popup`：`enabled`、`width`、`height`、`rememberSize`
 - `channels.telegram`：`enabled`、`botToken`、`chatId`、`apiBaseUrl`

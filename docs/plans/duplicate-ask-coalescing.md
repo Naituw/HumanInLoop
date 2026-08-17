@@ -63,7 +63,7 @@ CLI Submit
 
 ## 阶段 3：合流路径
 
-`src-tauri/src/daemon/unix_impl/mod.rs`：
+`src-tauri/src/daemon/runtime/mod.rs`：
 
 - `handle_submit` 在排空闸门与 agent 活动刷新之后、`registry.create()` 之前：算出会话键
   与指纹；会话键为 `None` 直接走原路径。

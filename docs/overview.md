@@ -188,7 +188,7 @@ AskHuman/
         composer.rs          Interject 窗口的 daemon 连接
       daemon/
         mod.rs               跨平台 daemon 子命令入口与共享 server core 映射
-        unix_impl/
+        runtime/
           mod.rs             状态与类型、serve 主循环、连接分发与请求提交
           watch.rs           watch 订阅持久化、tick 刷新与卡片回调
           select.rs          跨渠道单选卡发送、路由与回调分发
@@ -270,8 +270,8 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 
 - `channels.autoActivation` 关闭时向所有启用 IM 投放，开启时以当前活跃槽为主；切槽会补推在途请求，watch 渠道仍会加入对应 Agent 新提问的投放并集。
 - 共享命令包括 `/new`、`/fork`、`/help`、`/here`、`/status`、`/watch`、`/unwatch`、`/msg`、`/msg-clear`、`/yolo`、`/diff`、`/stage`、`/transcript`、`/todo`、`/todo-rm` 和 `/todo-auto`；Slack 使用 `!` 作为可输入的备用前缀。
-- macOS 开启 `agentTasks` 后，`/new` 依次选择 workspace、已就绪 Agent 与权限，在新的 Terminal.app 窗口启动真实交互会话；Daemon 只负责启动前流程，之后复用 lifecycle/watch。
-- macOS 本地 GUI 亦可创建任务（不要求开启 `agentTasks`）：待办窗口行内按钮与托盘「新建 Agent 任务」打开统一的新建任务窗口，就绪判定与启动链路与 `/new` 相同；见 `docs/specs/gui-agent-task-launch.md`。
+- macOS 或 Windows 开启 `agentTasks` 后，`/new` 依次选择 workspace、已就绪 Agent 与权限，在新的 Terminal.app 或 Windows Terminal 窗口启动真实交互会话；Daemon 只负责启动前流程，之后复用 lifecycle/watch。
+- macOS 与 Windows 本地 GUI 亦可创建任务（不要求开启 `agentTasks`）：待办窗口行内按钮与托盘「新建 Agent 任务」打开统一的新建任务窗口，就绪判定与启动链路与 `/new` 相同；见 `docs/specs/gui-agent-task-launch.md`。
 - Claude Code、Codex、Grok 的 Working/Idle 原生会话可通过 IM `/fork`、Agent 控制台或托盘立即分叉；源会话继续运行，新分支共用 cwd。继承标题的子会话在控制台、托盘和 IM 选择列表中前置显示直接父序号；watch 卡不增加 Fork 按钮，Cursor CLI 不支持；详见 `docs/specs/agent-session-fork.md`。
 - Agent 数字编号在 daemon 生命周期内稳定，供状态、关注、插话和 Git/会话导出共用；无参目标选择复用跨渠道单选卡模型。
 - Watch 订阅持久化并就地更新原卡；`/stage` 必须经过跨渠道 Confirm，不能直接执行暂存。
@@ -307,11 +307,11 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 - 更新状态持久化到 `~/.askhuman/update.json`，Daemon 后台检查并推送给 Popup/GUI Host。
 - release notes 默认由 Conventional Commits + git-cliff 生成，可用 `docs/release-notes/v<version>.md` 覆盖。
 
-## 高级功能：Agent 生命周期追踪 + 状态窗口（Unix）
+## 高级功能：Agent 生命周期追踪 + 状态窗口（macOS / Linux / Windows）
 
 > 需求 `docs/specs/agent-lifecycle-tracking.md`，计划 `docs/plans/agent-lifecycle-tracking.md`。
 
-- Unix 通过用户级 hooks 跟踪 Claude Code、Codex、Cursor、Grok；它与 Agent 集成 mode、IM autoActivation 相互独立。
+- macOS、Linux 与 Windows 通过用户级 hooks 跟踪 Claude Code、Codex、Cursor、Grok；它与 Agent 集成 mode、IM autoActivation 相互独立。
 - Daemon 的 `AgentRegistry` 以 session id 为主身份，推导工作中、空闲、已结束；pid/liveness 与超时只做兜底。
 - 生命周期状态被 `/status`、watch、插话、托盘/状态窗口和 Daemon 空闲退出共同使用；修改事件或状态模型时必须检查这些消费者。
 - Daemon 启动时幂等迁移已开启但过期的 hooks。只有工作中 Agent 或状态窗口连接阻止闲退；graceful drain 不受 Agent 存活影响。
@@ -338,7 +338,7 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 - 待办按项目（git 根）归属，`~/.askhuman/state/todos.json` 是唯一数据源：所有进程直读直写 + 文件锁串行化，不依赖 daemon 存活，跨平台。GUI / CLI / MCP 可在创建时或对已有 Todo 独立管理附件；GUI 默认折叠附件摘要，支持新增区 / 每条 Pending Todo 拖入、新增输入框粘贴图片，以及选中行后粘贴剪贴板图片。单文件 ≤10 MiB 由 AskHuman 托管，>10 MiB 保留绝对路径引用（无稳定源路径的剪贴板图片超过阈值则拒绝），每条最多 20 个，并生成最长边 128 px 的图片缓存缩略图。用户可见写操作在落盘失败时必须报错。
 - Agent 完成任务后必须调 `AskHuman --whats-next`（MCP 为 `whats_next` 工具）：固定提问 + 可选的 Agent 建议任务 + 待办 chip + 恒有「结束本轮」；顺序固定为建议任务、待办、结束，总选项最多 10 条。建议任务仅在确有建议时通过 `-o`/`-o!`（MCP `options`）传入，选择结果保持普通 Ask 的 `[selected_options]` 语义；待办派活为 `[user_input]`，准许结束为 `[selected_options]`，取消为 `[status]`。选中的待办按 id best-effort 出队（Coordinator 汇聚点统一处理）。标记为「自动执行」（⚡）的待办优先级不变：whats-next 时不发卡、直接按队列顺序派发最靠前一条。
 - 送达面：whats-next / 普通提问 Popup 折叠待办区 / Stop 确认卡（兜底）都以选项形式呈现待办；GUI / IM 新建 Agent 任务也可直接执行待办。所有出口在执行前按卡片附件快照与最新 Todo 求交集，托管文件建立请求级交付副本，失效项转为 warning，选项只显示 `【N 个附件】`（支持富文本颜色时为灰色）而不向 IM 上传本地文件。输入面：CLI `todo` 子命令、Popup 内新增、GUI 待办窗口（托盘/AgentsView 入口）、IM `/todo`；IM 创建/管理首版仍只支持文字。
-- IM `/todo`（管理卡：飞书代码卡自带输入表单，钉钉复用提问卡模板 `allow_input`，TG/Slack 文本 + 命令提示）、`/todo-rm`（复用单选卡逐条删除、就地刷新）与 `/todo-auto`（切换自动执行标记）由跨平台 daemon 承载，实现在共享 server core 的 `daemon/unix_impl/todo.rs`（目录名为历史遗留）。
+- IM `/todo`（管理卡：飞书代码卡自带输入表单，钉钉复用提问卡模板 `allow_input`，TG/Slack 文本 + 命令提示）、`/todo-rm`（复用单选卡逐条删除、就地刷新）与 `/todo-auto`（切换自动执行标记）由跨平台 daemon 承载，实现在共享 server core 的 `daemon/runtime/todo.rs`。
 - macOS 与 Windows 上，待办窗口每条待办另有「创建任务」按钮：预选项目与该待办打开新建任务窗口，Terminal.app 或 Windows Terminal 启动成功后按快照出队（spec `docs/specs/gui-agent-task-launch.md`）。
 
 ## 菜单栏 / 托盘图标 + 统一 GUI Host（macOS / Linux / Windows 桌面）
@@ -445,4 +445,4 @@ node scripts/perf-popup.mjs             # 固定 canonical 弹窗性能场景
 - **首帧不白闪**：`src/index.html` 内联关键底色；macOS 建窗 URL 携带有效材质，Solid 首帧完整实色，Blur/Glass 首帧透明叠色罩。
 - **macOS 窗口材质**依赖 `tauri` 的 `macos-private-api` feature 与 `macOSPrivateApi: true`；运行时原生层变更必须在主线程执行。
 - **release 自包含**：前端资源在 `cargo build` 时由 `generate_context!` 嵌入，故安装后无需 dev server。
-- Telegram 不接收图片；Cursor Hook 仅 mac/Linux（Windows 禁用并提示）。
+- Telegram 不接收图片；各 Agent 是否提供特定 timeout/permission/stop Hook 由其自身 capability 决定，不再按 Windows 整体禁用。

@@ -229,7 +229,7 @@ flowchart LR
 
 ### 5.1 模块边界
 
-建议把当前 `daemon/unix_impl` 拆为：
+实施结果已把历史 `daemon/unix_impl` 拆为：
 
 - `daemon/server` 或 `daemon/runtime`：请求路由、Agent registry、IM channels、watch/config、drain、
   update coordination 等平台无关业务核心；
@@ -299,8 +299,8 @@ Windows 11 和 Windows 10 22H2 两台 VM 都应验证：
 
 ## 8. 主要风险与约束
 
-- **核心抽取风险**：`daemon/unix_impl` 体积大且混合 transport concrete types。必须先建立协议/状态机
-  characterization tests，再做机械移动，避免“为 Windows 重写 daemon”。
+- **核心抽取风险（已收口）**：历史 `daemon/unix_impl` 体积大且混合 transport concrete types；本轮先以
+  协议/状态机测试固化行为，再机械迁入 `daemon/runtime`，没有为 Windows 复制第二套 daemon。
 - **安全风险**：named pipe 默认 ACL、远程访问和跨登录会话行为容易被误用；ACL 与 peer/session
   验证是功能的一部分，不是发布前补丁。
 - **进程身份风险**：Windows 进程树、命令行访问权限和 path canonicalization 与 Unix 不同；证据不完整

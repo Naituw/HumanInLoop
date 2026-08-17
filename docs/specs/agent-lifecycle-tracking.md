@@ -90,7 +90,7 @@ AskHuman agents status
 - **Codex 信任哈希与 Codex 版本相关**：`trusted_hash` 由 Codex 源码的 hook identity 结构推导；若 Codex 改了该结构，旧哈希失效、hook 会被判 Untrusted 而不执行。需在 `status` 里能识别「未受信任 / 已漂移」并提示重装；算法与出处记于 `FINDINGS §6.2`。
 - **Linux 上 Claude 的 PID namespace 隔离**可能让 walk/`kill-0` 失效 → 落到 D12 的 TTL 兜底。
 - **空闲 agent 不保活 daemon** 的代价（D18）：agent 空闲超过 daemon 空闲上限后 daemon 退出，下个 turn-start 重新拉起（首事件略有延迟）；窗口开着时无此问题。**用户已确认可接受**。
-- **Codex app-server 共享 pid（D25–D27，§8）**：新版默认走共享 app-server → 追踪只能靠 `session_id` 身份 + hook 状态机 + TTL/兜底超时，**不能靠 pid 判存活**。代价：(1) 打断/关窗 无 hook → 结束/降级有延迟（同 Claude，D26）；(2) app-server 崩溃时其名下会话不会即时判死，最多滞留到 TTL（1h）；(3) Codex 会话「聚焦终端」按钮因无 tty 恒隐藏。**判据（D27）依赖 Codex 命令行/进程形态**，若 Codex 改变 app-server 启动形态需同步；子命令位识别（含跳过 `-c` 等前导选项）比「无 tty+PID 1」更专一、更不易误伤真实 TUI。历史回归：ChatGPT Desktop 曾用 `codex -c features.code_mode_host=true app-server …`，旧实现要求 `codex` **紧邻** `app-server` 漏检 → 共享 pid 被写入多会话 → D7 互相轮换误杀。
+- **Codex app-server 共享 pid（D25–D27，§8）**：新版默认走共享 app-server → 追踪只能靠 `session_id` 身份 + hook 状态机 + TTL/兜底超时，**不能靠 pid 判存活**。代价：(1) 打断/关窗 无 hook → 结束/降级有延迟（同 Claude，D26）；(2) app-server 崩溃时其名下会话不会即时判死，最多滞留到 TTL（1h）；(3) 普通 Codex 会话因无 tty 不可聚焦；Windows 上由 AskHuman 创建且带登记 launch UUID 的任务不依赖 pid，可精确聚焦其 Windows Terminal 窗口。**判据（D27）依赖 Codex 命令行/进程形态**，若 Codex 改变 app-server 启动形态需同步；子命令位识别（含跳过 `-c` 等前导选项）比「无 tty+PID 1」更专一、更不易误伤真实 TUI。历史回归：ChatGPT Desktop 曾用 `codex -c features.code_mode_host=true app-server …`，旧实现要求 `codex` **紧邻** `app-server` 漏检 → 共享 pid 被写入多会话 → D7 互相轮换误杀。
 
 ## 8. Codex app-server 架构补充（2026-07 源码 + 实测坐实）
 

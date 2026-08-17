@@ -6,18 +6,20 @@
 ## 待外部验收：Windows 发布候选
 
 功能与架构实现已在 `codex/windows-platform-parity` 完成；设计、实施记录和 Win11 证据见
-`docs/specs/windows-platform-parity.md` 与 `docs/plans/windows-platform-parity.md` §15。当前 Win11
-24H2 VM 已通过 PS5/PS7 install、named-pipe daemon、完整 Rust tests（1088 passed / 2 ignored）、
-Clippy、160 Vitest + 3 Node tests、production build、真实 authenticated Codex 0.147 E2E、卸载维护链和
-未签名 binary fail-closed 检查。
+`docs/specs/windows-platform-parity.md` 与 `docs/plans/windows-platform-parity.md` §17.9。当前 Win11
+24H2 VM 已通过 PS5/PS7 install、named-pipe daemon、完整 Rust tests（1115 passed / 2 ignored）、
+Clippy、165 Vitest + 5 Node tests、production/release build、真实 authenticated Codex 0.147 E2E、
+卸载维护链和未签名 binary fail-closed 检查。交互式桌面已覆盖统一图标、Ctrl 快捷键、Advanced、
+设置稳定性、真实飞书取消、Windows Terminal 精确 focus、Dev Instance 以及无闪窗 login/logout。
 
 发布认证仍依赖仓库外状态：
 
 - 准备干净 Windows 10 22H2 x64 VM 并复跑核心矩阵；
 - 在生产 Azure Artifact Signing account/profile 上产出带 timestamp 的签名 zip/npm binary，验证
   subject/hash，并在 Win11/Win10 记录 SmartScreen 与 clean upgrade/rollback；
-- 在真实交互式 Windows 桌面验收 tray/WebView2/DPI/多屏/输入法/文件选择/声音/login/logout；
-- 配置至少一个真实 IM 凭据，跑主动命令与重连 smoke。
+- 补齐真实交互式 Windows 桌面的 DPI/多屏/输入法/文件选择/声音完整矩阵；
+- 如发布认证要求覆盖每个 IM provider，以真实凭据补跑飞书以外渠道；当前飞书真实取消链路已通过，
+  其余渠道为 deterministic mock 覆盖。
 
 以上 gate 完成后删除本节。Windows ARM64、原生 installer、Windows Server/RDS 多会话是已确认后置
 项目，不属于当前 release candidate blocker。

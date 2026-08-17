@@ -16,7 +16,7 @@ GUI Host 进程直调本地模块（不经 daemon）。
 
 - `daemon/request.rs`：新增 `RequestRegistry::in_flight_agent_requests() -> Vec<(String, String)>`
   （session_id → request_id；ask 与 confirm 都算，同 session 多请求取最早登记的）。
-- `daemon/unix_impl/subs.rs::agents_snapshot_for_gui`：注入 `waitingRequestId`（同
+- `daemon/runtime/subs.rs::agents_snapshot_for_gui`：注入 `waitingRequestId`（同
   `pendingInterject` 的注入模式；IM /status 等其它 snapshot 消费方不注入）。
 - 提问创建 / 完结时已有 `broadcast_agents_state` 调用点则徽标自动实时；缺的调用点补上
   （`request.rs` 登记/完结 → 通知 subs，复用现有 watch Notify 时机）。
@@ -32,10 +32,10 @@ GUI Host 进程直调本地模块（不经 daemon）。
     `{ type: "watchFrame", sessionId, phase, title, project, text, steps, stepsOmitted, todos,
     activeElapsedSecs, at }`（R5：未来可加新 type 变体）。steps/todos 结构与
     `watch::WatchFrame` 字段一一对应（serde 序列化 `ToolStep`/`TodoItem` 需补 `Serialize`）。
-- `daemon/unix_impl/subs.rs::handle_agents_sub`：读端从「只探测 EOF」改为消息循环——收到
+- `daemon/runtime/subs.rs::handle_agents_sub`：读端从「只探测 EOF」改为消息循环——收到
   `AgentsFocus` 更新该订阅者的焦点 session（存入 `ServerState` 的 `gui_focus` 表：
   订阅者 tx → session_id + 上次签名）。断开时清除表项。
-- 帧推送复用 watch 引擎节奏（`daemon/unix_impl/watch.rs`）：
+- 帧推送复用 watch 引擎节奏（`daemon/runtime/watch.rs`）：
   - `watch_tick` 末尾追加「GUI 焦点」处理：对每个 gui_focus 项按 `watch::build_frame`
     （snapshot 记录 + `in_flight` waiting 标志）算帧与签名，签名变化才推 `AgentDetail`；
   - tick 自适应节奏沿用（焦点会话工作中 2s / 空闲 10s；`has_gui_focus` 并入「有订阅」判定）；

@@ -132,7 +132,7 @@ existing channel (`slack` is the newest and most complete) and mirror every hit.
 - [ ] `src-tauri/src/secrets.rs` — keychain migration/storage for the channel's secrets
   (and update the module doc comment listing managed secrets).
 - [ ] `src-tauri/src/autochannel.rs` — channel id/label, auto-activation participation.
-- [ ] `src-tauri/src/daemon/unix_impl/` — `mod.rs` `ensure_<channel>_router` (report/clear
+- [ ] `src-tauri/src/daemon/runtime/` — `mod.rs` `ensure_<channel>_router` (report/clear
   channel health on connect), plus per-channel arms in `detect.rs`, `watch.rs`,
   `select.rs`, `inbound.rs`.
 - [ ] `src-tauri/src/confirm/` — `transport.rs` / `choice_cards.rs` arms.

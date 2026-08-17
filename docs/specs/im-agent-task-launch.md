@@ -280,8 +280,16 @@ LaunchRecord {
 ## 8. 平台终端行为
 
 - macOS 用 AppleScript 向 Terminal.app 创建**新 window**，不复用 tab，不 `activate` 抢焦点；
-- Windows 用 `wt.exe -w 0 new-tab -- <AskHuman.exe> __agent-launch <uuid>` 的直接 argv 创建新 tab，
-  不把 task/cwd/Agent 拼进 PowerShell 或 cmd 字符串；找不到 Windows Terminal 时返回清楚的安装提示；
+- Windows 每个任务使用独占窗口：`wt.exe -w askhuman-<uuid> new-tab --title
+  "AskHuman Agent [<uuid>]" --suppressApplicationTitle --startingDirectory <cwd>
+  <AskHuman.exe> __agent-launch <uuid>`；所有参数均为 direct argv，不把 task/cwd/Agent 拼进 PowerShell
+  或 cmd 字符串；找不到 Windows Terminal 时返回清楚的安装提示；
+- launch helper 在 tab 0 尚为活动页时枚举可见顶层窗口，要求标题精确等于固定标题、owner executable
+  basename 精确为 `WindowsTerminal.exe` 且唯一命中，并把 UUID、HWND、owner PID 持久化；lifecycle hook
+  再把同一 UUID 关联到 AgentRegistry；
+- 聚焦先验证已登记 HWND 仍存在、PID 未变化且 owner 仍为 Windows Terminal。只有通过此前置条件，才可对
+  已知存活的命名窗口调用 `focus-tab -t 0`；随后等待固定 tab 标题恢复，并通过 Win32
+  restore/foreground 同一 HWND。验证失败、tab 0 未能激活或 Windows 拒绝前台切换均 fail closed；
 - 使用平台默认终端环境执行固定 helper command，使 Agent 获得正常用户 PATH 与真实 TTY；
 - Agent / helper 退出后 shell 保持，窗口保留终端历史；
 - 设置页「测试 Terminal」只打开自检窗口，不构造 Agent、不发送 prompt；macOS 用于提前完成 Automation
