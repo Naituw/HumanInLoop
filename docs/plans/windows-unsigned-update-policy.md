@@ -1,6 +1,6 @@
 # Windows 未签名发行的更新能力门控计划
 
-状态：**待实施；产品决策已确认（2026-08-18）**
+状态：**已实施并完成本地 + Windows 11 VM 验证（2026-08-18）**
 
 关联：`docs/specs/self-update.md`、`docs/specs/windows-platform-parity.md`、
 `docs/plans/windows-platform-parity.md`、`.github/workflows/release.yml`
@@ -265,3 +265,49 @@ AskHuman 验收。Windows VM 上必须先证明自动 apply 在网络前被拒�
 - 未来签名重新启动前，`WINDOWS_AUTOMATIC_APPLY_ENABLED` 保持 false。届时需另立项目完成 provider、
   publisher identity pinning、timestamp/轮换、签名产物等价性、SmartScreen 与 signed update/rollback，
   不能只把常量改成 true。
+
+## 12. 实施与验证记录（2026-08-18）
+
+### 12.1 实施结果
+
+- `src-tauri/src/update/mod.rs` 固化 `WINDOWS_AUTOMATIC_APPLY_ENABLED = false`，并为 Direct/npm 派生
+  `manualDirect` / `manualNpm`；缺少 `applyMode` 的旧 IPC payload 默认 `manualDirect`，不会误开自动路径。
+- Tauri `update_apply`、托盘 `apply_update`、`DirectUpdater::apply()` 与 `NpmUpdater::apply()` 均在副作用前
+  执行同一策略 guard；Windows 专属测试直接调用两个 updater trait 入口，均在 download/npm staging 前拒绝。
+- `UpdateInfo` 分离 release URL 与固定 npm 命令；Popup 只跳转手动步骤，设置负责二次确认和保存下一步，
+  托盘进入同一设置锚点。macOS/Linux 继续返回 `automatic`，原有 apply 路径不变。
+- 新增公开 `AskHuman update prepare`。它请求 daemon graceful stop、持续等待在途请求清零、关闭 GUI Host，
+  再输出 Direct/npm 下一步；不提供 `--force`，也不下载或安装内容。
+- Windows 实测发现 Settings Host 的 30 秒更新检查会让普通 Tauri exit 暂时持有 EXE 锁。Host shutdown 现先
+  回 ACK，再执行 Tauri cleanup 和 Host-only 进程退出；helper 重试到 named pipe 消失并有 45 秒上界。
+- release workflow 删除 Azure OIDC login/sign/subject gate，继续沿用原 Windows zip/npm 名称。事务 worker、
+  rollback、WinVerifyTrust 和 `scripts/verify-windows-signature.ps1` 均保留。
+
+### 12.2 本地回归（macOS）
+
+- `pnpm build`：通过；
+- `pnpm test`：26 个 Vitest 文件 / 165 项测试通过，5 项 Node 测试通过；
+- `cargo test --manifest-path src-tauri/Cargo.toml`：1134 通过、0 失败、2 忽略；
+- `cargo clippy --all-targets -- -D warnings`：通过；
+- `cargo build --release --features custom-protocol`：通过；
+- `./scripts/install.sh`：完成前端嵌入、`local-install` build、本机安装与 macOS 签名；
+- `cargo fmt -- --check`、`git diff --check`：通过。
+
+### 12.3 Windows 11 VM 回归
+
+- `pnpm build`、26 个 Vitest 文件 / 165 项测试、5 项 Node 测试：全部通过；
+- Windows update 专属测试：19/19 通过，含固定策略 guard、缺字段 fail closed、Direct download 前拒绝、
+  npm staging 前拒绝；
+- Rust 全量：1123 通过、0 失败、2 忽略；严格 Clippy：通过；
+- 全量首次运行有一个既有并发令牌测试抖动（两个消费者同时获胜）；该用例单独复跑和随后两次全量中的
+  最终一次均通过，且与 update/GUI Host 变更无共享代码；记录为测试噪声，没有隐藏为通过结果；
+- `scripts/install-windows.cmd` 完成前端构建、`local-install` Rust build、事务替换、PATH 与 launcher 校验；
+  安装后的 EXE 执行 `update prepare` 返回 0，并输出 release、target 和替换步骤；
+- 空闲 daemon + Settings Host 场景返回 `ready`，随后对 EXE 的 `FileShare.None` 独占读写打开成功；
+- 交互桌面计划任务制造 1 个真实在途请求：helper 明确报告并等待 `1 active request`，测试调用方结束后
+  daemon drain、GUI Host 下线，helper 返回 0 并输出 `interactive-drain-test-ok`；
+- 所有临时计划任务、driver、日志、传输包和隔离目录均按精确名称删除，并以
+  `windows-vm-cleanup-ok` 验证无残留。
+
+实际 GitHub release job、干净 Windows 10 22H2、完整 DPI/多屏/输入法/渠道桌面矩阵仍属于
+`docs/PROGRESS.md` 的外部发布验收，不影响本轮 unsigned capability gate 与 shared daemon 架构完成。

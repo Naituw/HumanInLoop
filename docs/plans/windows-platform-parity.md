@@ -2,7 +2,7 @@
 
 对应规格：[`../specs/windows-platform-parity.md`](../specs/windows-platform-parity.md)
 
-状态：**P0–P7 代码级完成；P8 等待外部发布验收**
+状态：**P0–P7 代码级完成；未签名更新门控已实施，生产签名后置**
 
 策略：长期开发分支，小提交、阶段 gate，完整验收后一次合并主线
 
@@ -13,7 +13,7 @@
 3. 每阶段同时完成代码、自动测试、Windows VM smoke 和文档记录；阶段完成不代表可提前发布。
 4. 安全边界（pipe ACL、peer/session、permission identity、update rollback）与功能同时实现。
 5. Win11 VM 持续验证；Win10 22H2 VM 在发布候选阶段加入正式 gate。
-6. 只在所有本地功能验证通过后配置 Authenticode；原生安装器、ARM64、多会话留到后续项目。
+6. 生产 Authenticode、原生安装器、ARM64 与多会话均留到后续独立项目。
 
 ## 2. 阶段依赖
 
@@ -29,7 +29,7 @@ flowchart TD
   P4 --> P7["P7 全量对齐与双 VM gate"]
   P5 --> P7
   P6 --> P7
-  P7 --> P8["P8 Authenticode 与发布候选"]
+  P7 --> P8["P8 未签名发布门控 + 手动更新"]
 ```
 
 P3、P4、P6 在 P2 完成后可以由不同开发者并行，但共享文件变更必须先约定 adapter 接口；本计划不要求
@@ -317,28 +317,23 @@ P3、P4、P6 在 P2 完成后可以由不同开发者并行，但共享文件变
 - macOS/Linux 无功能或性能回归。
 - 产品中没有错误展示为 unsupported 的 Windows 对齐功能。
 
-## 11. P8：最后配置 Authenticode 并形成发布候选
+## 11. P8：未签名发布门控与手动更新
 
-目标：按已确认顺序，在功能和本地验证完成之后才接入生产签名。
+2026-08-18 产品决定暂缓 Authenticode。当前阶段继续发布原名 Windows zip/npm，但所有应用内自动
+apply 在源码策略、Tauri command、托盘 handler 和 Direct/npm updater 多层 fail closed；检查、日志和
+忽略版本保留。`AskHuman update prepare` 等待在途请求完成后关闭 daemon/GUI Host，供用户手动安装。
+完整设计与验收见 `docs/plans/windows-unsigned-update-policy.md`。
 
-### 工作项
+生产签名改为独立后置项目。恢复自动更新前必须重新完成 provider/密钥托管、publisher identity
+pinning、可信 timestamp、证书轮换、zip/npm 产物等价性、SmartScreen 与 signed update/rollback，不能
+只把源码 capability 改为 true。
 
-- 选择组织/个人适用的 code-signing certificate 与硬件/云密钥托管，确认 CI 可用而不导出长期私钥。
-- 在现有 release workflow 的 artifact assembly 前签名 Windows `.exe`；zip 与 npm platform package 必须
-  装入同一个已签名 binary，不能打包后产生未签名副本。
-- 使用可信 timestamp 服务；记录证书轮换、过期、timestamp 故障与紧急回滚流程。
-- CI 阻断验证：签名存在、subject/issuer/时间戳符合策略、artifact hash 与 manifest 一致；发布后从
-  zip/npm 各抽样再次验证。
-- 在两台 VM 上验证 SmartScreen/下载/解压/首次执行体验并记录结果。签名不能代替功能测试，也不能
-  扩大 P7 已冻结的代码范围。
-- 原生 installer 另立 spec/plan，不在本阶段追加。
+### Gate P8 / 当前完成口径
 
-### Gate P8 / 完成
-
-- release candidate 的 Windows zip 与 npm binary 签名验证通过。
-- 所有 CI、Win11、Win10 22H2 gate 重跑通过；签名步骤没有改变 binary 功能或更新链。
-- 更新发布文档和支持矩阵；删除 `docs/PROGRESS.md` 的本实施项，将 ARM64/installer/RDS 等另列后续。
-- 长期开发分支完成最终 review 后一次合并主线。
+- Windows 自动 apply 不执行网络、下载、临时目录、pending 或 drain 副作用；
+- Direct/npm 手动路径和 `update prepare` 在真实 Windows 进程锁下可执行；
+- release workflow 在没有 Azure 配置时继续产出同名 Windows zip/npm；
+- macOS/Linux 自动更新无回归，Windows updater/WinVerifyTrust/rollback 代码继续保留。
 
 ## 12. 测试矩阵最低集合
 
@@ -429,9 +424,10 @@ P0 启动时按以下顺序工作：
   `-PurgeData` 显式清除）与 `scripts/verify-windows-signature.ps1`；installer 使用 staging + hash +
   `Move-Item` 事务复制，幂等维护当前用户 `PATH` 和带所有权标记的 `WindowsApps\AskHuman.cmd`；uninstaller
   只移除对应安装目录和自身 launcher。`.cmd` 安装入口在默认 Execution Policy 下调用 PS5 脚本。
-- P8 代码/CI：release workflow 使用 `azure/artifact-signing-action@v2` 的 OIDC 身份，统一 timestamp，
-  并在打包前阻断验证 signer subject 与时间戳。生产 Azure account、certificate profile 和 subject 仍需
-  发布环境提供；仓库没有长期私钥。
+- P8 决策更新（2026-08-18）：生产 Authenticode/SmartScreen 暂缓为独立项目；release workflow 移除
+  当前不可满足的 Azure gate，继续产出原名 Windows zip/npm。源码 capability 固定关闭 Windows 自动
+  apply，保留 updater/transaction/rollback/WinVerifyTrust 代码；手动闭环见
+  `docs/plans/windows-unsigned-update-policy.md`。
 
 ### 16.2 Win11 VM 证据
 
@@ -456,14 +452,14 @@ PowerShell 5.1、PowerShell 7.6.5。SSH 仅用于构建与自动测试，符合�
 这些项目不需要继续修改 shared architecture，但在对外宣称“Windows release certified”前必须完成：
 
 1. 新建干净 Windows 10 22H2 x64 VM，复跑 §12 核心矩阵；当前只有 Win11 VM。
-2. 在生产 Azure Artifact Signing account/profile 中运行 release workflow，验证 zip 与 npm 内同一已签名
-   binary、timestamp、subject、manifest hash，并在 Win11/Win10 记录 SmartScreen 首次运行体验。
+2. 生产 Authenticode、publisher identity pinning、timestamp 与 SmartScreen 已决定暂缓；恢复时另立
+   签名项目，验证 zip/npm 同一签名 binary 和 signed update/rollback 后才能打开自动 apply capability。
 3. 在交互式 Windows 桌面手工验收 tray、WebView2、DPI/多屏/输入法、文件选择、声音、登录/注销；
    SSH 会话不能替代视觉/焦点验收。
 4. 用至少一个真实 IM 凭据跑主动命令和重连 smoke；自动化已覆盖 mock Router/协议，但测试 VM 未配置
    生产凭据。
-5. 对最终签名 release candidate 复跑 direct/npm clean install、upgrade、rollback；开发 binary 因未签名
-   会被 direct updater 正确拒绝，不能作为成功更新样本。
+5. 当前未签名 release 复跑 direct/npm clean install 与手动更新准备；自动 apply 必须稳定拒绝。未来签名
+   release candidate 再复跑 automatic upgrade/rollback。
 
 ARM64、原生 installer 与 Windows Server/RDS 多会话仍按已确认范围另立项目，不属于上述 release
 blocking gate。
@@ -703,6 +699,6 @@ Win11 交互式桌面证据覆盖：统一图标、Ctrl 快捷键与 Advanced �
 daemon + GUI Host 恢复。登录最初 6 秒的 60 帧截图与窗口枚举均未出现 console flash。测试计划任务、
 脚本、传输包和 VM 截屏目录在验收后均已按精确路径清理。
 
-因此 P7 退出条件中的代码与 Win11 主链路已经满足。P8 仍被干净 Win10 22H2 复跑、生产
-Authenticode/timestamp/SmartScreen、签名 direct/npm update 与 rollback，以及 DPI/多屏/输入法/文件选择/
-声音的完整桌面矩阵阻断；这些是外部发布认证，不再需要保留 Windows 架构或功能 fallback。
+因此 P7 退出条件中的代码与 Win11 主链路已经满足。生产签名已明确后置，不再阻断当前未签名发行；
+自动更新由源码 capability fail closed，手动更新闭环见独立计划。剩余外部验收为干净 Win10 22H2、
+DPI/多屏/输入法/文件选择/声音矩阵和必要的真实渠道 smoke，不需要保留 Windows 架构 fallback。

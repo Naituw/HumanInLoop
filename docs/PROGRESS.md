@@ -3,27 +3,22 @@
 记录需要跨会话保留的未完成 / 延期事项和明确下一步。任务 / 需求完成后删除其 section
 （历史留在 git）。
 
-## 待实施：Windows 未签名发行的更新能力门控
-
-用户决定暂缓 Authenticode，继续以原名发布 Windows zip/npm，不增加 preview 标签；Windows 保留更新
-检查与日志，但应用内自动 apply 固定关闭，并新增 `AskHuman update prepare` 处理 daemon/GUI Host 排空和
-EXE 文件锁。完整设计、边界、测试矩阵与提交顺序见
-`docs/plans/windows-unsigned-update-policy.md`。实现完成后删除本节，并把生产签名保留为独立后置项目。
-
 ## 待外部验收：Windows 发布候选
 
 功能与架构实现已在 `codex/windows-platform-parity` 完成；设计、实施记录和 Win11 证据见
-`docs/specs/windows-platform-parity.md` 与 `docs/plans/windows-platform-parity.md` §17.9。当前 Win11
-24H2 VM 已通过 PS5/PS7 install、named-pipe daemon、完整 Rust tests（1115 passed / 2 ignored）、
+`docs/specs/windows-platform-parity.md`、`docs/plans/windows-platform-parity.md` §17.9 与
+`docs/plans/windows-unsigned-update-policy.md` §12。当前 Win11 24H2 VM 已通过 PS5/PS7 install、
+named-pipe daemon、完整 Rust tests（1123 passed / 2 ignored）、Windows update 专属测试（19/19）、
 Clippy、165 Vitest + 5 Node tests、production/release build、真实 authenticated Codex 0.147 E2E、
-卸载维护链和未签名 binary fail-closed 检查。交互式桌面已覆盖统一图标、Ctrl 快捷键、Advanced、
-设置稳定性、真实飞书取消、Windows Terminal 精确 focus、Dev Instance 以及无闪窗 login/logout。
+卸载维护链和未签名 binary fail-closed / `update prepare` 文件锁闭环。交互式桌面已覆盖统一图标、Ctrl
+快捷键、Advanced、设置稳定性、真实飞书取消、Windows Terminal 精确 focus、Dev Instance 以及无闪窗
+login/logout。
 
 发布认证仍依赖仓库外状态：
 
 - 准备干净 Windows 10 22H2 x64 VM 并复跑核心矩阵；
 - 生产 Authenticode、timestamp、publisher identity pinning 与 SmartScreen 认证已决定暂缓，后续作为
-  独立签名项目恢复；当前先完成上述 unsigned Windows 更新门控与手动更新闭环；
+  独立签名项目恢复；当前 unsigned Windows 已固定关闭自动 apply，并提供 `update prepare` 手动闭环；
 - 补齐真实交互式 Windows 桌面的 DPI/多屏/输入法/文件选择/声音完整矩阵；
 - 如发布认证要求覆盖每个 IM provider，以真实凭据补跑飞书以外渠道；当前飞书真实取消链路已通过，
   其余渠道为 deterministic mock 覆盖。

@@ -303,7 +303,11 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 > 需求/方案见 `docs/specs/self-update.md`、`docs/plans/self-update.md`。
 
 - 支持 Direct（GitHub Release）与 npm 两种安装来源，`src-tauri/src/update/` 按 adapter 实现。
-- apply 只把新二进制落盘，不主动 restart；Daemon 通过二进制指纹和 graceful drain 在所有在途请求结束后换新。
+- macOS/Linux 支持应用内自动 apply：只把新二进制落盘，不主动 restart；Daemon 通过二进制指纹和
+  graceful drain 在所有在途请求结束后换新。
+- Windows 当前发布未签名，因此源码 capability 固定关闭自动 apply；仍支持检查、日志和忽略版本。
+  Direct 打开 GitHub Release，npm 提供固定命令；`AskHuman update prepare` 会等待在途请求完成并关闭
+  daemon/GUI Host，释放 `.exe` 文件锁后再由用户手动安装。
 - 更新状态持久化到 `~/.askhuman/update.json`，Daemon 后台检查并推送给 Popup/GUI Host。
 - release notes 默认由 Conventional Commits + git-cliff 生成，可用 `docs/release-notes/v<version>.md` 覆盖。
 

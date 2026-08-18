@@ -1,6 +1,6 @@
 # Windows 平台功能与架构对齐规格
 
-状态：**实现完成；等待 Windows 10、签名发布物与桌面/渠道外部验收**
+状态：**功能与 shared daemon 架构实现完成；等待 Windows 10 与桌面/渠道外部验收**
 
 基线版本：`b216b333`（AskHuman 0.12.2）
 
@@ -37,7 +37,7 @@ IPC、进程、锁、启动项、终端和桌面能力等操作系统边界保�
 | 会话模型 | 单个交互式桌面会话；SSH 只用于构建和自动测试 |
 | Agent 实机范围 | 首轮以 Codex 为必达 E2E；Claude/Cursor/Grok 做配置、协议和模拟测试 |
 | 分发 | zip 与 npm 为本轮必达；原生安装器后置 |
-| 签名 | Authenticode 是本轮发布门槛，但安排在所有功能与本地验证完成之后 |
+| 签名 | 生产 Authenticode/SmartScreen 暂缓为独立后置项目；当前原名 zip/npm 未签名发布，自动更新固定关闭 |
 | 集成方式 | 长期开发分支完成全套能力和 gate 后一次合并主线；分支内保持小提交和阶段 gate |
 | 后置范围 | Windows ARM64、Windows Server/RDS 多会话 broker、原生安装器 |
 
@@ -191,8 +191,8 @@ VM 上的构建产物和安装尝试没有改动仓库源文件；VM 仓库保�
 - 正式矩阵：Windows 11 x64 主 VM + Windows 10 22H2 x64 发布 VM + GitHub Windows runner。
 - Windows 10 1709–21H2 仅 best-effort；不能因为它们失败而阻止发布，但不能引入已知可避免的
   系统版本依赖。
-- 功能、自动测试和两台 VM 本地验收全部完成后，再配置 Authenticode；最终产物必须签名并在 CI/发布
-  流程验证签名。
+- 当前未签名发行必须在代码层关闭所有自动 apply，只保留检查、日志和 `AskHuman update prepare` 手动
+  闭环；生产 Authenticode、publisher pinning、timestamp 与 SmartScreen 另立项目后再恢复自动更新 gate。
 - ARM64、native installer 与 RDS 多会话不得在本轮“顺手”加入，避免扩大未验证面。
 
 ## 5. 目标架构
@@ -273,7 +273,8 @@ Windows 11 和 Windows 10 22H2 两台 VM 都应验证：
 - Codex 真实生命周期和交互全链路，包括重启、compaction、权限、stop；
 - 睡眠恢复、daemon/GUI Host 强杀、重复并发启动、路径含空格与中文、非管理员用户；
 - WebView2 的主题、缩放、多显示器/DPI、键盘、find/pin/composer 和错误页；
-- 最终 `.exe` Authenticode 签名有效，解压后的 binary 与 npm package binary 均可验证。
+- 未签名 binary 的所有自动 apply 入口在网络/文件操作前 fail closed；Direct/npm 手动更新前能排空
+  daemon/GUI Host 并释放 EXE 锁。
 
 只通过 SSH 构建或只看到 `cargo test` 绿色，均不算完成桌面验收。
 
