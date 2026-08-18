@@ -3,6 +3,13 @@
 记录需要跨会话保留的未完成 / 延期事项和明确下一步。任务 / 需求完成后删除其 section
 （历史留在 git）。
 
+## 待实施：Windows 未签名发行的更新能力门控
+
+用户决定暂缓 Authenticode，继续以原名发布 Windows zip/npm，不增加 preview 标签；Windows 保留更新
+检查与日志，但应用内自动 apply 固定关闭，并新增 `AskHuman update prepare` 处理 daemon/GUI Host 排空和
+EXE 文件锁。完整设计、边界、测试矩阵与提交顺序见
+`docs/plans/windows-unsigned-update-policy.md`。实现完成后删除本节，并把生产签名保留为独立后置项目。
+
 ## 待外部验收：Windows 发布候选
 
 功能与架构实现已在 `codex/windows-platform-parity` 完成；设计、实施记录和 Win11 证据见
@@ -15,8 +22,8 @@ Clippy、165 Vitest + 5 Node tests、production/release build、真实 authentic
 发布认证仍依赖仓库外状态：
 
 - 准备干净 Windows 10 22H2 x64 VM 并复跑核心矩阵；
-- 在生产 Azure Artifact Signing account/profile 上产出带 timestamp 的签名 zip/npm binary，验证
-  subject/hash，并在 Win11/Win10 记录 SmartScreen 与 clean upgrade/rollback；
+- 生产 Authenticode、timestamp、publisher identity pinning 与 SmartScreen 认证已决定暂缓，后续作为
+  独立签名项目恢复；当前先完成上述 unsigned Windows 更新门控与手动更新闭环；
 - 补齐真实交互式 Windows 桌面的 DPI/多屏/输入法/文件选择/声音完整矩阵；
 - 如发布认证要求覆盖每个 IM provider，以真实凭据补跑飞书以外渠道；当前飞书真实取消链路已通过，
   其余渠道为 deterministic mock 覆盖。
