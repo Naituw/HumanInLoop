@@ -250,13 +250,7 @@ fn ensure_windows_launcher() -> std::io::Result<()> {
     }
     let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
     std::fs::write(&temporary, bytes)?;
-    if std::fs::rename(&temporary, &path).is_err() {
-        let _ = std::fs::remove_file(&path);
-        if let Err(error) = std::fs::rename(&temporary, &path) {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(error);
-        }
-    }
+    std::fs::rename(&temporary, &path)?;
     Ok(())
 }
 

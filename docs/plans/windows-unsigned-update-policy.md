@@ -287,7 +287,7 @@ AskHuman 验收。Windows VM 上必须先证明自动 apply 在网络前被拒�
 
 - `pnpm build`：通过；
 - `pnpm test`：26 个 Vitest 文件 / 165 项测试通过，5 项 Node 测试通过；
-- `cargo test --manifest-path src-tauri/Cargo.toml`：1134 通过、0 失败、2 忽略；
+- `cargo test --manifest-path src-tauri/Cargo.toml`：1138 通过、0 失败、2 忽略；
 - `cargo clippy --all-targets -- -D warnings`：通过；
 - `cargo build --release --features custom-protocol`：通过；
 - `./scripts/install.sh`：完成前端嵌入、`local-install` build、本机安装与 macOS 签名；
@@ -298,7 +298,7 @@ AskHuman 验收。Windows VM 上必须先证明自动 apply 在网络前被拒�
 - `pnpm build`、26 个 Vitest 文件 / 165 项测试、5 项 Node 测试：全部通过；
 - Windows update 专属测试：19/19 通过，含固定策略 guard、缺字段 fail closed、Direct download 前拒绝、
   npm staging 前拒绝；
-- Rust 全量：1123 通过、0 失败、2 忽略；严格 Clippy：通过；
+- Rust 全量：1127 通过、0 失败、2 忽略；严格 Clippy：通过；
 - 全量首次运行有一个既有并发令牌测试抖动（两个消费者同时获胜）；该用例单独复跑和随后两次全量中的
   最终一次均通过，且与 update/GUI Host 变更无共享代码；记录为测试噪声，没有隐藏为通过结果；
 - `scripts/install-windows.cmd` 完成前端构建、`local-install` Rust build、事务替换、PATH 与 launcher 校验；
@@ -308,6 +308,21 @@ AskHuman 验收。Windows VM 上必须先证明自动 apply 在网络前被拒�
   daemon drain、GUI Host 下线，helper 返回 0 并输出 `interactive-drain-test-ok`；
 - 所有临时计划任务、driver、日志、传输包和隔离目录均按精确名称删除，并以
   `windows-vm-cleanup-ok` 验证无残留。
+
+### 12.4 外部 Review correctness 复核
+
+Windows 平台逻辑二次 Review 后又收口了四项真实问题：GUI Host 不再把 named pipe 当文件监听，改为
+监听真实的 `daemon.json` 生命周期文件；Popup 只有在 Windows 上才把带 `launchId` 的 Agent 标成
+Windows Terminal；workspace、launch claim 和 permission rule 复用同一个 Windows
+case/separator-insensitive 路径身份原语；`which_codex` 不再把 macOS Homebrew 路径列为 Windows 候选。
+旧 workspace 若已按路径大小写重复保存，会合并 pinned、hidden、agent 和最近使用元数据而不丢失。
+
+Review 同时声称 `std::fs::rename(temp, existing)` 在 Windows 不能覆盖目标。该前提对当前工具链不成立：
+Rust 1.94.1 的 Windows 标准库 backend 使用带 `MOVEFILE_REPLACE_EXISTING` 的 `MoveFileExW`，Win11 VM
+Rust 1.97 上 `private_atomic_write_overwrites_without_leaving_temporary_files` 和 update state 重复写测试也都
+在已有目标文件时通过。因此没有引入全仓 atomic-file 重构，反而删除 login launcher、terminal focus 和
+private state 写入中会先删除目标、制造不可用窗口的旧 fallback。最终 macOS/Windows 全量测试、strict
+Clippy、前端构建/测试和两端标准安装脚本均重新通过。
 
 实际 GitHub release job、干净 Windows 10 22H2、完整 DPI/多屏/输入法/渠道桌面矩阵仍属于
 `docs/PROGRESS.md` 的外部发布验收，不影响本轮 unsigned capability gate 与 shared daemon 架构完成。

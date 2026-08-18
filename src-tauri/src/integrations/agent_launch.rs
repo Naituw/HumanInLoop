@@ -680,18 +680,20 @@ fn validate_claim(record: &LaunchRecord, token: &str) -> Result<()> {
         }
     }
     let cwd = fs::canonicalize(&record.cwd).context("workspace is no longer available")?;
-    if cwd.to_string_lossy() != record.cwd {
+    if !crate::path_identity::equivalent(&cwd.to_string_lossy(), &record.cwd) {
         return Err(anyhow!("workspace path changed after launch was requested"));
     }
     let executable =
         fs::canonicalize(&record.executable).context("Agent executable is unavailable")?;
-    if executable.to_string_lossy() != record.executable || !is_executable(&executable) {
+    if !crate::path_identity::equivalent(&executable.to_string_lossy(), &record.executable)
+        || !is_executable(&executable)
+    {
         return Err(anyhow!(
             "Agent executable changed after launch was requested"
         ));
     }
     let current = std::env::current_exe()?;
-    if current.to_string_lossy() != record.askhuman_executable {
+    if !crate::path_identity::equivalent(&current.to_string_lossy(), &record.askhuman_executable) {
         return Err(anyhow!(
             "AskHuman executable changed after launch was requested"
         ));

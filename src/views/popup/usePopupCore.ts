@@ -2324,11 +2324,11 @@ export function usePopupCore() {
     if (kind && !agentKind.value) agentKind.value = kind;
     if (launchId) {
       agentLaunchId.value = launchId;
-      agentTerminal.value = "windows-terminal";
+      if (isWindows) agentTerminal.value = "windows-terminal";
     }
     if (pid != null) {
       agentPid.value = pid;
-      if (launchId) return;
+      if (launchId && isWindows) return;
       try {
         agentTerminal.value = (await popupAgentTerminal(pid)) ?? null;
       } catch {

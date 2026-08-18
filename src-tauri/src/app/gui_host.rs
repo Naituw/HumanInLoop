@@ -1674,16 +1674,16 @@ async fn handle_host_conn(stream: transport::Stream, app: AppHandle) {
 // ===== daemon 状态订阅（非保活）=====
 
 fn start_status_subscription(app: AppHandle) {
-    // 事件驱动重连信号：daemon socket 出现/变化（daemon 起停）即唤醒下方循环立即重连，
+    // 事件驱动重连信号：daemon metadata 出现/变化（daemon 起停）即唤醒下方循环立即重连，
     // 取代「daemon 关着时每 2s 盲连」的忙轮询。配 30s 兜底超时防漏事件。
-    let sock_event = Arc::new(Notify::new());
-    spawn_daemon_sock_watch(sock_event.clone());
+    let state_event = Arc::new(Notify::new());
+    spawn_daemon_state_watch(state_event.clone());
     tauri::async_runtime::spawn(async move {
         loop {
-            // off 模式无托盘，不必订阅；等 socket 事件或 2s 复查模式（覆盖运行时切到 active/always）。
+            // off 模式无托盘，不必订阅；等 state 事件或 2s 复查模式（覆盖运行时切到 active/always）。
             if mode_of(&app) == MenuBarIconMode::Off {
                 tokio::select! {
-                    _ = sock_event.notified() => {}
+                    _ = state_event.notified() => {}
                     _ = tokio::time::sleep(Duration::from_secs(2)) => {}
                 }
                 continue;
@@ -1754,26 +1754,31 @@ fn start_status_subscription(app: AppHandle) {
             set_daemon_up(&app, false);
             refresh_on_main(&app);
             evaluate_exit(&app);
-            // 事件驱动重连：等 daemon socket 出现/变化即重连，30s 兜底防漏事件（取代 2s 忙轮询）。
+            // 事件驱动重连：等 daemon metadata 出现/变化即重连，30s 兜底防漏事件。
             tokio::select! {
-                _ = sock_event.notified() => {}
+                _ = state_event.notified() => {}
                 _ = tokio::time::sleep(Duration::from_secs(30)) => {}
             }
         }
     });
 }
 
-/// 监听 daemon socket（`~/.askhuman/daemon.sock`）所在目录：文件创建/变化（daemon 起停）即唤醒
-/// 状态订阅循环立即重连。用一条 `Notify` 跨「notify 同步回调线程」与「异步订阅循环」传递信号。
-fn spawn_daemon_sock_watch(event: Arc<Notify>) {
+fn daemon_state_signal_path() -> std::path::PathBuf {
+    crate::daemon::lifecycle::meta_path()
+}
+
+/// Watch the cross-platform daemon metadata file. Unlike the transport endpoint, this is a real
+/// filesystem path on both Unix and Windows, and its create/remove lifecycle mirrors daemon start
+/// and stop closely enough to wake the status subscription immediately.
+fn spawn_daemon_state_watch(event: Arc<Notify>) {
     std::thread::spawn(move || {
         use notify::{RecursiveMode, Watcher};
         use std::sync::mpsc::channel;
-        let sock = crate::ipc::transport::socket_path();
-        let Some(name) = sock.file_name().map(|n| n.to_os_string()) else {
+        let state_path = daemon_state_signal_path();
+        let Some(name) = state_path.file_name().map(|n| n.to_os_string()) else {
             return;
         };
-        let Some(dir) = sock.parent().map(|d| d.to_path_buf()) else {
+        let Some(dir) = state_path.parent().map(|d| d.to_path_buf()) else {
             return;
         };
         let _ = std::fs::create_dir_all(&dir);
@@ -2038,6 +2043,16 @@ fn restart_host(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_status_watch_uses_real_metadata_file() {
+        let path = daemon_state_signal_path();
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("daemon.json")
+        );
+        assert!(!path.to_string_lossy().starts_with(r"\\.\pipe\"));
+    }
 
     fn item<'a>(nodes: &'a [Node], key: &str) -> (&'a str, bool) {
         nodes

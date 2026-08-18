@@ -8,11 +8,12 @@
 功能与架构实现已在 `codex/windows-platform-parity` 完成；设计、实施记录和 Win11 证据见
 `docs/specs/windows-platform-parity.md`、`docs/plans/windows-platform-parity.md` §17.9 与
 `docs/plans/windows-unsigned-update-policy.md` §12。当前 Win11 24H2 VM 已通过 PS5/PS7 install、
-named-pipe daemon、完整 Rust tests（1123 passed / 2 ignored）、Windows update 专属测试（19/19）、
+named-pipe daemon、完整 Rust tests（1127 passed / 2 ignored）、Windows update 专属测试（19/19）、
 Clippy、165 Vitest + 5 Node tests、production/release build、真实 authenticated Codex 0.147 E2E、
 卸载维护链和未签名 binary fail-closed / `update prepare` 文件锁闭环。交互式桌面已覆盖统一图标、Ctrl
 快捷键、Advanced、设置稳定性、真实飞书取消、Windows Terminal 精确 focus、Dev Instance 以及无闪窗
-login/logout。
+login/logout。外部平台逻辑 Review 的 correctness 项也已收口：daemon metadata watcher、共享 Windows
+path identity、launchId 平台标记和 rename 覆盖语义均有 Windows 原生回归证据。
 
 发布认证仍依赖仓库外状态：
 

@@ -385,18 +385,7 @@ pub fn atomic_write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> 
         file.write_all(bytes)?;
         file.flush()?;
         drop(file);
-        #[cfg(not(windows))]
         std::fs::rename(&temporary, path)?;
-        #[cfg(windows)]
-        {
-            // std::fs::rename cannot replace an existing destination on Windows. The private
-            // file remains unavailable to other users throughout, although replacement itself
-            // cannot be atomic with the portable standard-library API.
-            if std::fs::rename(&temporary, path).is_err() {
-                std::fs::remove_file(path)?;
-                std::fs::rename(&temporary, path)?;
-            }
-        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

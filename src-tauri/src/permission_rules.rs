@@ -256,15 +256,7 @@ pub(crate) fn path_is_absolute_text(value: &str) -> bool {
 }
 
 fn comparable_path(value: &str) -> String {
-    let normalized = value.replace('\\', "/");
-    #[cfg(windows)]
-    {
-        normalized.to_ascii_lowercase()
-    }
-    #[cfg(not(windows))]
-    {
-        normalized
-    }
+    crate::path_identity::key(value)
 }
 
 /// Lexical prefix check on normalized absolute paths (component boundary aware).

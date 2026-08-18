@@ -1,4 +1,4 @@
-//! Daemon 生命周期支撑：二进制指纹、运行元信息（daemon.json）、单实例锁（flock）。
+//! Daemon 生命周期支撑：二进制指纹、运行元信息（daemon.json）、跨平台单实例锁。
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

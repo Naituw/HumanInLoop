@@ -686,10 +686,10 @@ single-process ask fallback 已删除；shared server core 已从 `daemon/unix_i
 
 最终自动化矩阵：
 
-- macOS：Vitest 26 files / 165 tests、Node 5 tests、production build、Rust 1129 passed / 0 failed /
+- macOS：Vitest 26 files / 165 tests、Node 5 tests、production build、Rust 1138 passed / 0 failed /
   2 ignored、`cargo fmt --check`、strict Clippy 与 `git diff --check` 全部通过；
 - Windows 11 Home 24H2 x64：Vitest 26 files / 165 tests、Node 5 tests、production build、Rust
-  1115 passed / 0 failed / 2 ignored、strict Clippy、`cargo build --release --features custom-protocol`
+  1127 passed / 0 failed / 2 ignored、strict Clippy、`cargo build --release --features custom-protocol`
   全部通过；Windows PowerShell 5.1 与 PowerShell 7 installer 均成功安装 `AskHuman v0.12.2`；
 - 安装态 smoke：named-pipe daemon start/status、`agents monitor --json`、`doctor --json` 通过；临时隔离
   `CODEX_HOME` 的真实 authenticated Codex 0.147 E2E 返回 `WINDOWS_CODEX_FINAL_E2E_OK`。
@@ -702,3 +702,14 @@ daemon + GUI Host 恢复。登录最初 6 秒的 60 帧截图与窗口枚举均�
 因此 P7 退出条件中的代码与 Win11 主链路已经满足。生产签名已明确后置，不再阻断当前未签名发行；
 自动更新由源码 capability fail closed，手动更新闭环见独立计划。剩余外部验收为干净 Win10 22H2、
 DPI/多屏/输入法/文件选择/声音矩阵和必要的真实渠道 smoke，不需要保留 Windows 架构 fallback。
+
+### 17.10 外部 Review correctness 收口（2026-08-18）
+
+P7 完成后的平台逻辑复核确认并修复了几个 adapter 边界：Windows GUI Host 的 daemon 状态 watcher 从
+named pipe 路径改为真实 `daemon.json`；Mac Agent task 不再因共有的 `launchId` 被误标 Windows
+Terminal；Windows workspace/launch/permission 统一采用大小写与分隔符不敏感的路径身份；Codex 默认
+候选按目标平台编译。历史 workspace 大小写重复项会合并元数据。
+
+复核报告关于 Windows `std::fs::rename` 不能覆盖既有目标的结论已由当前 Rust 标准库实现和 Win11
+重复覆盖写测试共同否定。本轮没有据此扩大为全仓持久化重构，而是移除三处会先删目标文件的旧兼容
+fallback，保持当前 Rust 的原子替换语义。完整证据与最终数字见未签名更新计划 §12.4。

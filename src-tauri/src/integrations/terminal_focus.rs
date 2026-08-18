@@ -147,9 +147,6 @@ pub fn register_windows_terminal_window(launch_id: &str) -> Result<(), String> {
         .map_err(|error| format!("focus terminal: cannot encode registration: {error}"))?;
     std::fs::write(&temp, bytes)
         .map_err(|error| format!("focus terminal: cannot write registration: {error}"))?;
-    if path.exists() {
-        let _ = std::fs::remove_file(&path);
-    }
     std::fs::rename(&temp, &path)
         .map_err(|error| format!("focus terminal: cannot commit registration: {error}"))?;
     Ok(())

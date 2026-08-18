@@ -653,8 +653,10 @@ fn which_codex() -> Option<PathBuf> {
             candidates.push(dir.join("codex"));
         }
     }
-    // Daemon contexts (launchd) may run with a minimal PATH.
+    // Daemon contexts (launchd/systemd) may run with a minimal PATH.
+    #[cfg(target_os = "macos")]
     candidates.push(PathBuf::from("/opt/homebrew/bin/codex"));
+    #[cfg(unix)]
     candidates.push(PathBuf::from("/usr/local/bin/codex"));
     #[cfg(windows)]
     if let Some(app_data) = std::env::var_os("APPDATA") {

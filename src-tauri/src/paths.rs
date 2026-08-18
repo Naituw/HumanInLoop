@@ -173,11 +173,12 @@ pub fn agent_launch_dir() -> PathBuf {
 
 /// GUI 宿主进程的 IPC socket `~/.askhuman/gui-host.sock`（与 daemon socket 解耦，
 /// 使 daemon 未运行时也能打开设置/历史窗口，spec D13）。
+#[cfg(unix)]
 pub fn gui_host_sock() -> PathBuf {
     config_dir().join("gui-host.sock")
 }
 
-/// GUI 宿主进程的单实例锁 `~/.askhuman/gui-host.lock`（flock，保证全局唯一宿主）。
+/// GUI 宿主进程的跨平台单实例锁 `~/.askhuman/gui-host.lock`。
 pub fn gui_host_lock() -> PathBuf {
     config_dir().join("gui-host.lock")
 }

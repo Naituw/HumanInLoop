@@ -49,11 +49,15 @@ pub fn refresh() -> Vec<Workspace> {
             .filter(|workspace| !workspace.hidden)
             .collect();
     };
-    let mut by_path: HashMap<String, Workspace> = load()
-        .workspaces
-        .into_iter()
-        .map(|w| (w.path.clone(), w))
-        .collect();
+    let mut by_path: HashMap<String, Workspace> = HashMap::new();
+    for workspace in load().workspaces {
+        let key = crate::path_identity::key(&workspace.path);
+        if let Some(existing) = by_path.get_mut(&key) {
+            merge_workspace(existing, workspace);
+        } else {
+            by_path.insert(key, workspace);
+        }
+    }
     for (path, kind, timestamp) in scan_recent() {
         let Ok(canonical) = fs::canonicalize(&path) else {
             continue;
@@ -62,7 +66,8 @@ pub fn refresh() -> Vec<Workspace> {
             continue;
         }
         let path = canonical.to_string_lossy().to_string();
-        let entry = by_path.entry(path.clone()).or_insert_with(|| Workspace {
+        let key = crate::path_identity::key(&path);
+        let entry = by_path.entry(key).or_insert_with(|| Workspace {
             label: workspace_label(&canonical),
             path,
             last_used_at: timestamp,
@@ -96,7 +101,11 @@ pub fn add(path: &Path, pinned: bool) -> Result<Workspace, String> {
     let path_text = canonical.to_string_lossy().to_string();
     let mut state = load();
     let now = epoch_secs(SystemTime::now());
-    let value = if let Some(existing) = state.workspaces.iter_mut().find(|w| w.path == path_text) {
+    let value = if let Some(existing) = state
+        .workspaces
+        .iter_mut()
+        .find(|w| crate::path_identity::equivalent(&w.path, &path_text))
+    {
         existing.hidden = false;
         existing.pinned |= pinned;
         existing.last_used_at = existing.last_used_at.max(now);
@@ -132,7 +141,9 @@ pub fn set_hidden(path: &str, hidden: bool) -> Result<(), String> {
 pub fn forget(path: &str) -> Result<(), String> {
     let _lock = WorkspaceLock::acquire().map_err(|e| e.to_string())?;
     let mut state = load();
-    state.workspaces.retain(|w| w.path != path);
+    state
+        .workspaces
+        .retain(|w| !crate::path_identity::equivalent(&w.path, path));
     save(&state).map_err(|e| e.to_string())
 }
 
@@ -146,7 +157,11 @@ impl WorkspaceLock {
 
 fn mutate(path: &str, f: impl FnOnce(&mut Workspace)) -> Result<(), String> {
     let mut state = load();
-    let Some(item) = state.workspaces.iter_mut().find(|w| w.path == path) else {
+    let Some(item) = state
+        .workspaces
+        .iter_mut()
+        .find(|w| crate::path_identity::equivalent(&w.path, path))
+    else {
         return Err("workspace not found".to_string());
     };
     f(item);
@@ -176,8 +191,25 @@ fn sort_workspaces(items: &mut [Workspace]) {
         b.pinned
             .cmp(&a.pinned)
             .then_with(|| b.last_used_at.cmp(&a.last_used_at))
-            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| {
+                crate::path_identity::key(&a.path).cmp(&crate::path_identity::key(&b.path))
+            })
     });
+}
+
+fn merge_workspace(existing: &mut Workspace, incoming: Workspace) {
+    if incoming.last_used_at > existing.last_used_at {
+        existing.path = incoming.path.clone();
+        existing.label = incoming.label.clone();
+    }
+    existing.last_used_at = existing.last_used_at.max(incoming.last_used_at);
+    existing.pinned |= incoming.pinned;
+    existing.hidden &= incoming.hidden;
+    for agent in incoming.agents {
+        if !existing.agents.contains(&agent) {
+            existing.agents.push(agent);
+        }
+    }
 }
 
 fn workspace_label(path: &Path) -> String {
@@ -460,6 +492,36 @@ mod tests {
         ];
         sort_workspaces(&mut values);
         assert_eq!(values[0].path, "/a");
+    }
+
+    #[test]
+    fn duplicate_workspace_metadata_is_merged_without_loss() {
+        let mut existing = Workspace {
+            path: r"C:\Work\Repo".into(),
+            label: "old".into(),
+            last_used_at: 1,
+            agents: vec![AgentKind::Claude],
+            pinned: true,
+            hidden: true,
+        };
+        merge_workspace(
+            &mut existing,
+            Workspace {
+                path: "c:/work/repo".into(),
+                label: "new".into(),
+                last_used_at: 2,
+                agents: vec![AgentKind::Codex],
+                pinned: false,
+                hidden: false,
+            },
+        );
+
+        assert_eq!(existing.path, "c:/work/repo");
+        assert_eq!(existing.label, "new");
+        assert_eq!(existing.last_used_at, 2);
+        assert!(existing.pinned);
+        assert!(!existing.hidden);
+        assert_eq!(existing.agents, vec![AgentKind::Claude, AgentKind::Codex]);
     }
 
     #[test]
