@@ -6,9 +6,8 @@ name: release
 #   MACOS_CERT_P12_BASE64   Developer ID Application 证书（含私钥）的 .p12 经 base64
 #   MACOS_CERT_PASSWORD     导出 .p12 时设置的密码
 #   MACOS_KEYCHAIN_PASSWORD CI 临时钥匙串的任意密码
-# Windows 使用 Azure Artifact Signing + GitHub OIDC，不把长期私钥导入 CI。需配置：
-#   Secrets: AZURE_ARTIFACT_SIGNING_CLIENT_ID / TENANT_ID / SUBSCRIPTION_ID
-#   Variables: AZURE_ARTIFACT_SIGNING_ENDPOINT / ACCOUNT / PROFILE / EXPECTED_SUBJECT
+# Windows 暂时发布未签名 zip/npm；运行时固定禁用自动 apply，只保留检查与手动更新准备。
+# 正式 Authenticode、publisher pinning 与 SmartScreen 另立签名项目后再恢复发布 gate。
 # 发版流程：node scripts/bump-version.mjs X.Y.Z → 提交 → git tag vX.Y.Z → git push --tags
 
 on:
@@ -19,7 +18,6 @@ on:
 
 permissions:
   contents: write
-  id-token: write
 
 jobs:
   build:
@@ -77,41 +75,6 @@ jobs:
       - run: pnpm build
 
       - run: cargo build --release --manifest-path src-tauri/Cargo.toml --target ${{ matrix.target }} --features custom-protocol
-
-      - name: Sign in to Azure for Artifact Signing
-        if: runner.os == 'Windows'
-        uses: azure/login@v3
-        with:
-          client-id: ${{ secrets.AZURE_ARTIFACT_SIGNING_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_ARTIFACT_SIGNING_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_ARTIFACT_SIGNING_SUBSCRIPTION_ID }}
-
-      - name: Sign Windows binary with Azure Artifact Signing
-        if: runner.os == 'Windows'
-        uses: azure/artifact-signing-action@v2
-        with:
-          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
-          files: ${{ github.workspace }}\src-tauri\target\${{ matrix.target }}\release\AskHuman.exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-          description: AskHuman
-          description-url: https://github.com/Naituw/AskHuman
-
-      - name: Verify Windows Authenticode policy
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          WINDOWS_SIGNING_EXPECTED_SUBJECT: ${{ vars.AZURE_ARTIFACT_SIGNING_EXPECTED_SUBJECT }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_EXPECTED_SUBJECT)) {
-            throw "AZURE_ARTIFACT_SIGNING_EXPECTED_SUBJECT is not configured"
-          }
-          ./scripts/verify-windows-signature.ps1 `
-            -Path "src-tauri/target/${{ matrix.target }}/release/AskHuman.exe" `
-            -ExpectedSubject $env:WINDOWS_SIGNING_EXPECTED_SUBJECT
 
       # Sign macOS binaries with the Developer ID cert (explicit, from Secrets — no auto-detect) so
       # the keychain trusts them across updates (DR is cdhash-independent → secret reads stay
