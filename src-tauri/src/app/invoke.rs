@@ -279,6 +279,7 @@ fn update(invoke: Invoke<Wry>) -> bool {
         crate::commands::update_get_notes,
         crate::commands::update_get_version_notes,
         crate::commands::update_apply,
+        crate::commands::update_prepare,
         crate::commands::update_dismiss,
         crate::commands::restart_settings,
     ];

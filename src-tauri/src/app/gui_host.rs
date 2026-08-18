@@ -996,11 +996,9 @@ fn build_specs(
         !update_busy,
     ));
     if data.update_available {
-        nodes.push(Node::item(
-            "apply_update",
-            i18n::tr(lang, "tray.applyUpdate").replace("{v}", &data.update_latest),
-            !update_busy,
-        ));
+        let (id, text) =
+            available_update_action(crate::update::apply_mode(), lang, &data.update_latest);
+        nodes.push(Node::item(id, text, !update_busy));
     }
     // 盘上二进制已换新但窗口开着（自动换新被挡）→ 用户可主动重启宿主完成更新（B2）。
     if stale {
@@ -1040,6 +1038,19 @@ fn build_specs(
         ));
     }
     nodes
+}
+
+fn available_update_action(
+    mode: crate::update::UpdateApplyMode,
+    lang: Lang,
+    version: &str,
+) -> (&'static str, String) {
+    let (id, key) = if mode == crate::update::UpdateApplyMode::Automatic {
+        ("apply_update", "tray.applyUpdate")
+    } else {
+        ("prepare_update", "tray.prepareManualUpdate")
+    };
+    (id, i18n::tr(lang, key).replace("{v}", version))
 }
 
 fn pending_update_text(up: bool, data: &TrayData, lang: Lang) -> String {
@@ -1299,6 +1310,12 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
             let Some(state) = app.try_state::<HostState>() else {
                 return;
             };
+            if let Err(error) = crate::update::ensure_automatic_apply_allowed() {
+                *state.update_action.lock().unwrap() =
+                    UpdateActionState::ApplyFailed(compact_update_error(&error.to_string()));
+                refresh_on_main(app);
+                return;
+            }
             {
                 let mut action = state.update_action.lock().unwrap();
                 if action.busy() {
@@ -1336,6 +1353,17 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
                 }
             });
         }
+        // Settings owns the second confirmation and preserves the exact Direct/npm next step
+        // before starting the helper that will close this GUI Host.
+        "prepare_update" => open_window(
+            app,
+            WindowKind::Settings,
+            false,
+            Some("general#manual-update".to_string()),
+            None,
+            None,
+            None,
+        ),
         // B2：用户主动重启宿主完成二进制换新（窗口开着也重启——用户已知情选择）。
         "host_restart" => {
             restart_host(app);
@@ -1630,9 +1658,14 @@ async fn handle_host_conn(stream: transport::Stream, app: AppHandle) {
                 let _ = ipc::write_msg(&mut w, &HostMsg::Ping).await;
             }
             HostMsg::Shutdown => {
-                let app2 = app.clone();
-                let _ = app.run_on_main_thread(move || app2.exit(0));
-                return;
+                // Confirm that the shutdown frame was consumed before the client starts checking
+                // for pipe disappearance. This removes a named-pipe close race on Windows.
+                let _ = ipc::write_msg(&mut w, &HostMsg::Ping).await;
+                // `AppHandle::exit` can wait for a Settings update-check task (HTTP timeout 30s),
+                // keeping the Windows executable locked. This is a cooperative Host-only shutdown
+                // after daemon drain: release Tauri resources, then terminate this process.
+                app.cleanup_before_exit();
+                std::process::exit(0);
             }
         }
     }
@@ -2130,6 +2163,8 @@ mod tests {
                 release_notes: String::new(),
                 source_url: String::new(),
                 is_npm: false,
+                apply_mode: crate::update::UpdateApplyMode::Automatic,
+                manual_command: String::new(),
             },
         );
         assert!(data.update_available);
@@ -2174,7 +2209,9 @@ mod tests {
             ("Update found: v1.2.0", false)
         );
         assert_eq!(item(&nodes, "check_update"), ("Check for Updates", true));
-        assert!(item(&nodes, "apply_update").1);
+        let (action_id, _) =
+            available_update_action(crate::update::apply_mode(), Lang::En, "1.2.0");
+        assert!(item(&nodes, action_id).1);
     }
 
     #[test]
@@ -2198,7 +2235,28 @@ mod tests {
             ("Updating AskHuman…", false)
         );
         assert!(!item(&nodes, "check_update").1);
-        assert!(!item(&nodes, "apply_update").1);
+        let (action_id, _) =
+            available_update_action(crate::update::apply_mode(), Lang::En, "1.2.0");
+        assert!(!item(&nodes, action_id).1);
+    }
+
+    #[test]
+    fn unsigned_windows_update_action_routes_to_manual_preparation() {
+        assert_eq!(
+            available_update_action(
+                crate::update::UpdateApplyMode::ManualDirect,
+                Lang::En,
+                "1.2.0"
+            ),
+            (
+                "prepare_update",
+                "Prepare manual update to v1.2.0…".to_string()
+            )
+        );
+        assert_eq!(
+            available_update_action(crate::update::UpdateApplyMode::Automatic, Lang::En, "1.2.0").0,
+            "apply_update"
+        );
     }
 
     #[test]

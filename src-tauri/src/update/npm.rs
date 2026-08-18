@@ -34,15 +34,16 @@ impl Updater for NpmUpdater {
             .await
             .unwrap_or_default();
         Ok(RemoteLatest {
+            source_url: super::release_url(&version),
             version,
             notes,
-            source_url: Self::manual_command(),
         })
     }
 
     async fn apply(&self, _progress: Option<ProgressCb>) -> Result<()> {
         #[cfg(windows)]
         {
+            super::ensure_automatic_apply_allowed()?;
             stage_windows_npm_worker().await
         }
         #[cfg(not(windows))]
@@ -373,6 +374,13 @@ fn prepend_path(prefix_bin: &Path, current_path: Option<&OsStr>) -> OsString {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn unsigned_windows_apply_is_blocked_before_npm_staging() {
+        let error = NpmUpdater::new().apply(None).await.unwrap_err();
+        assert!(error.to_string().contains("automatic update"));
+    }
 
     #[cfg(unix)]
     #[test]

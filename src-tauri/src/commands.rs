@@ -3625,6 +3625,7 @@ pub struct PushedUpdateState {
     pub available: bool,
     pub latest_version: String,
     pub pending: bool,
+    pub apply_mode: crate::update::UpdateApplyMode,
 }
 
 static PUSHED_UPDATE: std::sync::OnceLock<std::sync::Mutex<PushedUpdateState>> =
@@ -3720,6 +3721,7 @@ pub async fn update_get_notes(aggregate: bool) -> Result<String, String> {
 /// `update_download_progress` 事件回传；完成发 `update_apply_finished`。
 #[tauri::command]
 pub async fn update_apply(app: AppHandle) -> Result<(), String> {
+    crate::update::ensure_automatic_apply_allowed().map_err(|e| e.to_string())?;
     let updater = crate::update::select_updater();
     let app_for_cb = app.clone();
     let cb: crate::update::ProgressCb = Box::new(move |p| {
@@ -3732,6 +3734,13 @@ pub async fn update_apply(app: AppHandle) -> Result<(), String> {
     #[cfg(windows)]
     app.exit(0);
     Ok(())
+}
+
+/// Spawn the public `update prepare` helper. The helper waits for active requests before shutting
+/// down the daemon and GUI Host; this command returns once that helper is safely detached.
+#[tauri::command]
+pub fn update_prepare() -> Result<(), String> {
+    crate::update::spawn_manual_prepare().map_err(|error| error.to_string())
 }
 
 /// 忽略某版本（不再主动弹该版本提示；设置内手动检查可重置）。

@@ -11,6 +11,7 @@ pub mod help;
 pub mod image_writer;
 pub mod output;
 pub mod todo_cmd;
+pub mod update_cmd;
 
 use crate::i18n::{self, Lang};
 use std::collections::HashMap;
@@ -231,6 +232,11 @@ pub fn dispatch() {
         // 极端歧义（问题正好是 "daemon"）可用 `AskHuman -q daemon` 规避。
         "daemon" => {
             crate::daemon::dispatch(&argv[2..]);
+        }
+        // Manual Windows update preparation: gracefully drain the daemon and close the GUI Host
+        // so the user can replace the running executable from their terminal.
+        "update" => {
+            exit(update_cmd::dispatch(&argv[2..]));
         }
         // MCP server 角色：以 STDIO 暴露 ask / whats_next / todo_add，供 Codex / Claude Code / Cursor 等 MCP 客户端调用。
         // 每次工具调用都 spawn 一个 `AskHuman --output json …` 子进程复用既有 ask 流程（见 mcp 模块）。

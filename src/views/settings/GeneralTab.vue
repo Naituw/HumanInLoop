@@ -40,7 +40,9 @@ const {
   updateInfo,
   updateChecking,
   updateApplying,
+  updatePreparing,
   updateDone,
+  manualCommandCopied,
   updateError,
   updateProgress,
   notesHtml,
@@ -51,6 +53,8 @@ const {
   toggleCurrentNotes,
   checkUpdate,
   applyUpdate,
+  copyManualCommand,
+  prepareManualUpdate,
   openReleases,
   onNotesClick,
   restartSettingsNow,
@@ -476,7 +480,7 @@ const config = computed(() => ctx.config.value!);
 
     <template v-if="updateInfo && updateInfo.available">
       <hr class="divider" />
-      <div class="row">
+      <div id="manual-update" class="row">
         <span class="label">{{
           t("settings.about.updateAvailable", {
             version: updateInfo.latestVersion,
@@ -484,7 +488,7 @@ const config = computed(() => ctx.config.value!);
         }}</span>
         <span class="spacer"></span>
         <button
-          v-if="!updateDone"
+          v-if="updateInfo.applyMode === 'automatic' && !updateDone"
           class="btn btn-primary"
           type="button"
           :disabled="updateApplying"
@@ -499,21 +503,54 @@ const config = computed(() => ctx.config.value!);
           }}
         </button>
         <button
-          v-else
+          v-else-if="updateInfo.applyMode === 'automatic'"
           class="btn btn-primary"
           type="button"
           @click="restartSettingsNow"
         >
           {{ t("settings.about.restartSettings") }}
         </button>
+        <button
+          v-else
+          class="btn btn-primary"
+          type="button"
+          :disabled="updatePreparing"
+          @click="prepareManualUpdate"
+        >
+          {{
+            updatePreparing
+              ? t("settings.about.preparingManual")
+              : t("settings.about.prepareManual")
+          }}
+        </button>
       </div>
-      <p class="card-desc">
+      <p v-if="updateInfo.applyMode === 'automatic'" class="card-desc">
         {{
           updateDone
             ? t("settings.about.updatedRestartHint")
             : t("settings.about.applyAfterAnswer")
         }}
       </p>
+      <template v-else>
+        <p class="card-desc">{{ t("settings.about.manualUnavailable") }}</p>
+        <div v-if="updateInfo.applyMode === 'manualNpm'" class="row">
+          <code class="value">{{ updateInfo.manualCommand }}</code>
+          <span class="spacer"></span>
+          <button class="btn" type="button" @click="copyManualCommand">
+            {{
+              manualCommandCopied
+                ? t("settings.about.commandCopied")
+                : t("settings.about.copyCommand")
+            }}
+          </button>
+        </div>
+        <p v-else class="card-desc">
+          <a class="link" href="#" @click.prevent="openReleases">{{
+            t("settings.about.openReleasePage")
+          }}</a>
+        </p>
+        <p class="card-desc">{{ t("settings.about.prepareManualHint") }}</p>
+      </template>
 
       <template v-if="notesHtml">
         <hr class="divider" />

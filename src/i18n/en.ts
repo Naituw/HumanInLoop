@@ -104,6 +104,9 @@ export default {
       failed: "Update failed",
       rateLimited:
         "GitHub requests are rate-limited (shared IP quota exhausted). Try again later or download manually.",
+      manualHint:
+        "Windows automatic update is currently unavailable. View the manual steps without interrupting this answer.",
+      manualButton: "View manual update steps",
       npmHint: "Run in your terminal: {cmd}",
       noNotes: "No release notes.",
     },
@@ -552,6 +555,19 @@ export default {
       noNotes: "No release notes.",
       checkFailed: "Failed to check for updates",
       updateFailed: "Update failed",
+      manualUnavailable:
+        "Windows automatic update is currently unavailable. Please update manually.",
+      prepareManual: "Prepare manual update…",
+      preparingManual: "Preparing…",
+      prepareManualHint:
+        "Preparation waits for active requests, then closes the daemon and background UI so Windows can replace the executable.",
+      prepareConfirm:
+        "Prepare for a manual update? AskHuman will wait for active requests, then close its background processes.",
+      prepareFailed: "Failed to prepare the manual update",
+      copyCommand: "Copy command",
+      commandCopied: "Copied",
+      copyCommandFailed: "Failed to copy the update command",
+      openReleasePage: "Open the GitHub release page",
       npmHint: "Run in your terminal: {cmd}",
       viewCurrentNotes: "View this version's release notes",
       hideCurrentNotes: "Hide this version's release notes",

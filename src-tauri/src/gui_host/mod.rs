@@ -131,10 +131,22 @@ mod platform_impl {
         let Ok(stream) = connect().await else {
             return false;
         };
-        let (_reader, mut writer) = stream.into_split();
-        ipc::write_msg(&mut writer, &HostMsg::Shutdown)
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        if ipc::write_msg(&mut writer, &HostMsg::Shutdown)
             .await
-            .is_ok()
+            .is_err()
+        {
+            return false;
+        }
+        // New Hosts acknowledge before scheduling exit. Old Hosts close the stream without an
+        // acknowledgement; keep the send backward-compatible and bound the wait either way.
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            ipc::read_msg::<_, HostMsg>(&mut reader),
+        )
+        .await;
+        true
     }
 
     /// 后台拉起宿主进程（`AskHuman --gui-host`，detach 新会话脱离调用方终端）。

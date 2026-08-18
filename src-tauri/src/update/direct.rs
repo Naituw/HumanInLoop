@@ -48,6 +48,7 @@ impl Updater for DirectUpdater {
         }
         #[cfg(windows)]
         {
+            super::ensure_automatic_apply_allowed()?;
             apply_windows(progress).await
         }
         #[cfg(not(any(unix, windows)))]
@@ -703,6 +704,13 @@ fn scopeguard(dir: std::path::PathBuf) -> impl Drop {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn unsigned_windows_apply_is_blocked_before_download() {
+        let error = DirectUpdater::new().apply(None).await.unwrap_err();
+        assert!(error.to_string().contains("automatic update"));
+    }
 
     #[test]
     fn asset_match_by_triple() {

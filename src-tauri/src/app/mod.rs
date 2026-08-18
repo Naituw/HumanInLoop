@@ -979,6 +979,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                                                 available,
                                                 latest_version,
                                                 pending,
+                                                apply_mode: crate::update::apply_mode(),
                                             };
                                             crate::commands::set_pushed_update(payload.clone());
                                             let _ = app_handle.emit("update-state", payload);

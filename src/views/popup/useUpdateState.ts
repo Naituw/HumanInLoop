@@ -2,8 +2,14 @@
 import { ref, type ComputedRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { popupUpdateState, updateApply, updateGetNotes } from "../../lib/ipc";
+import {
+  openSettings,
+  popupUpdateState,
+  updateApply,
+  updateGetNotes,
+} from "../../lib/ipc";
 import { renderMarkdown, markdownReady } from "../../lib/markdown";
+import type { PushedUpdateState, UpdateApplyMode } from "../../lib/types";
 
 export function useUpdateState(deps: {
   codeCopyLabels: ComputedRef<{ copyLabel: string; copiedLabel: string }>;
@@ -14,6 +20,9 @@ export function useUpdateState(deps: {
   const updateAvailable = ref(false);
   const updatePending = ref(false);
   const updateLatest = ref("");
+  // Fail closed until the backend snapshot arrives. An old/missing snapshot must never reveal the
+  // automatic apply action in a newly bundled frontend.
+  const updateApplyMode = ref<UpdateApplyMode>("manualDirect");
   const updatePopoverOpen = ref(false);
   const updating = ref(false);
   const updateStarted = ref(false);
@@ -36,6 +45,15 @@ export function useUpdateState(deps: {
   }
 
   async function applyUpdateFromPopup() {
+    if (updateApplyMode.value !== "automatic") {
+      try {
+        await openSettings("general#manual-update");
+        updatePopoverOpen.value = false;
+      } catch (e) {
+        updateError.value = `${t("popup.update.failed")}: ${String(e)}`;
+      }
+      return;
+    }
     if (updating.value || updateStarted.value) return;
     updating.value = true;
     updateError.value = "";
@@ -61,17 +79,15 @@ export function useUpdateState(deps: {
       updateAvailable.value = u.available;
       updatePending.value = u.pending;
       updateLatest.value = u.latestVersion;
+      updateApplyMode.value = u.applyMode;
     } catch {
       /* 单进程回退 / 无 daemon：忽略 */
     }
-    unlistenUpdate = await listen<{
-      available: boolean;
-      latestVersion: string;
-      pending: boolean;
-    }>("update-state", (e) => {
+    unlistenUpdate = await listen<PushedUpdateState>("update-state", (e) => {
       updateAvailable.value = e.payload.available;
       updatePending.value = e.payload.pending;
       updateLatest.value = e.payload.latestVersion;
+      updateApplyMode.value = e.payload.applyMode;
     });
   }
 
@@ -83,6 +99,7 @@ export function useUpdateState(deps: {
     updateAvailable,
     updatePending,
     updateLatest,
+    updateApplyMode,
     updatePopoverOpen,
     updating,
     updateStarted,

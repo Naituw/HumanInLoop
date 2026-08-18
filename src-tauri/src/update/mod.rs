@@ -75,6 +75,9 @@ pub const GITHUB_REPO: &str = "AskHuman";
 pub const NPM_PACKAGE: &str = "askhuman";
 /// 期望的 macOS 签名团队标识（替换前校验，保证完整性与钥匙串信任连续）。
 pub const EXPECTED_TEAM_ID: &str = "DMJXDB9H6Q";
+/// Windows release artifacts are currently unsigned. Keep automatic apply disabled until a
+/// separate signing project defines and verifies the complete publisher trust chain.
+pub const WINDOWS_AUTOMATIC_APPLY_ENABLED: bool = false;
 
 /// 安装方式（决定用哪套更新器）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +86,16 @@ pub enum InstallKind {
     Npm,
     /// 直装二进制：`install.sh` / 手动下载（如 `~/.local/bin`）。
     Direct,
+}
+
+/// How the current binary may apply an available update.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UpdateApplyMode {
+    Automatic,
+    #[default]
+    ManualDirect,
+    ManualNpm,
 }
 
 /// 一次检查的对外结果（供 daemon 落盘、前端展示）。
@@ -95,10 +108,16 @@ pub struct UpdateInfo {
     pub latest_version: String,
     /// 最新版更新日志（markdown），可空。
     pub release_notes: String,
-    /// 直装方式为资产/release 页 URL；npm 方式为手动命令提示。展示/兜底用。
+    /// Platform asset or release page URL. This is always a URL, never a shell command.
     pub source_url: String,
     /// 安装方式是否为 npm（前端据此决定按钮文案 / 更新行为）。
     pub is_npm: bool,
+    /// Automatic apply on macOS/Linux; manual Direct/npm paths on unsigned Windows.
+    #[serde(default)]
+    pub apply_mode: UpdateApplyMode,
+    /// Fixed manual npm command. Empty for Direct installations.
+    #[serde(default)]
+    pub manual_command: String,
 }
 
 /// 更新器内部的「远端最新版」查询结果。
@@ -158,6 +177,60 @@ pub fn detect_install_kind() -> InstallKind {
     }
 }
 
+pub fn apply_mode_for(platform: &str, kind: InstallKind) -> UpdateApplyMode {
+    if platform != "windows" || WINDOWS_AUTOMATIC_APPLY_ENABLED {
+        return UpdateApplyMode::Automatic;
+    }
+    match kind {
+        InstallKind::Direct => UpdateApplyMode::ManualDirect,
+        InstallKind::Npm => UpdateApplyMode::ManualNpm,
+    }
+}
+
+pub fn apply_mode() -> UpdateApplyMode {
+    apply_mode_for(std::env::consts::OS, detect_install_kind())
+}
+
+pub fn ensure_automatic_apply_allowed() -> Result<()> {
+    if apply_mode() == UpdateApplyMode::Automatic {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "Windows automatic update is currently unavailable; prepare and install the update manually"
+        )
+    }
+}
+
+pub fn release_url(version: &str) -> String {
+    format!("https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases/tag/v{version}")
+}
+
+#[cfg(windows)]
+pub fn spawn_manual_prepare() -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+
+    if apply_mode() == UpdateApplyMode::Automatic {
+        anyhow::bail!("manual update preparation is unavailable for this build");
+    }
+    let executable = std::env::current_exe()?;
+    let (stdout, stderr) = windows_worker_log_files("manual-update-prepare")?;
+    Command::new(executable)
+        .args(["update", "prepare"])
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn spawn_manual_prepare() -> Result<()> {
+    anyhow::bail!("manual update preparation is only available on Windows")
+}
+
 /// 纯函数：由路径字符串判定安装方式（便于单测）。
 pub fn install_kind_from_path(path: &str) -> InstallKind {
     let s = path.replace('\\', "/");
@@ -193,13 +266,23 @@ async fn check_with_freshness(fresh: bool) -> Result<UpdateInfo> {
     let latest = updater.check_latest(fresh).await?;
     let current = current_version();
     let available = compare_versions(&latest.version, &current) > 0;
+    let apply_mode = apply_mode_for(std::env::consts::OS, kind);
+    let source_url = if apply_mode == UpdateApplyMode::ManualDirect {
+        release_url(&latest.version)
+    } else {
+        latest.source_url
+    };
     Ok(UpdateInfo {
         available,
         current_version: current,
         latest_version: latest.version,
         release_notes: latest.notes,
-        source_url: latest.source_url,
+        source_url,
         is_npm: matches!(kind, InstallKind::Npm),
+        apply_mode,
+        manual_command: matches!(kind, InstallKind::Npm)
+            .then(npm::NpmUpdater::manual_command)
+            .unwrap_or_default(),
     })
 }
 
@@ -212,6 +295,9 @@ pub fn persist_check_result(mut info: UpdateInfo, clear_dismissed: bool) -> Upda
         info.release_notes = stored.release_notes;
     }
     info.available = compare_versions(&info.latest_version, &info.current_version) > 0;
+    if info.apply_mode != UpdateApplyMode::Automatic {
+        info.source_url = release_url(&info.latest_version);
+    }
     info
 }
 
@@ -352,6 +438,53 @@ mod tests {
             ),
             InstallKind::Npm
         );
+    }
+
+    #[test]
+    fn unsigned_windows_uses_manual_apply_modes() {
+        assert_eq!(
+            apply_mode_for("windows", InstallKind::Direct),
+            UpdateApplyMode::ManualDirect
+        );
+        assert_eq!(
+            apply_mode_for("windows", InstallKind::Npm),
+            UpdateApplyMode::ManualNpm
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unsigned_windows_rejects_automatic_apply() {
+        assert!(ensure_automatic_apply_allowed().is_err());
+    }
+
+    #[test]
+    fn unix_platforms_keep_automatic_apply() {
+        for platform in ["macos", "linux"] {
+            assert_eq!(
+                apply_mode_for(platform, InstallKind::Direct),
+                UpdateApplyMode::Automatic
+            );
+            assert_eq!(
+                apply_mode_for(platform, InstallKind::Npm),
+                UpdateApplyMode::Automatic
+            );
+        }
+    }
+
+    #[test]
+    fn missing_apply_mode_deserializes_fail_closed() {
+        let info: UpdateInfo = serde_json::from_value(serde_json::json!({
+            "available": true,
+            "currentVersion": "1.1.0",
+            "latestVersion": "1.2.0",
+            "releaseNotes": "",
+            "sourceUrl": "https://example.invalid/release",
+            "isNpm": false
+        }))
+        .unwrap();
+        assert_eq!(info.apply_mode, UpdateApplyMode::ManualDirect);
+        assert!(info.manual_command.is_empty());
     }
 
     #[test]

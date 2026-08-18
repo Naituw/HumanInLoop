@@ -920,12 +920,17 @@ export interface UpdateInfo {
   releaseNotes: string;
   sourceUrl: string;
   isNpm: boolean;
+  applyMode: UpdateApplyMode;
+  manualCommand: string;
 }
+
+export type UpdateApplyMode = "automatic" | "manualDirect" | "manualNpm";
 
 export interface PushedUpdateState {
   available: boolean;
   latestVersion: string;
   pending: boolean;
+  applyMode: UpdateApplyMode;
 }
 
 /** 调用方 agent 的异步解析结果（方案5/b）：daemon walk 出家族 + pid 后经 `agent-resolved` 后推弹窗。 */

@@ -422,6 +422,8 @@ export const updateGetVersionNotes = (version: string) =>
 
 export const updateApply = () => invoke<void>("update_apply");
 
+export const updatePrepare = () => invoke<void>("update_prepare");
+
 export const updateDismiss = (version: string) =>
   invoke<void>("update_dismiss", { version });
 

@@ -1,5 +1,5 @@
 // 「关于 / 版本自更新」域：版本号、检查更新、应用更新、更新日志渲染。
-import { onBeforeUnmount, ref } from "vue";
+import { nextTick, onBeforeUnmount, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
@@ -10,6 +10,7 @@ import {
   updateCheck,
   updateGetNotes,
   updateGetVersionNotes,
+  updatePrepare,
 } from "../../lib/ipc";
 import {
   renderMarkdown,
@@ -25,7 +26,9 @@ export function useAboutUpdates() {
   const updateInfo = ref<UpdateInfo | null>(null);
   const updateChecking = ref(false);
   const updateApplying = ref(false);
+  const updatePreparing = ref(false);
   const updateDone = ref(false);
+  const manualCommandCopied = ref(false);
   const updateError = ref("");
   const updateProgress = ref(0);
   const notesHtml = ref("");
@@ -79,6 +82,18 @@ export function useAboutUpdates() {
     try {
       const info = await updateCheck(manual);
       updateInfo.value = info;
+      manualCommandCopied.value = false;
+      if (
+        info.available &&
+        new URLSearchParams(window.location.search)
+          .get("tab")
+          ?.endsWith("#manual-update")
+      ) {
+        await nextTick();
+        document
+          .getElementById("manual-update")
+          ?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
       notesHtml.value = "";
       if (info.available) {
         try {
@@ -113,6 +128,44 @@ export function useAboutUpdates() {
       updateError.value = updateErrText(e, "updateFailed");
     } finally {
       updateApplying.value = false;
+    }
+  }
+
+  async function copyManualCommand(): Promise<boolean> {
+    const command = updateInfo.value?.manualCommand.trim();
+    if (!command) return false;
+    try {
+      await navigator.clipboard.writeText(command);
+      manualCommandCopied.value = true;
+      return true;
+    } catch (e) {
+      updateError.value = `${t("settings.about.copyCommandFailed")}: ${String(e)}`;
+      return false;
+    }
+  }
+
+  async function prepareManualUpdate() {
+    const info = updateInfo.value;
+    if (!info || info.applyMode === "automatic" || updatePreparing.value) return;
+    if (!window.confirm(t("settings.about.prepareConfirm"))) return;
+
+    updatePreparing.value = true;
+    updateError.value = "";
+    try {
+      // Preserve the next step before the helper closes the GUI Host. npm users get the exact
+      // command on their clipboard; Direct users get the release page in their browser.
+      if (info.applyMode === "manualNpm") {
+        if (!(await copyManualCommand())) {
+          updatePreparing.value = false;
+          return;
+        }
+      } else {
+        await openPath(info.sourceUrl || releasesUrl);
+      }
+      await updatePrepare();
+    } catch (e) {
+      updateError.value = updateErrText(e, "prepareFailed");
+      updatePreparing.value = false;
     }
   }
 
@@ -165,7 +218,9 @@ export function useAboutUpdates() {
     updateInfo,
     updateChecking,
     updateApplying,
+    updatePreparing,
     updateDone,
+    manualCommandCopied,
     updateError,
     updateProgress,
     notesHtml,
@@ -176,6 +231,8 @@ export function useAboutUpdates() {
     toggleCurrentNotes,
     checkUpdate,
     applyUpdate,
+    copyManualCommand,
+    prepareManualUpdate,
     openReleases,
     onNotesClick,
     restartSettingsNow,
