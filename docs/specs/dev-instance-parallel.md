@@ -32,8 +32,8 @@
 | D6 | `.askhuman-dev` 与 git | **整目录本机私有、gitignore**；不提交 bin/home/标记 |
 | D7 | 多 WorkTree 模型 | **主工作树 + N 个子 WorkTree，每个可独立 enable**；每套实例数据与 bin 都落在**该工作树根**下，互不共享、互不继承 |
 | D8 | Agent 流程 | enable 之后，既有「install → AskHuman 提问」提示词**不改** |
-| D9 | 安装逃生口 | 已 enable 树内更新生产 bin：`./scripts/install.sh --global` |
-| D10 | `dev disable` | 默认只去掉 `enabled` 并尽量 stop 本实例 daemon，**保留** `bin/`+`home/`；`--purge` 才删除整个 `.askhuman-dev` |
+| D9 | 安装逃生口 | 已 enable 树内更新生产 bin：Unix `./scripts/install.sh --global`；Windows `.\scripts\install-windows.cmd -Global` |
+| D10 | `dev disable` | 默认只去掉 `enabled`，并停止本实例 daemon/GUI Host；**保留** `bin/`+`home/`。`--purge` 还会在有界优雅退出后按精确实例 EXE 路径收口残留 GUI 子进程，再删除整个 `.askhuman-dev` |
 | D11 | 渠道预设存放 | 机器级 `~/.askhuman/dev-presets/`（主 daemon **不**加载）；每预设一文件 + `index.json` 租约 |
 | D12 | 预设绑定 | `dev enable --preset <name>…`：占**独占租约**并将渠道片段**物化**进该树 `home/config.json` |
 | D13 | 租约冲突 | 已被其它 worktree 占用 → enable **失败**并指明 holder；`--force` **抢租约** + stderr 强警告（一期不自动 stop 对方 daemon / 不改对方 home） |
@@ -47,15 +47,15 @@
 
 ```
 主环境（始终存在，与是否 enable 无关）
-  bin:  ~/.local/bin/AskHuman
+  bin:  ~/.local/bin/AskHuman（Windows: %LOCALAPPDATA%\Programs\AskHuman\AskHuman.exe）
   data: ~/.askhuman/          ← 生产 daemon / 生产 bot
 
 主工作树  ~/src/HumanInLoop          （可选 enable）
-  .askhuman-dev/bin/AskHuman
+  .askhuman-dev/bin/AskHuman[.exe]
   .askhuman-dev/home/…               ← 实例 A
 
 子 WorkTree  ~/src/HumanInLoop-feat-x （可选 enable）
-  .askhuman-dev/bin/AskHuman
+  .askhuman-dev/bin/AskHuman[.exe]
   .askhuman-dev/home/…               ← 实例 B（与 A 完全独立）
 
 子 WorkTree  ~/src/HumanInLoop-feat-y
@@ -78,17 +78,17 @@
   .askhuman-dev/           # gitignore
     enabled                # 标记文件；存在即视为已 enable
     bin/
-      AskHuman             # 本实例二进制（install 写入）
+      AskHuman[.exe]       # 本实例二进制（install 写入）
     home/                  # 本实例 ASKHUMAN_HOME（= config_dir 根）
       config.json          # 默认全渠道关闭
-      daemon.sock
+      daemon.sock          # Windows 使用按实例 home 派生的 named pipe
       daemon.lock
       daemon.json
       daemon.log
       history.jsonl …
       agents.json
       state/
-      gui-host.sock / lock
+      gui-host.sock / lock # Windows GUI Host 同样使用独立 named pipe + lock
       binhash.json
       …
 ```
@@ -118,12 +118,18 @@
    - 若已是该 bin → 只保证 `ASKHUMAN_HOME` 正确后继续。
 3. 未找到标记 → 主环境路径，行为与今天一致。
 
-### 6.2 `install.sh`
+### 6.2 安装脚本
+
+Unix 使用 `./scripts/install.sh`，Windows 使用 `.\scripts\install-windows.cmd`（底层为 Windows
+PowerShell 5.1 兼容脚本）。两者共享以下语义：
 
 1. 从 cwd 向上找 `.askhuman-dev/enabled`。
-2. 命中 → `INSTALL_DIR=<root>/.askhuman-dev/bin`，**不写** `~/.local/bin`；确保 `home/` 存在；若无 `config.json` 则写入默认 popup-only 配置。
-3. 未命中 → 现状：安装到 `INSTALL_DIR` 默认 `~/.local/bin`。
-4. 逃生口：`./scripts/install.sh --global` **强制**安装到默认全局目录，即使 cwd 在已 enable 树内（用于从 worktree 内更新生产 bin）。
+2. 命中 → 安装到 `<root>/.askhuman-dev/bin`，**不写**生产 bin/PATH/WindowsApps launcher；确保 `home/`
+   存在，并设置实例 home/no-keychain 语义。
+3. 未命中 → 安装到平台默认生产目录（Unix `~/.local/bin`；Windows
+   `%LOCALAPPDATA%\Programs\AskHuman`）。显式 `INSTALL_DIR` 始终优先。
+4. 逃生口：Unix `./scripts/install.sh --global`；Windows `.\scripts\install-windows.cmd -Global`。
+   即使 cwd 在已 enable 树内，也强制走生产安装事务。
 
 ### 6.3 `dev` 子命令（产品化一次配置）
 
@@ -132,8 +138,8 @@
 | `AskHuman dev enable` | 在当前 Git 工作树根创建 `.askhuman-dev/{enabled,bin,home}`；seed popup-only `config.json`（若尚无）；打印「已 enable…」 |
 | `AskHuman dev enable --preset <name>…` | 同上，并按 §7.2 占用预设独占租约、将渠道物化进本树 home；冲突见 D13 |
 | `AskHuman dev enable … --force` | 抢占已被其它树占用的 preset 租约（警告；不自动动对方进程/home） |
-| `AskHuman dev disable` | 停止本实例 daemon（若在跑）；移除 `enabled`；**释放**本树持有的 preset 租约；默认保留 `bin/`+`home/` |
-| `AskHuman dev disable --purge` | 在 disable 基础上删除整个 `.askhuman-dev/` |
+| `AskHuman dev disable` | 停止本实例 daemon 与 GUI Host（若在跑）；移除 `enabled`；**释放**本树持有的 preset 租约；默认保留 `bin/`+`home/` |
+| `AskHuman dev disable --purge` | 在 disable 基础上删除整个 `.askhuman-dev/`；Windows 会在优雅退出超时后仅终止可执行路径精确等于本实例 bin 的残留 GUI 子进程，并等待文件锁释放 |
 | `AskHuman dev status` | 是否 enable、root、home、bin、daemon、渠道摘要、本树占用的 preset 名 |
 | `AskHuman dev preset save/list/show/rm/release` | 见 §7.2 |
 
@@ -214,7 +220,8 @@ AskHuman dev enable --preset feishu-test
 | graceful drain | **实例内**仍生效（本树 install 换 bin → 本树 daemon drain）；**跨实例不互等** |
 | 空闲退出 | 每实例独立 |
 | macOS launchd | 每实例按 `ASKHUMAN_HOME` 派生独立 daemon label；与主实例、其它工作树互不 bootout；登出时随当前 GUI domain 退出 |
-| GUI host | 每实例独立 sock/lock（避免与主 tray 抢）；dev 下菜单栏是否常驻可后续收紧，一期至少路径隔离 |
+| Windows process spawn | detached daemon 禁止继承调用者 handles；PowerShell/CI 捕获 `daemon start` 输出可正常收到 EOF |
+| GUI host | 每实例独立 socket/named-pipe 与 lock（避免与主 tray 抢）；disable 同时关闭本实例 host |
 | Agent lifecycle hooks | 用户级全局 hook 仍可能触发；事件打到**实际 exec 到的**那个 daemon（cwd 正确则进实例）。不在一期改 hook 安装布局 |
 | 自更新 | 仅主环境产品路径关心；dev bin 不走应用内 self-update 到生产目录 |
 
@@ -234,7 +241,8 @@ AskHuman dev enable --preset feishu-test
 4. A 的 config 打开测试飞书、B 保持 popup-only：互不影响；A/B 均不读取主钥匙串生产密钥。
 5. 在 A 内不设任何特殊 env，仅 `AskHuman "hi"`（PATH 仍指向旧主 bin）→ 自动 re-exec 到 A 的 bin 并弹出。
 6. enable 后尚未 install：`AskHuman` 明确报错，不静默走主 bin。
-7. `install.sh --global` 可从 enable 树内更新 `~/.local/bin`。
+7. Unix `install.sh --global` / Windows `install-windows.cmd -Global` 可从 enable 树内更新生产 bin；默认
+   Dev 安装不改变生产 binary/config/PATH/launcher。
 8. `.askhuman-dev/` 被 gitignore，不进入版本库。
 9. `dev preset save x --from-instance` 后，新树 `dev enable --preset x` 物化渠道且无需重填密钥；第二棵树再 `--preset x` 失败；`--force` 可抢；disable 释放后第二棵可占用；僵死 lease 自动回收。
 10. 已 enable、**尚未** `install.sh` 时打开 `--settings`（或改实例渠道）：只读写 `<wt>/.askhuman-dev/home/config.json`；`~/.askhuman/config.json` 与主钥匙串内容不变。

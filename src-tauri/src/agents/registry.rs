@@ -63,6 +63,10 @@ pub struct AgentRecord {
     /// Direct parent session when this record was created by AskHuman's native Fork flow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from_session_id: Option<String>,
+    /// Inherited UUID for a task created through AskHuman's terminal launch bridge. Windows uses
+    /// it as the only stable terminal-focus identity; arbitrary lifecycle sessions leave it empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_id: Option<String>,
     pub started_at: u64,
     pub last_activity: u64,
     /// Completed active intervals for this session, excluding time spent in the Idle state.
@@ -384,6 +388,7 @@ impl AgentRegistry {
                         title: None,
                         cwd,
                         forked_from_session_id: None,
+                        launch_id: None,
                         started_at: now,
                         last_activity: now,
                         active_elapsed_secs: 0,
@@ -587,6 +592,7 @@ impl AgentRegistry {
                 title: None,
                 cwd,
                 forked_from_session_id: None,
+                launch_id: None,
                 started_at: now,
                 last_activity: now,
                 active_elapsed_secs: 0,
@@ -782,6 +788,48 @@ impl AgentRegistry {
         true
     }
 
+    /// Bind an inherited AskHuman launch UUID to a lifecycle session. Invalid values are ignored;
+    /// callers may invoke this on every hook event so daemon restarts can recover the association.
+    pub fn set_launch_id(&self, session_id: &str, launch_id: &str) -> bool {
+        let Ok(id) = uuid::Uuid::parse_str(launch_id) else {
+            return false;
+        };
+        let id = id.hyphenated().to_string();
+        let mut inner = self.inner.lock().unwrap();
+        let Inner { active, ended, .. } = &mut *inner;
+        let Some(record) = active
+            .iter_mut()
+            .chain(ended.iter_mut())
+            .find(|record| record.session_id == session_id)
+        else {
+            return false;
+        };
+        if record.launch_id.is_some() {
+            // A session keeps the identity inherited at launch. A later hook must not retarget it.
+            return false;
+        }
+        record.launch_id = Some(id);
+        #[cfg(target_os = "windows")]
+        {
+            record.terminal =
+                Some(crate::integrations::terminal_focus::windows_terminal_kind().to_string());
+        }
+        true
+    }
+
+    /// Resolve only daemon-registered focus fields for a live session.
+    pub fn focus_identity(
+        &self,
+        session_id: &str,
+    ) -> Option<(AgentKind, Option<u32>, Option<String>)> {
+        let inner = self.inner.lock().unwrap();
+        let record = inner
+            .active
+            .iter()
+            .find(|record| record.session_id == session_id)?;
+        Some((record.kind, record.pid, record.launch_id.clone()))
+    }
+
     /// 权限授权管理面板的分组增强（spec codex-permission-remember §6.3）：按 session_id 在
     /// 活动与已结束记录中查标题 / 项目名（标题惰性解析并缓存）。不在册返回 None，面板回退
     /// 显示缩短的 session id。
@@ -862,12 +910,11 @@ impl AgentRegistry {
                 }
                 .to_string(),
                 pending_interject: false,
-                // 与前端 `lib/terminals.ts` 的支持清单一致（Terminal.app / iTerm2）。
-                focusable: r.pid.is_some()
-                    && matches!(
-                        r.terminal.as_deref(),
-                        Some("apple-terminal") | Some("iterm2")
-                    ),
+                focusable: match r.terminal.as_deref() {
+                    Some("apple-terminal") | Some("iterm2") => r.pid.is_some(),
+                    Some("windows-terminal") => r.launch_id.is_some(),
+                    _ => false,
+                },
                 forkable: r
                     .cwd
                     .as_deref()
@@ -876,6 +923,7 @@ impl AgentRegistry {
                     && crate::agents::transcript_full::transcript_mtime(r.kind, &r.session_id)
                         .is_some(),
                 pid: r.pid,
+                launch_id: r.launch_id.clone(),
             })
             .collect()
     }
@@ -1511,6 +1559,7 @@ mod tests {
             title: None,
             cwd: None,
             forked_from_session_id: None,
+            launch_id: None,
             started_at: started,
             last_activity: ended_at,
             active_elapsed_secs: elapsed,
@@ -1615,6 +1664,30 @@ mod tests {
             snapshot[0]["forkedFromSessionId"],
             serde_json::json!("parent-session")
         );
+    }
+
+    #[test]
+    fn launch_identity_is_validated_stable_and_exposed_for_focus() {
+        let r = reg();
+        r.apply_event(
+            AgentKind::Codex,
+            LifecycleEvent::TurnStart,
+            "launched-session",
+            Some(42),
+            None,
+            1,
+        );
+        assert!(!r.set_launch_id("launched-session", "not-a-uuid"));
+        let launch_id = "123e4567-e89b-12d3-a456-426614174000";
+        assert!(r.set_launch_id("launched-session", launch_id));
+        assert!(!r.set_launch_id("launched-session", launch_id));
+        assert!(!r.set_launch_id("launched-session", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"));
+        assert_eq!(
+            r.focus_identity("launched-session"),
+            Some((AgentKind::Codex, Some(42), Some(launch_id.to_string())))
+        );
+        let snapshot = r.snapshot();
+        assert_eq!(snapshot[0]["launchId"], serde_json::json!(launch_id));
     }
 
     #[test]

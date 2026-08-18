@@ -214,7 +214,8 @@ pub fn run_stdio() -> Option<String> {
     let checker = CodexCliChecker {
         codex_bin: PathBuf::from(&input.codex_bin),
     };
-    let output = analyze(&input, &checker, Path::new("/etc/codex"));
+    let system_config = codex_system_config_dir();
+    let output = analyze(&input, &checker, &system_config);
     serde_json::to_string(&output).ok()
 }
 
@@ -263,8 +264,15 @@ pub fn analyze(
         return ShellWorkerOutput::disabled(&reason);
     }
 
-    let argv = vec!["bash".to_string(), "-lc".to_string(), input.script.clone()];
-    let Some(segments) = crate::shell_safety::parse_shell_lc_plain_commands(&argv) else {
+    #[cfg(windows)]
+    let segments = crate::shell_safety::parse_powershell_plain_commands(&input.script);
+    #[cfg(not(windows))]
+    let segments = crate::shell_safety::parse_shell_lc_plain_commands(&[
+        "bash".to_string(),
+        "-lc".to_string(),
+        input.script.clone(),
+    ]);
+    let Some(segments) = segments else {
         return ShellWorkerOutput::disabled("script is not a plain word-only sequence");
     };
     if segments.is_empty() || segments.len() > MAX_SEGMENTS {
@@ -340,9 +348,7 @@ pub fn analyze(
             .iter()
             .all(|eval| eval.policy_decisions.iter().any(|d| d == "allow"));
 
-    let dangerous_any = segments
-        .iter()
-        .any(|segment| crate::shell_safety::is_dangerous_command(segment));
+    let dangerous_any = segments.iter().any(|segment| segment_is_dangerous(segment));
 
     let any_policy_match = evals.iter().any(|eval| !eval.policy_decisions.is_empty());
     let policy_prompt = evals
@@ -409,9 +415,7 @@ pub fn analyze(
         amendment_candidates.push(base.clone());
         for len in (1..base.len()).rev() {
             let candidate = &base[..len];
-            if crate::shell_safety::is_banned_prefix(candidate)
-                || crate::shell_safety::is_dangerous_command(candidate)
-            {
+            if crate::shell_safety::is_banned_prefix(candidate) || segment_is_dangerous(candidate) {
                 continue;
             }
             let covers_all = segments
@@ -442,8 +446,8 @@ pub fn analyze(
 
 /// Replicates `render_decision_for_unmatched_command` (Unix subset, plain parsing only).
 fn fallback_decision(segment: &[String], input: &ShellWorkerInput) -> &'static str {
-    let dangerous = crate::shell_safety::is_dangerous_command(segment);
-    let known_safe = crate::shell_safety::is_known_safe_command(segment);
+    let dangerous = segment_is_dangerous(segment);
+    let known_safe = segment_is_known_safe(segment);
 
     if known_safe && input.approval_policy == "untrusted" {
         return "allow";
@@ -471,6 +475,28 @@ fn fallback_decision(segment: &[String], input: &ShellWorkerInput) -> &'static s
         },
         // Unknown policy value from a newer Codex: be conservative.
         _ => "prompt",
+    }
+}
+
+fn segment_is_dangerous(segment: &[String]) -> bool {
+    #[cfg(windows)]
+    {
+        crate::shell_safety::is_dangerous_powershell_words(segment)
+    }
+    #[cfg(not(windows))]
+    {
+        crate::shell_safety::is_dangerous_command(segment)
+    }
+}
+
+fn segment_is_known_safe(segment: &[String]) -> bool {
+    #[cfg(windows)]
+    {
+        crate::shell_safety::is_safe_powershell_words(segment)
+    }
+    #[cfg(not(windows))]
+    {
+        crate::shell_safety::is_known_safe_command(segment)
     }
 }
 
@@ -592,24 +618,70 @@ fn parent_process_exe() -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{ppid}/exe")).ok()
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn parent_process_exe() -> Option<PathBuf> {
+    let mut pid = std::process::id();
+    for _ in 0..12 {
+        let identity = crate::agents::detect::inspect_process(pid)?;
+        pid = identity.parent_pid;
+        let executable = identity.executable.map(PathBuf::from);
+        if executable.as_ref().is_some_and(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.to_ascii_lowercase().contains("codex"))
+        }) {
+            return executable;
+        }
+        if pid == 0 {
+            break;
+        }
+    }
+    None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn parent_process_exe() -> Option<PathBuf> {
     None
 }
 
 fn which_codex() -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(path_var) = std::env::var("PATH") {
-        for dir in path_var.split(':') {
-            if !dir.is_empty() {
-                candidates.push(Path::new(dir).join("codex"));
-            }
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            #[cfg(windows)]
+            candidates.push(dir.join("codex.exe"));
+            candidates.push(dir.join("codex"));
         }
     }
-    // Daemon contexts (launchd) may run with a minimal PATH.
+    // Daemon contexts (launchd/systemd) may run with a minimal PATH.
+    #[cfg(target_os = "macos")]
     candidates.push(PathBuf::from("/opt/homebrew/bin/codex"));
+    #[cfg(unix)]
     candidates.push(PathBuf::from("/usr/local/bin/codex"));
+    #[cfg(windows)]
+    if let Some(app_data) = std::env::var_os("APPDATA") {
+        let npm = PathBuf::from(app_data).join("npm/node_modules/@openai/codex/node_modules");
+        candidates.push(
+            npm.join("@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/codex/codex.exe"),
+        );
+        candidates.push(
+            npm.join("@openai/codex-win32-arm64/vendor/aarch64-pc-windows-msvc/codex/codex.exe"),
+        );
+    }
     candidates.into_iter().find(|path| is_executable(path))
+}
+
+#[cfg(windows)]
+fn codex_system_config_dir() -> PathBuf {
+    std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+        .join("OpenAI/Codex")
+}
+
+#[cfg(not(windows))]
+fn codex_system_config_dir() -> PathBuf {
+    PathBuf::from("/etc/codex")
 }
 
 #[cfg(unix)]
@@ -1223,8 +1295,8 @@ mod tests {
         std::fs::write(
             home.path().join("config.toml"),
             format!(
-                "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
-                root.to_string_lossy()
+                "[projects.{}]\ntrust_level = \"trusted\"\n",
+                toml_edit::Value::from(root.to_string_lossy().as_ref())
             ),
         )
         .unwrap();

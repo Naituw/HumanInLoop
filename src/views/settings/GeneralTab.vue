@@ -4,6 +4,7 @@ import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { openTestPopup } from "../../lib/ipc";
 import { formatShortcut } from "../../lib/shortcut";
+import { primaryModifierLabel, primaryShortcutLabel } from "../../lib/platform";
 import type { UiLanguage } from "../../lib/types";
 import { useSettingsContext } from "./context";
 
@@ -11,7 +12,6 @@ const { t } = useI18n();
 const ctx = useSettingsContext();
 const {
   isMac,
-  isWindows,
   persist,
   changeTheme,
   changeLanguage,
@@ -40,7 +40,9 @@ const {
   updateInfo,
   updateChecking,
   updateApplying,
+  updatePreparing,
   updateDone,
+  manualCommandCopied,
   updateError,
   updateProgress,
   notesHtml,
@@ -51,6 +53,8 @@ const {
   toggleCurrentNotes,
   checkUpdate,
   applyUpdate,
+  copyManualCommand,
+  prepareManualUpdate,
   openReleases,
   onNotesClick,
   restartSettingsNow,
@@ -128,7 +132,7 @@ const config = computed(() => ctx.config.value!);
           :class="{ active: (config.general.popupSubmitKey ?? 'cmdEnter') === 'cmdEnter' }"
           @click="changeSubmitKey('cmdEnter')"
         >
-          {{ t("settings.popupBehavior.submitKeyCmdEnter") }}
+          {{ t("settings.popupBehavior.submitKeyCmdEnter", { shortcut: primaryShortcutLabel("enter") }) }}
         </button>
         <button
           type="button"
@@ -143,7 +147,7 @@ const config = computed(() => ctx.config.value!);
       {{
         (config.general.popupSubmitKey ?? "cmdEnter") === "enter"
           ? t("settings.popupBehavior.submitKeyEnterHint")
-          : t("settings.popupBehavior.submitKeyCmdEnterHint")
+          : t("settings.popupBehavior.submitKeyCmdEnterHint", { shortcut: primaryShortcutLabel("enter") })
       }}
     </p>
     <hr class="divider" />
@@ -279,8 +283,8 @@ const config = computed(() => ctx.config.value!);
     </p>
   </div>
 
-  <!-- 菜单栏图标（仅 macOS/Linux 桌面；Windows 不支持） -->
-  <div v-if="!isWindows" class="card">
+  <!-- Menu bar / system tray icon. -->
+  <div class="card">
     <p class="card-title">{{ t("settings.menuBar.title") }}</p>
     <div class="row">
       <span class="label">{{ t("settings.menuBar.icon") }}</span>
@@ -411,7 +415,7 @@ const config = computed(() => ctx.config.value!);
       class="card-desc"
       style="margin-top: 6px"
     >
-      {{ t("settings.speech.recordHint") }}
+      {{ t("settings.speech.recordHint", { modifier: primaryModifierLabel() }) }}
     </p>
   </div>
 
@@ -476,7 +480,7 @@ const config = computed(() => ctx.config.value!);
 
     <template v-if="updateInfo && updateInfo.available">
       <hr class="divider" />
-      <div class="row">
+      <div id="manual-update" class="row">
         <span class="label">{{
           t("settings.about.updateAvailable", {
             version: updateInfo.latestVersion,
@@ -484,7 +488,7 @@ const config = computed(() => ctx.config.value!);
         }}</span>
         <span class="spacer"></span>
         <button
-          v-if="!updateDone"
+          v-if="updateInfo.applyMode === 'automatic' && !updateDone"
           class="btn btn-primary"
           type="button"
           :disabled="updateApplying"
@@ -499,21 +503,54 @@ const config = computed(() => ctx.config.value!);
           }}
         </button>
         <button
-          v-else
+          v-else-if="updateInfo.applyMode === 'automatic'"
           class="btn btn-primary"
           type="button"
           @click="restartSettingsNow"
         >
           {{ t("settings.about.restartSettings") }}
         </button>
+        <button
+          v-else
+          class="btn btn-primary"
+          type="button"
+          :disabled="updatePreparing"
+          @click="prepareManualUpdate"
+        >
+          {{
+            updatePreparing
+              ? t("settings.about.preparingManual")
+              : t("settings.about.prepareManual")
+          }}
+        </button>
       </div>
-      <p class="card-desc">
+      <p v-if="updateInfo.applyMode === 'automatic'" class="card-desc">
         {{
           updateDone
             ? t("settings.about.updatedRestartHint")
             : t("settings.about.applyAfterAnswer")
         }}
       </p>
+      <template v-else>
+        <p class="card-desc">{{ t("settings.about.manualUnavailable") }}</p>
+        <div v-if="updateInfo.applyMode === 'manualNpm'" class="row">
+          <code class="value">{{ updateInfo.manualCommand }}</code>
+          <span class="spacer"></span>
+          <button class="btn" type="button" @click="copyManualCommand">
+            {{
+              manualCommandCopied
+                ? t("settings.about.commandCopied")
+                : t("settings.about.copyCommand")
+            }}
+          </button>
+        </div>
+        <p v-else class="card-desc">
+          <a class="link" href="#" @click.prevent="openReleases">{{
+            t("settings.about.openReleasePage")
+          }}</a>
+        </p>
+        <p class="card-desc">{{ t("settings.about.prepareManualHint") }}</p>
+      </template>
 
       <template v-if="notesHtml">
         <hr class="divider" />
@@ -537,8 +574,8 @@ const config = computed(() => ctx.config.value!);
     </p>
   </div>
 
-  <!-- 隐蔽开关：实验性功能（Windows 不显示） -->
-  <div v-if="!isWindows" class="card experimental-toggle">
+  <!-- Hidden switch for experimental features. -->
+  <div class="card experimental-toggle">
     <div class="row">
       <div class="col">
         <span class="label">{{ t("settings.experimental.enableLabel") }}</span>

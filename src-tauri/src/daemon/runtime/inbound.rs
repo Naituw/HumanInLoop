@@ -1,4 +1,4 @@
-//! IM 入站命令层：监听、消息提取、共享命令（msg/new/export/stage 等）与回复。
+//! IM inbound listeners, message extraction, shared commands, and replies.
 
 use super::*;
 
@@ -650,8 +650,10 @@ pub(super) async fn start_new_task_flow(
     }
     if !crate::integrations::agent_launch::terminal_available() {
         let text = match lang {
-            Lang::Zh => "当前版本仅支持 macOS 系统终端 Terminal.app。",
-            Lang::En => "This version currently requires macOS Terminal.app.",
+            Lang::Zh => "没有找到受支持的系统终端（macOS Terminal.app 或 Windows Terminal）。",
+            Lang::En => {
+                "No supported system terminal was found (macOS Terminal.app or Windows Terminal)."
+            }
         };
         let _ = reply_channel_text(channel_id, config, text).await;
         return;
@@ -1424,8 +1426,8 @@ async fn start_task_input_form(
         };
         let text = match launch {
             Ok(_) => match lang {
-                Lang::Zh => "已在电脑上打开新的 Terminal.app 窗口并启动任务。",
-                Lang::En => "Opened a new Terminal.app window and started the task.",
+                Lang::Zh => "已在电脑上打开新的系统终端窗口并启动任务。",
+                Lang::En => "Opened a new system terminal window and started the task.",
             }
             .to_string(),
             Err(error) => format!("Failed to launch task: {error:#}"),

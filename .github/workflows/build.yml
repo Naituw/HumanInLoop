@@ -63,7 +63,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable
@@ -78,20 +78,53 @@ jobs:
 
       - run: pnpm build
 
-      - name: vitest (Linux only)
-        if: startsWith(matrix.os, 'ubuntu')
+      - name: frontend and script tests
         run: pnpm test
 
-      # 门禁：警告即失败（存量已清零）；fmt / clippy 只需跑一个平台。
-      - name: rustfmt + clippy (Linux only)
-        if: startsWith(matrix.os, 'ubuntu')
+      - name: Windows maintenance scripts (PowerShell 5.1)
+        if: startsWith(matrix.os, 'windows')
+        shell: powershell
         run: |
-          cargo fmt --manifest-path src-tauri/Cargo.toml --check
-          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          $scripts = @(
+            "scripts/install-windows.ps1",
+            "scripts/uninstall-windows.ps1",
+            "scripts/verify-windows-signature.ps1",
+            "scripts/windows-user-path.ps1",
+            "scripts/test-windows-user-path.ps1"
+          )
+          foreach ($script in $scripts) {
+            [void][scriptblock]::Create([IO.File]::ReadAllText($script))
+          }
+          ./scripts/test-windows-user-path.ps1
 
-      # macOS 也跑测试：objc2 / QuickLook / launchd 等平台代码只在这里能被覆盖。
-      - name: cargo test (Linux + macOS arm64)
-        if: startsWith(matrix.os, 'ubuntu') || matrix.target == 'aarch64-apple-darwin'
+      - name: Windows maintenance scripts (PowerShell 7)
+        if: startsWith(matrix.os, 'windows')
+        shell: pwsh
+        run: |
+          $scripts = @(
+            "scripts/install-windows.ps1",
+            "scripts/uninstall-windows.ps1",
+            "scripts/verify-windows-signature.ps1",
+            "scripts/windows-user-path.ps1",
+            "scripts/test-windows-user-path.ps1"
+          )
+          foreach ($script in $scripts) {
+            [void][scriptblock]::Create([IO.File]::ReadAllText($script))
+          }
+          ./scripts/test-windows-user-path.ps1
+
+      - name: rustfmt (Linux only)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      # Linux 与 Windows 各自编译不同的平台代码，两边都必须保持 warning-free。
+      - name: clippy (Linux + Windows)
+        if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'windows')
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      # 原生平台测试覆盖各自 cfg；macOS x64 是交叉构建，不重复运行 host tests。
+      - name: cargo test (Linux + Windows + macOS arm64)
+        if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'windows') || matrix.target == 'aarch64-apple-darwin'
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: cargo build (release)

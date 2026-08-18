@@ -43,10 +43,10 @@
 | D9 | 区块 upsert/remove | 安装：区块存在→替换其内部、不存在→追加到文件末尾（前置一个空行）；卸载：删整段（含两行标记）并清理多余空行；**两者都不动用户其它内容** |
 | D10 | 「已安装」判定 | Cursor=`askhuman.mdc` 存在且含 `managed-file` 头标记；Claude=`CLAUDE.md` 含 `AskHuman:begin` 区块；Codex=`AGENTS.md` 含 `AskHuman:begin` 区块 |
 | D11 | Cursor 作用范围提示 | UI 给小字：Cursor 全局规则仅当**项目位于 home 目录之下**时生效；其它位置请到 Cursor Settings 手动配置 |
-| D12 | Cursor Hook 子项 | 保留现有 Hook 逻辑不变（安装/卸载 + 打开 hooks.json，负责 24h 超时），归入 Cursor 分组 |
-| D13 | Claude/Codex Hook 子项 | 暂为占位「即将支持」（未来再补各自的超时方案） |
+| D12 | Cursor Hook 子项 | 保留安装/卸载 + 打开 hooks.json，负责 24h 超时；Unix 生成 `.sh`，Windows 生成 PowerShell 5 兼容 `.ps1`。 |
+| D13 | Claude/Codex Hook 子项 | Claude timeout hook 已实现，产物同样按平台生成 `.sh` / `.ps1`；Codex 使用原生 hooks 与 AskHuman 协议，不需要独立 timeout 脚本。 |
 | D14 | 布局 | 三组配置卡片**紧凑**，压缩留白 |
-| D15 | 跨平台 | Cursor/Claude/Codex 的 **Rules 文件读写为跨平台**（Windows 用 `%USERPROFILE%`）；「定位」复用现有 reveal 思路（mac `open -R` / linux 打开所在目录 / win `explorer /select`），「打开」用系统默认程序。**Cursor Hook 维持现状仅 unix** |
+| D15 | 跨平台 | Cursor/Claude/Codex 的 **Rules 与 Hook 文件读写为跨平台**（Windows 用 `%USERPROFILE%`）；「定位」复用现有 reveal 思路（mac `open -R` / linux 打开所在目录 / win `explorer /select`），「打开」用系统默认程序。Windows Hook 命令使用原生绝对路径与 PowerShell 5 兼容脚本。 |
 
 ## 4. 约束与既有规则（不可破坏）
 

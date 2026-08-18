@@ -173,11 +173,12 @@ pub fn agent_launch_dir() -> PathBuf {
 
 /// GUI 宿主进程的 IPC socket `~/.askhuman/gui-host.sock`（与 daemon socket 解耦，
 /// 使 daemon 未运行时也能打开设置/历史窗口，spec D13）。
+#[cfg(unix)]
 pub fn gui_host_sock() -> PathBuf {
     config_dir().join("gui-host.sock")
 }
 
-/// GUI 宿主进程的单实例锁 `~/.askhuman/gui-host.lock`（flock，保证全局唯一宿主）。
+/// GUI 宿主进程的跨平台单实例锁 `~/.askhuman/gui-host.lock`。
 pub fn gui_host_lock() -> PathBuf {
     config_dir().join("gui-host.lock")
 }
@@ -192,9 +193,13 @@ pub fn cursor_hooks_json() -> PathBuf {
     cursor_dir().join("hooks.json")
 }
 
-/// `~/.cursor/hooks/askhuman-timeout.sh`。
+/// AskHuman-owned Cursor timeout hook (`.sh` on Unix, `.ps1` on Windows).
 pub fn cursor_hook_script() -> PathBuf {
-    cursor_dir().join("hooks").join("askhuman-timeout.sh")
+    cursor_dir().join("hooks").join(if cfg!(windows) {
+        "askhuman-timeout.ps1"
+    } else {
+        "askhuman-timeout.sh"
+    })
 }
 
 /// 旧版 hook 脚本 `~/.cursor/hooks/humaninloop-timeout.sh`（仅用于向后兼容清理）。
@@ -238,9 +243,13 @@ pub fn claude_json() -> PathBuf {
     home().join(".claude.json")
 }
 
-/// Claude Code hook 脚本 `~/.claude/hooks/askhuman-timeout.sh`。
+/// AskHuman-owned Claude Code timeout hook (`.sh` on Unix, `.ps1` on Windows).
 pub fn claude_hook_script() -> PathBuf {
-    claude_dir().join("hooks").join("askhuman-timeout.sh")
+    claude_dir().join("hooks").join(if cfg!(windows) {
+        "askhuman-timeout.ps1"
+    } else {
+        "askhuman-timeout.sh"
+    })
 }
 
 /// Codex 配置目录 `~/.codex`。
@@ -308,9 +317,9 @@ mod tests {
 
     #[test]
     fn config_dir_respects_askhuman_home() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let prev = std::env::var_os(crate::dev_instance::ASKHUMAN_HOME_ENV);
-        let custom = PathBuf::from("/tmp/askhuman-home-test-xyz");
+        let custom = std::env::temp_dir().join("askhuman-home-test-xyz");
         std::env::set_var(crate::dev_instance::ASKHUMAN_HOME_ENV, &custom);
         assert_eq!(config_dir(), custom);
         match prev {
@@ -321,11 +330,11 @@ mod tests {
 
     #[test]
     fn dev_presets_dir_not_under_askhuman_home() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let prev = std::env::var_os(crate::dev_instance::ASKHUMAN_HOME_ENV);
         std::env::set_var(
             crate::dev_instance::ASKHUMAN_HOME_ENV,
-            "/tmp/instance-home-only",
+            std::env::temp_dir().join("instance-home-only"),
         );
         assert_eq!(
             dev_presets_dir(),

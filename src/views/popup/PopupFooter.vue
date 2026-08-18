@@ -1,9 +1,12 @@
 <script setup lang="ts">
 // 页脚区（多根组件）：R6 一次性 IM 引导条 + 三种底部按钮排布（多题导航 / 单题发送 / 确认提交）。
 import { useI18n } from "vue-i18n";
+import { primaryShortcutLabel } from "../../lib/platform";
 import { usePopupContext } from "./context";
 
 const { t } = useI18n();
+const cancelShortcut = primaryShortcutLabel("w");
+const previousShortcut = primaryShortcutLabel("[");
 const {
   isConfirm,
   isMulti,
@@ -57,7 +60,7 @@ const {
   <!-- 多问题底部：取消(左) + 上一个/下一个/提交(右) -->
   <div v-if="!isConfirm && isMulti" class="footer" data-tauri-drag-region>
     <button class="btn" type="button" :disabled="submitting" @click="requestCancel">
-      {{ t("common.cancel") }} <kbd class="sc">⌘W</kbd>
+      {{ t("common.cancel") }} <kbd class="sc">{{ cancelShortcut }}</kbd>
     </button>
     <span class="spacer"></span>
     <button
@@ -67,7 +70,7 @@ const {
       @mousedown.prevent
       @click="goPrev"
     >
-      {{ t("popup.prev") }} <kbd v-if="canGoPrev" class="sc">⌘[</kbd>
+      {{ t("popup.prev") }} <kbd v-if="canGoPrev" class="sc">{{ previousShortcut }}</kbd>
     </button>
     <button
       class="btn"
@@ -96,7 +99,7 @@ const {
   <!-- 单问题底部：取消(左) + 发送(右) -->
   <div v-else-if="!isConfirm" class="footer" data-tauri-drag-region>
     <button class="btn" type="button" :disabled="submitting" @click="requestCancel">
-      {{ t("common.cancel") }} <kbd class="sc">⌘W</kbd>
+      {{ t("common.cancel") }} <kbd class="sc">{{ cancelShortcut }}</kbd>
     </button>
     <span class="spacer"></span>
     <button
@@ -111,7 +114,7 @@ const {
 
   <div v-else class="footer" data-tauri-drag-region>
     <button class="btn" type="button" :disabled="submitting" @click="requestConfirmClose">
-      {{ t("common.cancel") }} <kbd class="sc">⌘W</kbd>
+      {{ t("common.cancel") }} <kbd class="sc">{{ cancelShortcut }}</kbd>
     </button>
     <span class="spacer"></span>
     <button

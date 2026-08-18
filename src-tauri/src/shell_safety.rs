@@ -11,8 +11,8 @@
 //! permanent rules are verified through the user's own `codex` binary anyway) — but they
 //! are logged so upstream drift reviews (docs/PROGRESS.md) have a trail.
 //!
-//! Windows-only branches of the original (PowerShell safelists, .exe name stripping) are
-//! intentionally omitted: the AskHuman permission hook only runs on Unix.
+//! The Windows permission hook uses the conservative PowerShell literal parser and command
+//! classifiers below. Dynamic PowerShell forms fail closed to the basic approval UI.
 
 use std::path::Path;
 use tree_sitter::{Node, Parser, Tree};
@@ -145,6 +145,170 @@ pub fn is_banned_prefix(prefix: &[String]) -> bool {
     BANNED_PREFIX_SUGGESTIONS.iter().any(|banned| {
         prefix.len() == banned.len() && prefix.iter().map(String::as_str).eq(banned.iter().copied())
     })
+}
+
+/// Lower a literal PowerShell command sequence into argv-like segments. This deliberately accepts
+/// a smaller language than PowerShell's AST: variables, substitutions, redirections, grouping,
+/// invocation operators, and unterminated quotes all return `None` so permission memory is disabled.
+pub fn parse_powershell_plain_commands(script: &str) -> Option<Vec<Vec<String>>> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Quote {
+        None,
+        Single,
+        Double,
+    }
+
+    fn push_word(command: &mut Vec<String>, word: &mut String, started: &mut bool) {
+        if *started {
+            command.push(std::mem::take(word));
+            *started = false;
+        }
+    }
+
+    fn push_command(commands: &mut Vec<Vec<String>>, command: &mut Vec<String>) -> Option<()> {
+        if command.is_empty() || command.first().is_some_and(|word| word.contains('=')) {
+            return None;
+        }
+        commands.push(std::mem::take(command));
+        Some(())
+    }
+
+    let chars: Vec<char> = script.chars().collect();
+    let mut commands = Vec::new();
+    let mut command = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    let mut quote = Quote::None;
+    let mut index = 0usize;
+    while index < chars.len() {
+        let ch = chars[index];
+        match quote {
+            Quote::Single => {
+                if ch == '\'' {
+                    if chars.get(index + 1) == Some(&'\'') {
+                        word.push('\'');
+                        started = true;
+                        index += 1;
+                    } else {
+                        quote = Quote::None;
+                    }
+                } else {
+                    word.push(ch);
+                    started = true;
+                }
+            }
+            Quote::Double => {
+                if ch == '"' {
+                    quote = Quote::None;
+                } else if matches!(ch, '$' | '`') {
+                    return None;
+                } else {
+                    word.push(ch);
+                    started = true;
+                }
+            }
+            Quote::None => match ch {
+                '\'' => {
+                    quote = Quote::Single;
+                    started = true;
+                }
+                '"' => {
+                    quote = Quote::Double;
+                    started = true;
+                }
+                '$' | '`' | '>' | '<' | '(' | ')' | '{' | '}' | '[' | ']' | '@' => {
+                    return None;
+                }
+                ';' | '\n' | '\r' => {
+                    push_word(&mut command, &mut word, &mut started);
+                    if !command.is_empty() {
+                        push_command(&mut commands, &mut command)?;
+                    }
+                    if ch == '\r' && chars.get(index + 1) == Some(&'\n') {
+                        index += 1;
+                    }
+                }
+                '|' | '&' => {
+                    push_word(&mut command, &mut word, &mut started);
+                    push_command(&mut commands, &mut command)?;
+                    if chars.get(index + 1) == Some(&ch) {
+                        index += 1;
+                    }
+                }
+                ch if ch.is_whitespace() => {
+                    push_word(&mut command, &mut word, &mut started);
+                }
+                _ => {
+                    word.push(ch);
+                    started = true;
+                }
+            },
+        }
+        index += 1;
+    }
+    if quote != Quote::None {
+        return None;
+    }
+    push_word(&mut command, &mut word, &mut started);
+    if !command.is_empty() {
+        push_command(&mut commands, &mut command)?;
+    }
+    (!commands.is_empty()).then_some(commands)
+}
+
+pub fn is_safe_powershell_words(words: &[String]) -> bool {
+    let Some(first) = words.first() else {
+        return false;
+    };
+    let command = first.trim_start_matches('-').to_ascii_lowercase();
+    match command.as_str() {
+        "echo" | "write-output" | "write-host" | "dir" | "ls" | "get-childitem" | "gci" | "cat"
+        | "type" | "gc" | "get-content" | "select-string" | "sls" | "findstr"
+        | "measure-object" | "measure" | "get-location" | "gl" | "pwd" | "test-path" | "tp"
+        | "resolve-path" | "rvpa" | "select-object" | "select" | "get-item" => true,
+        "git" | "rg" => is_known_safe_command(words),
+        _ => false,
+    }
+}
+
+pub fn is_dangerous_powershell_words(words: &[String]) -> bool {
+    let Some(first) = words.first() else {
+        return true;
+    };
+    let command = first
+        .trim_matches(['\'', '"'])
+        .trim_start_matches('-')
+        .to_ascii_lowercase();
+    let normalized: Vec<String> = words
+        .iter()
+        .map(|word| word.trim_matches(['\'', '"']).to_ascii_lowercase())
+        .collect();
+    let has_url = normalized
+        .iter()
+        .any(|word| word.starts_with("http://") || word.starts_with("https://"));
+    if has_url
+        && matches!(
+            command.as_str(),
+            "start-process" | "start" | "saps" | "invoke-item" | "ii" | "explorer"
+        )
+    {
+        return true;
+    }
+    if matches!(command.as_str(), "invoke-expression" | "iex") {
+        return true;
+    }
+    if matches!(
+        command.as_str(),
+        "remove-item" | "ri" | "rm" | "del" | "erase" | "rd" | "rmdir"
+    ) {
+        return normalized.iter().any(|word| {
+            matches!(
+                word.as_str(),
+                "-force" | "-recurse" | "-r" | "-fo" | "-rf" | "-fr" | "/f" | "/s"
+            )
+        });
+    }
+    is_dangerous_command(words)
 }
 
 // ===== AskHuman self-call whitelist parser (not a Codex port) =====
@@ -1373,6 +1537,53 @@ mod tests {
         ] {
             assert!(!is_dangerous_command(&command), "{command:?}");
         }
+    }
+
+    #[test]
+    fn powershell_literal_parser_is_conservative() {
+        assert_eq!(
+            parse_powershell_plain_commands(
+                "Get-Content 'file name.txt' | Measure-Object; git status\r\n"
+            ),
+            Some(vec![
+                vec!["Get-Content".into(), "file name.txt".into()],
+                vec!["Measure-Object".into()],
+                vec!["git".into(), "status".into()],
+            ])
+        );
+        for script in [
+            "$x = Get-Content file.txt",
+            "Get-Content $(Resolve-Path file.txt)",
+            "Get-Content file.txt > out.txt",
+            "& $command",
+            "Get-Content 'unterminated",
+        ] {
+            assert_eq!(parse_powershell_plain_commands(script), None, "{script}");
+        }
+    }
+
+    #[test]
+    fn powershell_word_classifiers_cover_safe_and_dangerous_commands() {
+        assert!(is_safe_powershell_words(&vec_str(&[
+            "Get-Content",
+            "Cargo.toml"
+        ])));
+        assert!(is_safe_powershell_words(&vec_str(&["git", "status"])));
+        assert!(!is_safe_powershell_words(&vec_str(&[
+            "Set-Content",
+            "file.txt",
+            "data"
+        ])));
+        assert!(is_dangerous_powershell_words(&vec_str(&[
+            "Remove-Item",
+            "-Recurse",
+            "-Force",
+            "C:\\temp"
+        ])));
+        assert!(is_dangerous_powershell_words(&vec_str(&[
+            "Start-Process",
+            "https://example.com"
+        ])));
     }
 
     // ===== version gate & banned prefixes =====

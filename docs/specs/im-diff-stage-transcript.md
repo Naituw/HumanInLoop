@@ -191,7 +191,7 @@ ConfirmView {
 - 不 commit、不 push、不 `git stash`。
 - 不做交互式逐文件 stage / partial hunk stage。
 - 不做真·长图截图导出。
-- 不做 Windows 特例之外的平台（与 lifecycle 一致：Unix daemon；Windows 无 lifecycle 则本功能自然不可用）。
+- macOS、Linux 与 Windows 共用 lifecycle/daemon 能力；不为其它未支持平台增加单独降级实现。
 - 不保证 100% 还原所有 agent 私有事件类型；best-effort。
 - 钉钉 HTML 预览、PDF 转换不在本期。
 

@@ -28,6 +28,10 @@ pub fn status(target: AgentTarget) -> GuardStatus {
     let text = std::fs::read_to_string(&path).unwrap_or_else(|_| "{}".to_string());
     let groups = hook_edit::nested_groups(&text, "SubagentStart").unwrap_or_default();
     let expected = hook_command(target).unwrap_or_default();
+    let expected_windows = (target == AgentTarget::Codex)
+        .then(|| windows_hook_command(target))
+        .transpose()
+        .unwrap_or_default();
     let mut marker_count = 0usize;
     let mut exact_count = 0usize;
     for group in groups {
@@ -40,7 +44,7 @@ pub fn status(target: AgentTarget) -> GuardStatus {
                 continue;
             }
             marker_count += 1;
-            if command == expected
+            if hook_edit::command_handler_matches(handler, &expected, expected_windows.as_deref())
                 && handler.get("type").and_then(Value::as_str) == Some("command")
                 && handler.get("timeout").and_then(Value::as_u64) == Some(TIMEOUT_SECS)
                 && handler.get("statusMessage").is_none()
@@ -91,11 +95,15 @@ fn install_unlocked(target: AgentTarget) -> Result<()> {
         .and_then(|bytes| std::str::from_utf8(bytes).ok())
         .unwrap_or("{}");
     let command = hook_command(target)?;
-    let updated = hook_edit::upsert_nested_group(
+    let command_windows = (target == AgentTarget::Codex)
+        .then(|| windows_hook_command(target))
+        .transpose()?;
+    let updated = hook_edit::upsert_nested_group_with_windows(
         existing,
         "SubagentStart",
         MARKER,
         &command,
+        command_windows.as_deref(),
         TIMEOUT_SECS,
         None,
     )?;
@@ -158,6 +166,19 @@ fn hook_command(target: AgentTarget) -> Result<String> {
     Ok(format!(
         "\"{}\" {MARKER} {agent}",
         executable.to_string_lossy()
+    ))
+}
+
+fn windows_hook_command(target: AgentTarget) -> Result<String> {
+    let executable = std::env::current_exe().context("failed to resolve current executable")?;
+    let agent = match target {
+        AgentTarget::ClaudeCode => "claude",
+        AgentTarget::Codex => "codex",
+        _ => return Err(anyhow!("unsupported subagent guard target")),
+    };
+    Ok(hook_edit::powershell_command(
+        &executable.to_string_lossy(),
+        &[MARKER, agent],
     ))
 }
 

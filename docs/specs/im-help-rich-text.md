@@ -269,7 +269,7 @@ Slack 不支持任意文字颜色，不模拟不存在的颜色能力。
 
 ### 7.1 观察者路径
 
-`daemon/unix_impl/inbound.rs::handle_inbound` 中所有当前
+`daemon/runtime/inbound.rs::handle_inbound` 中所有当前
 `reply_channel_text(..., help_text(...))` 调用改为：
 
 1. 生成 `HelpView`；
@@ -380,7 +380,7 @@ pub enum InboundReply {
 
 - `src-tauri/src/autochannel.rs`：`HelpView`、命令元数据、动态生成、纯文本 renderer；
 - `src-tauri/src/i18n.rs`：拆分 help 内容词条；
-- `src-tauri/src/daemon/unix_impl/inbound.rs`：观察者路径的富文本发送；
+- `src-tauri/src/daemon/runtime/inbound.rs`：观察者路径的富文本发送；
 - `src-tauri/src/channels/conversation.rs`：`InboundReply::Text/Help`；
 - `src-tauri/src/feishu/card.rs`：帮助卡片；
 - `src-tauri/src/slack/blockkit.rs`：帮助 blocks；

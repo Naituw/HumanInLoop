@@ -13,7 +13,7 @@
 //! TODO 台账，符合 watch tick 的热路径成本要求（C16 精神）。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use rusqlite::{Connection, OpenFlags};
@@ -34,12 +34,34 @@ const MAX_TX_EVENTS: usize = 2000;
 
 /// 定位 Cursor 全局 state.vscdb（存在才返回）。
 fn db_path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    let candidates = [
-        home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb"),
-        home.join(".config/Cursor/User/globalStorage/state.vscdb"),
-    ];
-    candidates.into_iter().find(|p| p.is_file())
+    db_path_from(dirs::config_dir().as_deref(), dirs::home_dir().as_deref())
+}
+
+fn db_path_from(config_dir: Option<&Path>, home: Option<&Path>) -> Option<PathBuf> {
+    db_candidates(config_dir, home)
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
+fn db_candidates(config_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(config_dir) = config_dir {
+        candidates.push(
+            config_dir
+                .join("Cursor")
+                .join("User")
+                .join("globalStorage")
+                .join("state.vscdb"),
+        );
+    }
+    // Retain explicit legacy fallbacks for non-standard environment providers.
+    if let Some(home) = home {
+        candidates
+            .push(home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb"));
+        candidates.push(home.join(".config/Cursor/User/globalStorage/state.vscdb"));
+    }
+    candidates.dedup();
+    candidates
 }
 
 /// 只读连接（WAL 并发读安全；短 busy timeout 防 IDE checkpoint 竞争时卡拍）。
@@ -60,6 +82,67 @@ fn kv_get(conn: &Connection, key: &str) -> Option<String> {
         |row| row.get::<_, String>(0),
     )
     .ok()
+}
+
+/// Cursor's own project index preserves exact filesystem paths, unlike the lossy directory slug.
+/// Prefer it when available so drive letters, UNC shares, spaces, and non-ASCII names need no
+/// reconstruction. Returned timestamps are Unix seconds.
+pub(crate) fn recent_workspaces() -> Vec<(PathBuf, u64)> {
+    let Some(conn) = open() else {
+        return Vec::new();
+    };
+    let Ok(raw) = conn.query_row(
+        "SELECT value FROM ItemTable WHERE key = 'glass.localAgentProjects.v1'",
+        [],
+        |row| row.get::<_, String>(0),
+    ) else {
+        return Vec::new();
+    };
+    parse_recent_workspaces(&raw)
+}
+
+fn parse_recent_workspaces(raw: &str) -> Vec<(PathBuf, u64)> {
+    let Some(items) = serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+    else {
+        return Vec::new();
+    };
+    let mut by_path = HashMap::<PathBuf, u64>::new();
+    for item in items {
+        let Some(uri) = item.pointer("/workspace/uri") else {
+            continue;
+        };
+        if uri
+            .get("scheme")
+            .and_then(Value::as_str)
+            .is_some_and(|scheme| scheme != "file")
+        {
+            continue;
+        }
+        let Some(path) = uri
+            .get("fsPath")
+            .or_else(|| uri.get("path"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+        else {
+            continue;
+        };
+        let updated = item
+            .get("lastUpdatedAt")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            / 1000;
+        by_path
+            .entry(path)
+            .and_modify(|current| *current = (*current).max(updated))
+            .or_insert(updated);
+    }
+    let mut paths: Vec<_> = by_path.into_iter().collect();
+    paths.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    paths
 }
 
 fn composer_value(conn: &Connection, session_id: &str) -> Option<Value> {
@@ -396,6 +479,55 @@ fn push_tx_events(b: &Value, out: &mut Vec<TranscriptEvent>) {
 mod tests {
     use super::*;
     use crate::agents::activity::{StepState, ToolLabel};
+
+    #[test]
+    fn cursor_db_prefers_injected_platform_config_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("Roaming AppData");
+        let expected = config
+            .join("Cursor")
+            .join("User")
+            .join("globalStorage")
+            .join("state.vscdb");
+        std::fs::create_dir_all(expected.parent().unwrap()).unwrap();
+        std::fs::write(&expected, b"fixture").unwrap();
+        assert_eq!(db_path_from(Some(&config), None), Some(expected));
+    }
+
+    #[test]
+    fn cursor_project_index_preserves_windows_paths_and_latest_timestamp() {
+        let raw = serde_json::json!([
+            {
+                "workspace": {"uri": {"scheme": "file", "fsPath": "C:\\工作\\Repo Space"}},
+                "lastUpdatedAt": 1_700_000_000_000u64
+            },
+            {
+                "workspace": {"uri": {"scheme": "file", "fsPath": "\\\\server\\share\\项目"}},
+                "lastUpdatedAt": 1_800_000_000_000u64
+            },
+            {
+                "workspace": {"uri": {"scheme": "file", "fsPath": "C:\\工作\\Repo Space"}},
+                "lastUpdatedAt": 1_900_000_000_000u64
+            },
+            {
+                "workspace": {"uri": {"scheme": "vscode-remote", "fsPath": "C:\\ignored"}},
+                "lastUpdatedAt": 2_000_000_000_000u64
+            }
+        ])
+        .to_string();
+        let paths = parse_recent_workspaces(&raw);
+        assert_eq!(paths.len(), 2);
+        assert_eq!(paths[0].0, PathBuf::from(r"C:\工作\Repo Space"));
+        assert_eq!(paths[0].1, 1_900_000_000);
+        assert_eq!(paths[1].0, PathBuf::from(r"\\server\share\项目"));
+        assert_eq!(paths[1].1, 1_800_000_000);
+    }
+
+    #[test]
+    fn malformed_cursor_project_index_fails_closed() {
+        assert!(parse_recent_workspaces("not-json").is_empty());
+        assert!(parse_recent_workspaces("{}").is_empty());
+    }
 
     fn tool_bubble(name: &str, status: &str, raw_args: &str, text: &str) -> Value {
         serde_json::json!({

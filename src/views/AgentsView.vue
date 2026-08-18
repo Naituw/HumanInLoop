@@ -216,15 +216,19 @@ function fmtDuration(secs: number): string {
   return t("console.durationS", { s: secs });
 }
 
-// 「聚焦终端」：需有存活 pid、非「已结束」，且所在终端受支持。
+// macOS focus requires a live pid; Windows Terminal focus requires a registered launch UUID.
 function canFocusTerminal(a: AgentRecord): boolean {
-  return !!a.pid && a.state !== "ended" && isFocusableTerminal(a.terminal);
+  return (
+    (!!a.pid || !!a.launchId) &&
+    a.state !== "ended" &&
+    isFocusableTerminal(a.terminal)
+  );
 }
 
 async function onFocusTerminal(a: AgentRecord): Promise<void> {
-  if (!a.pid) return;
+  if (!a.pid && !a.launchId) return;
   try {
-    await focusAgentTerminal(a.pid);
+    await focusAgentTerminal(a.pid, a.launchId);
   } catch (err) {
     console.warn("focus terminal failed", err);
   }

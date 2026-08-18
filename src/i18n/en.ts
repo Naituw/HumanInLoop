@@ -104,6 +104,9 @@ export default {
       failed: "Update failed",
       rateLimited:
         "GitHub requests are rate-limited (shared IP quota exhausted). Try again later or download manually.",
+      manualHint:
+        "Windows automatic update is currently unavailable. View the manual steps without interrupting this answer.",
+      manualButton: "View manual update steps",
       npmHint: "Run in your terminal: {cmd}",
       noNotes: "No release notes.",
     },
@@ -171,13 +174,13 @@ export default {
   shortcut: {
     none: "None",
     conflict: {
-      needMod: "Must include ⌘ or ⌃",
-      enter: "Conflicts with Submit / Next (⌘↩)",
-      cancel: "Conflicts with Cancel (⌘W)",
-      brackets: "Conflicts with Previous / Next (⌘[ ⌘])",
-      options: "Conflicts with option shortcuts (⌘1–9)",
-      editing: "Conflicts with system edit shortcut (⌘{key}); add ⇧ or pick another",
-      find: "Conflicts with Find (⌘F)",
+      needMod: "Must include {modifier}",
+      enter: "Conflicts with Submit / Next ({shortcut})",
+      cancel: "Conflicts with Cancel ({shortcut})",
+      brackets: "Conflicts with Previous / Next ({previous} {next})",
+      options: "Conflicts with option shortcuts ({shortcut})",
+      editing: "Conflicts with system edit shortcut ({shortcut}); add another modifier or pick another",
+      find: "Conflicts with Find ({shortcut})",
     },
   },
   settings: {
@@ -287,9 +290,9 @@ export default {
       title: "Popup behavior",
       alwaysOnTop: "Always on top",
       submitKey: "Submit shortcut",
-      submitKeyCmdEnter: "⌘↵ submit",
+      submitKeyCmdEnter: "{shortcut} submit",
       submitKeyEnter: "↵ submit",
-      submitKeyCmdEnterHint: "⌘/Ctrl+Enter submits; Enter inserts a newline",
+      submitKeyCmdEnterHint: "{shortcut} submits; Enter inserts a newline",
       submitKeyEnterHint: "Enter submits; any modifier+Enter inserts a newline",
       prewarm: "Pre-warm popup",
       prewarmHint:
@@ -306,19 +309,19 @@ export default {
       testPopup: "Open test popup",
     },
     menuBar: {
-      title: "Menu bar icon",
+      title: "Status icon",
       icon: "Show icon",
       off: "Off",
       active: "When running",
       always: "Always",
-      hint: "Show a status icon in the menu bar with quick access to settings, history, agents and the daemon. \"When running\" shows it only while the daemon is active; \"Always\" keeps it resident (launches at login) and dims when the daemon is stopped.",
+      hint: "Show a status icon in the menu bar or system tray with quick access to settings, history, agents and the daemon. \"When running\" shows it only while the daemon is active; \"Always\" keeps it resident (launches at login) and dims when the daemon is stopped.",
     },
     speech: {
       title: "Voice input",
       language: "Recognition language",
       languageSystem: "Follow system",
       shortcut: "Shortcut",
-      recordHint: "Press a combination (must include ⌘ or ⌃), Esc to cancel",
+      recordHint: "Press a combination (must include {modifier}), Esc to cancel",
       recording: "Press shortcut…",
       clear: "Clear",
     },
@@ -367,7 +370,7 @@ export default {
       updateAll: "Update all",
       updatesAvailable: "Updates available",
       uninstall: "Remove",
-      windowsUnsupported: "This hook is not supported on Windows",
+      hookUnsupported: "This Agent does not support a managed timeout hook.",
       permissionTitle: "Permission approval",
       askQuestionTitle: "Take over the native question tool",
       askQuestionHint:
@@ -376,13 +379,11 @@ export default {
       stopHint:
         "When this Agent naturally finishes a turn, ask through the active popup or IM whether to continue or end. Errors and manual cancellations are not intercepted.",
       stopUnsupported:
-        "This Agent cannot continue from a blocking Stop hook. Grok is not supported in this release; Windows is waiting for daemon support.",
+        "This Agent cannot continue from a blocking Stop hook. Grok is not supported in this release.",
       stopCoexist:
         "Other visible Stop handlers were found. They run concurrently and may independently continue or stop the Agent.",
       permissionUnsupported:
         "This agent does not support a native PermissionRequest approval flow.",
-      permissionWindowsUnsupported:
-        "Permission approval is waiting for Windows daemon support.",
       permissionClaudeHint:
         "Routes Claude Code permission prompts to AskHuman. Other project, managed, plugin, skill, or agent hooks may still affect the final decision; use /hooks in the current Claude session to inspect active sources.",
       permissionCodexHint:
@@ -417,7 +418,7 @@ export default {
     },
     agentTasks: {
       title: "Create Agent tasks from IM",
-      description: "Use /new (or !new in Slack) to choose a workspace and Agent, then continue the visible session in a new Terminal.app window. Enabling this keeps the daemon available and installs its login item.",
+      description: "Use /new (or !new in Slack) to choose a workspace and Agent, then continue the visible session in a new system terminal window. Enabling this keeps the daemon available and installs its login item.",
       permission: "Permission selection",
       permissionAsk: "Ask every time",
       permissionDefault: "Always Agent default",
@@ -434,7 +435,7 @@ export default {
       confirmCancel: "Cancel",
       confirmEnable: "Enable anyway",
       testTerminal: "Test Terminal",
-      terminalTestDone: "Terminal.app test opened successfully. No Agent was started.",
+      terminalTestDone: "The terminal test window opened successfully. No Agent was started.",
       refresh: "Refresh",
       readiness: "Agent readiness",
       ready: "Ready",
@@ -449,7 +450,7 @@ export default {
       chooseWorkspace: "Add workspace",
       workspaceActions: "Workspace actions",
       noWorkspaces: "No workspaces",
-      noWorkspacesHint: "Use the + button to choose a project folder from your Mac.",
+      noWorkspacesHint: "Use the + button to choose a project folder from this computer.",
       manuallyAdded: "Manually added",
       lastUsed: "Last used {time}",
       pin: "Pin",
@@ -554,6 +555,19 @@ export default {
       noNotes: "No release notes.",
       checkFailed: "Failed to check for updates",
       updateFailed: "Update failed",
+      manualUnavailable:
+        "Windows automatic update is currently unavailable. Please update manually.",
+      prepareManual: "Prepare manual update…",
+      preparingManual: "Preparing…",
+      prepareManualHint:
+        "Preparation waits for active requests, then closes the daemon and background UI so Windows can replace the executable.",
+      prepareConfirm:
+        "Prepare for a manual update? AskHuman will wait for active requests, then close its background processes.",
+      prepareFailed: "Failed to prepare the manual update",
+      copyCommand: "Copy command",
+      commandCopied: "Copied",
+      copyCommandFailed: "Failed to copy the update command",
+      openReleasePage: "Open the GitHub release page",
       npmHint: "Run in your terminal: {cmd}",
       viewCurrentNotes: "View this version's release notes",
       hideCurrentNotes: "Hide this version's release notes",

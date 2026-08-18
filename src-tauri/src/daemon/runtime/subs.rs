@@ -1,4 +1,4 @@
-//! GUI/托盘/Agent 状态订阅广播与 Interject composer/hold 连接。
+//! GUI, tray, and Agent subscriptions plus Interject composer and hold connections.
 
 use super::*;
 

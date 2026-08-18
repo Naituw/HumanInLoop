@@ -9,13 +9,10 @@
 
 mod agents;
 mod app;
-// The takeover submits an ask through the daemon client, which is Unix-only.
-#[cfg(unix)]
 mod ask_question;
 mod autochannel;
 mod channels;
 mod cli;
-#[cfg(unix)]
 mod client;
 mod commands;
 mod config;
@@ -27,6 +24,7 @@ mod dev_presets;
 mod dingtalk;
 mod export;
 mod feishu;
+mod file_lock;
 mod gitutil;
 mod gui_host;
 mod history;
@@ -34,6 +32,7 @@ mod hooks;
 mod i18n;
 mod integrations;
 mod ipc;
+mod local_time;
 #[cfg(target_os = "macos")]
 mod macos_dock_icon;
 #[cfg(target_os = "macos")]
@@ -47,6 +46,7 @@ mod macos_window_order;
 mod mcp;
 mod models;
 mod msg_card;
+mod path_identity;
 mod paths;
 mod perf;
 mod permission_diff;

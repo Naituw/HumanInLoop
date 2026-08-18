@@ -25,6 +25,8 @@ AskHuman "…"   # 或 MCP ask
 
 不必在提示词里分支 env / PATH；cwd 在已 enable 的树内会自动改道到该树的 bin + daemon。
 
+Windows 对应安装命令是 `.\scripts\install-windows.cmd`；其余 `AskHuman dev …` 命令相同。
+
 ## 准备步骤
 
 ### 1. 进入 worktree 根目录
@@ -75,11 +77,21 @@ AskHuman dev preset save <name> --from-instance
 
 在已 enable 的树内会装到 `.askhuman-dev/bin/`，**不会**覆盖 `~/.local/bin`（除非 `./scripts/install.sh --global`）。
 
+Windows PowerShell / cmd：
+
+```powershell
+.\scripts\install-windows.cmd
+# 显式更新生产安装（逃生口）：.\scripts\install-windows.cmd -Global
+```
+
+Windows 默认安装同样只写 `.askhuman-dev\bin\AskHuman.exe`，不会修改生产 EXE、用户 PATH 或受管
+`WindowsApps\AskHuman.cmd` launcher。
+
 ### 4. 自检（可选）
 
 ```bash
 AskHuman dev status
-AskHuman daemon status    # socket 应在本树 .askhuman-dev/home/
+AskHuman daemon status    # endpoint 应按本树 .askhuman-dev/home/ 独立派生
 ```
 
 ## 禁止事项
@@ -99,7 +111,7 @@ AskHuman dev disable --purge   # 连 .askhuman-dev 目录一起删
 
 | 现象 | 处理 |
 |---|---|
-| `binary is missing` | 在本树跑 `./scripts/install.sh` |
+| `binary is missing` | 在本树跑 `./scripts/install.sh`；Windows 跑 `.\scripts\install-windows.cmd` |
 | 提问仍进主 daemon | 确认 cwd 在 enable 的树内；PATH 上的 `AskHuman` 是否已含 dispatcher（至少全局装过一版本功能） |
 | preset 占用冲突 | 对方 `dev disable` 或本树 `--force` |
 | 设置改到了生产 config | 未 enable；先 `dev enable` 再 `--settings` |

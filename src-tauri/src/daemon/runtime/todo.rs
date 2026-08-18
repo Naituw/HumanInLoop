@@ -1,4 +1,4 @@
-//! IM `/todo`、`/todo-rm`、`/todo-auto`：项目待办的入站命令与卡片流（spec todo-whats-next D8）。
+//! IM `/todo`, `/todo-rm`, and `/todo-auto` inbound commands and card flows.
 //!
 //! 流程：`/todo`（无参）→ 复用跨渠道单选卡选项目 → 发「待办管理卡」；`/todo <text>`
 //! 先选项目再追加。`/todo-rm` 同样先选项目，再复用单选卡逐条删除（就地刷新）。

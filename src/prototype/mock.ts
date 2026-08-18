@@ -215,7 +215,7 @@ export const LIVE_SCRIPT: FrameM[] = [
   {
     steps: [
       { label: "搜索", object: "idle_deadline", state: "done" },
-      { label: "读取", object: "unix_impl/mod.rs", state: "running" },
+      { label: "读取", object: "runtime/mod.rs", state: "running" },
     ],
   },
   {
@@ -356,7 +356,7 @@ const TX_TOOLS: { label: string; object: string }[] = [
   { label: "读取", object: "registry.rs" },
   { label: "搜索", object: "idle_deadline" },
   { label: "编辑", object: "registry.rs" },
-  { label: "读取", object: "unix_impl/mod.rs" },
+  { label: "读取", object: "runtime/mod.rs" },
   { label: "运行命令", object: "cargo test registry::" },
   { label: "编辑", object: "lifecycle.rs" },
   { label: "读取", object: "docs/specs/agent-lifecycle-tracking.md" },

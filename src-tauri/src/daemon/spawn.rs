@@ -1,5 +1,5 @@
 //! 后台拉起 Daemon：macOS 优先交给当前用户的 GUI launchd domain 管理，其它 Unix 则 detach
-//! （新会话）并把 stdio 重定向到 daemon.log，使其脱离 CLI 终端独立存活。
+//! （新会话）并把 stdio 重定向到 daemon.log；Windows 使用无控制台的新进程组并写同一日志。
 //!
 //! macOS 不能在 Aqua 会话里直接 `setsid` 后长期运行：那样的 daemon 会跨用户登出残留，却仍持有
 //! 已销毁 GUI 会话的 bootstrap namespace。用户重新登录后，它虽然还能通过 Unix socket 接收请求，
@@ -7,7 +7,6 @@
 //! 永远不弹窗”。因此只要 `gui/<uid>` 可用，就统一 bootstrap 到该 domain：既能静默读取登录钥匙串，
 //! 也会在登出时随 GUI domain 一起退出。纯 headless 环境无法 bootstrap 时才回退 setsid。
 
-#[cfg(unix)]
 pub fn spawn_detached() -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -16,7 +15,87 @@ pub fn spawn_detached() -> std::io::Result<()> {
         }
         // GUI 域不可用（纯 headless）→ 回退原 setsid 拉起。
     }
-    spawn_plain_detached()
+    #[cfg(unix)]
+    {
+        spawn_plain_detached()
+    }
+    #[cfg(windows)]
+    {
+        spawn_windows_detached()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "daemon spawning is unsupported on this platform",
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn spawn_windows_detached() -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, PROCESS_INFORMATION,
+        STARTUPINFOW,
+    };
+
+    let exe = std::env::current_exe()?;
+    let mut application: Vec<u16> = exe.as_os_str().encode_wide().collect();
+    application.push(0);
+
+    // `std::process::Command` must enable handle inheritance when it wires redirected stdio.
+    // On Windows that can retain an unrelated caller pipeline in the daemon and its GUI children,
+    // so a script capturing `AskHuman daemon start` never observes EOF. Create the background role
+    // with inheritance explicitly disabled; `--background` makes the child append logs itself.
+    let mut command_line = Vec::new();
+    command_line.push(b'"' as u16);
+    command_line.extend(exe.as_os_str().encode_wide());
+    command_line.push(b'"' as u16);
+    command_line.extend(" daemon run --background".encode_utf16());
+    command_line.push(0);
+
+    let startup = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
+    let mut process = PROCESS_INFORMATION::default();
+    let created = unsafe {
+        CreateProcessW(
+            application.as_ptr(),
+            command_line.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+            std::ptr::null(),
+            std::ptr::null(),
+            &startup,
+            &mut process,
+        )
+    };
+    if created == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    unsafe {
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+    Ok(())
+}
+
+/// Prevent background roles from opening a second console while keeping ordinary CLI output.
+pub fn configure_background(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
 }
 
 /// 原始拉起方式：`setsid` 新建会话 + stdio 重定向到 daemon.log，直接继承当前会话上下文。

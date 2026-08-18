@@ -9,6 +9,10 @@
 > caller pid 上送 Daemon；Daemon 进程树探测只按 pid 刷新**已有** lifecycle session，绝不新建会话。
 > rmcp cancellation 会终止子 CLI，socket EOF 再取消 Daemon 请求。Codex 配置还把 `mcp__askhuman`
 > 最小加入 Code Mode `direct_only_tool_namespaces`，确保 ask 在顶层阻塞；所有权记录防止卸载用户原有项。
+> Codex CLI 0.147 的 Ctrl+C 实测可能在本地丢弃 tool call、只向精确 rollout turn 写
+> `turn_aborted`，而不发送 MCP `notifications/cancelled`。AskHuman 因此仅在 metadata 同时提供精确
+> `session_id` 与 `turn_id` 时，从调用开始的 rollout EOF 监听该 turn 的 abort 作为兼容保险；原生 MCP
+> cancellation 仍是主路径，其他 Agent、其他 turn 和历史 abort 均不能取消当前调用。
 >
 > **实现期补充（2026-07-23）**：Codex 桌面版 Suggested prompts 使用
 > `thread_source=system` 的内部 thread。AskHuman 对 Codex 每次 `tools/call._meta` 做前置检查，命中
@@ -67,7 +71,7 @@
 | D9 | turn 生命周期 | 保持**正交**：turn 追踪仍只靠现有实验性 lifecycle hook，可与 MCP 模式并行独立开启，互不影响（MCP 拿不到 turn 周期） |
 | D10 | 双版本提示词 | 新增 `prompts::mcp_reference()`：把「用 Shell 调 AskHuman、设 24h 超时、先跑 --agent-help」改为「调用 MCP 工具 `ask`」；其余交互纪律（必须提问、推荐选项、附件、结束前回执等）保留。手动集成卡支持 CLI/MCP 切换显示 |
 | D11 | 自动重连 | MCP server **不持 ask 子流程的 daemon 长连接**：每次 `ask`/`whats_next` 都新起子进程→新走 `ensure_running`/排空等待/提交。daemon 更新后 MCP server 继续存活，后续调用自动连到新 daemon |
-| D12 | 平台范围 | **全平台**。统一用 spawn 子进程：Unix 子进程是「瘦客户端→daemon」，Windows 子进程是现有「单进程弹窗」回退。MCP server 自身不直接弹窗，绕开 Windows 上「stdio 主循环 vs Tauri 主线程」冲突 |
+| D12 | 平台范围 | **macOS / Linux / Windows**。统一用 spawn 子进程：三平台子进程都是「瘦客户端→shared daemon」；传输差异留在 Unix socket / Windows named pipe adapter。MCP server 自身不直接弹窗，避免 STDIO 主循环与 Tauri 主线程冲突。 |
 | D13 | 漂移检测 | `needs_update` 覆盖 MCP Rule + MCP 配置：已安装但内置提示词/配置模板有更新时显示「更新」 |
 | D14 | CLI/doctor | `agents mode/update/show` 与 `doctor` 纳入 MCP 模式状态与整包操作（headless 一致可用） |
 | D15 | 命名 | 子命令 `mcp`；工具名 `ask` / `whats_next` / `show_last` / `todo_add` / `todo_list` / `todo_update`；各家配置中 server 名 `askhuman` |
@@ -83,8 +87,8 @@
                  0. 检查 Codex turn metadata；拦截来源 thread 直接返回 terminal error
                  1. 入参 Schema → argv（message / -q / -o / -o! / -f；默认文本输出）
                  2. spawn 子进程: <AskHuman 绝对路径> <argv...>
-                      · Unix：瘦客户端 → daemon（弹窗/IM/抢答/历史/落盘/排空重连全复用）
-                      · Windows：单进程弹窗回退
+                      · macOS/Linux/Windows：瘦客户端 → shared daemon
+                        （弹窗/IM/抢答/历史/落盘/排空重连全复用）
                  3. 等子进程结束，读 stdout(结果区块文本) + exit code
                  4. stdout 原样作为 TextContent；按 `[files]` 区块路径读出图片转 ImageContent
                  5. 组 CallToolResult 返回
@@ -198,7 +202,7 @@ argv 映射：`message`→首个位置参数（或经 `-q` 拆分）；每个 qu
 - **互斥安装的幂等与最小化编辑**：所有配置写入只触碰自有托管条目，保留用户其它内容；解析失败中止、不整文件覆盖（沿用 `cursor_hook`/`claude_hook`/`agent_rules` 的纯函数 + 单测做法）。
 - **CLI 模式行为完全不变**：现有 Rule/Hook 安装/更新/卸载逻辑保留，仅在 UI 与 `agents` 命令层并入「模式」抽象。
 - **lifecycle hook 正交**：实验性 turn 追踪独立于 CLI/MCP 模式选择，不被互斥逻辑波及。
-- **跨平台**：Windows 经子进程单进程回退；MCP server 不直接持有 Tauri 主线程。
+- **跨平台**：Windows 子进程经安全 named pipe 连接 shared daemon；MCP server 不直接持有 Tauri 主线程。
 
 ## 9. 验收标准
 
@@ -211,7 +215,7 @@ argv 映射：`message`→首个位置参数（或经 `-q` 拆分）；每个 qu
 7. 手动集成：CLI/MCP 提示词可切换；MCP 版显示三家配置实例。
 8. `agents mode/update/show` 与 `doctor` 正确反映 MCP 状态；旧逐产物 `--mcp` 写接口不再执行；headless 可用。
 9. 三家 MCP 配置写入为最小化编辑：保留用户其它条目/注释；重复安装幂等；卸载只移除自有条目；解析失败不破坏文件（单测覆盖）。
-10. Windows：`AskHuman mcp` 经子进程单进程弹窗回退完成提问（无 daemon）。
+10. Windows：`AskHuman mcp` 与 macOS/Linux 一样由子进程进入 shared daemon；提问、IM 抢答、历史、排空与 Agent 上下文语义一致，本地 IPC 使用用户私有 named pipe。
 11. 既有 CLI 模式（Rule/Hook）与所有现有功能回归正常。
 12. raw `tools/call` 携带 Codex `thread_source=system` 或 `ambient_suggestions` 时五个交互/副作用工具均返回固定
     terminal error 且无副作用；同时写入含工具名、`codex_blocked_thread_source` 原因与 `threadSource`

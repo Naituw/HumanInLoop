@@ -119,8 +119,6 @@ export const agentTaskWorkspaces = (refresh = false) =>
   invoke<AgentTaskWorkspace[]>("agent_task_workspaces", { refresh });
 export const agentTaskWorkspaceAdd = (path: string) =>
   invoke<AgentTaskWorkspace>("agent_task_workspace_add", { path });
-export const agentTaskWorkspacePick = () =>
-  invoke<string | null>("agent_task_workspace_pick");
 export const agentTaskWorkspacePin = (path: string, pinned: boolean) =>
   invoke<void>("agent_task_workspace_pin", { path, pinned });
 export const agentTaskWorkspaceHide = (path: string, hidden: boolean) =>
@@ -339,9 +337,11 @@ export const agentLifecycleInstall = (agent: AgentKind) =>
 export const agentLifecycleUninstall = (agent: AgentKind) =>
   invoke<string>("agent_lifecycle_uninstall", { agent });
 
-/** 聚焦某 Agent 所在终端（v1 仅 macOS / Terminal.app）。失败抛错由调用方静默处理。 */
-export const focusAgentTerminal = (pid: number) =>
-  invoke<void>("focus_agent_terminal", { pid });
+/** Focus the exact registered terminal surface. Failures are handled silently by callers. */
+export const focusAgentTerminal = (
+  pid?: number | null,
+  launchId?: string | null
+) => invoke<void>("focus_agent_terminal", { pid, launchId });
 
 /** 手动把某 agent 置为「空闲」（纠正漏 hook 卡「工作中」）。即发即走，daemon 改后推回新快照。 */
 export const agentForceIdle = (sessionId: string) =>
@@ -421,6 +421,8 @@ export const updateGetVersionNotes = (version: string) =>
   invoke<string>("update_get_version_notes", { version });
 
 export const updateApply = () => invoke<void>("update_apply");
+
+export const updatePrepare = () => invoke<void>("update_prepare");
 
 export const updateDismiss = (version: string) =>
   invoke<void>("update_dismiss", { version });
@@ -573,7 +575,7 @@ export const newTaskProjectsRefreshed = () =>
 export const projectKeyOf = (dir: string) =>
   invoke<string>("project_key_of", { dir });
 
-/** 启动新任务（LaunchRecord + Terminal.app 链路）；成功后所选待办按快照出队。 */
+/** Start a task through the private LaunchRecord and platform-terminal bridge. */
 export const newTaskLaunch = (payload: {
   workspace: string;
   kind: string;

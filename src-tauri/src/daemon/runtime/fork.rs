@@ -1,4 +1,4 @@
-//! Native Agent session fork flow shared by IM commands and watch-card actions.
+//! Native Agent session fork flow shared by IM commands and watch-card actions in the runtime.
 
 use super::*;
 
@@ -31,8 +31,10 @@ pub(super) async fn start_fork_flow(
     }
     if !crate::integrations::agent_launch::terminal_available() {
         let text = match lang {
-            Lang::Zh => "当前版本仅支持 macOS 系统终端 Terminal.app。",
-            Lang::En => "This version currently requires macOS Terminal.app.",
+            Lang::Zh => "没有找到受支持的系统终端（macOS Terminal.app 或 Windows Terminal）。",
+            Lang::En => {
+                "No supported system terminal was found (macOS Terminal.app or Windows Terminal)."
+            }
         };
         let _ = reply_channel_text(channel_id, config, text).await;
         return;
@@ -134,8 +136,10 @@ pub(super) async fn start_fork_source(
     }
     if !crate::integrations::agent_launch::terminal_available() {
         let text = match lang {
-            Lang::Zh => "当前版本仅支持 macOS 系统终端 Terminal.app。",
-            Lang::En => "This version currently requires macOS Terminal.app.",
+            Lang::Zh => "没有找到受支持的系统终端（macOS Terminal.app 或 Windows Terminal）。",
+            Lang::En => {
+                "No supported system terminal was found (macOS Terminal.app or Windows Terminal)."
+            }
         };
         let _ = reply_channel_text(channel_id, config, text).await;
         return;

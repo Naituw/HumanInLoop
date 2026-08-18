@@ -23,6 +23,7 @@ const {
   updateAvailable,
   updatePending,
   updateLatest,
+  updateApplyMode,
   updatePopoverOpen,
   updating,
   updateStarted,
@@ -133,7 +134,9 @@ const {
             <p v-else class="up-notes muted">{{ t("popup.update.noNotes") }}</p>
             <p class="up-hint">
               {{
-                updateStarted
+                updateApplyMode !== "automatic"
+                  ? t("popup.update.manualHint")
+                  : updateStarted
                   ? t("popup.update.startedHint")
                   : t("popup.update.applyHint")
               }}
@@ -147,7 +150,9 @@ const {
                 @click="applyUpdateFromPopup"
               >
                 {{
-                  updating
+                  updateApplyMode !== "automatic"
+                    ? t("popup.update.manualButton")
+                    : updating
                     ? t("popup.update.updating")
                     : t("popup.update.button")
                 }}

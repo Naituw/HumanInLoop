@@ -107,7 +107,7 @@ macOS 且 `terminal_available()` 时显示。
 
 - `ipc/mod.rs`：`ClientMsg` 新增无字段变体 `ActivatePopupSlot`（即发即走，无回包；旧 daemon
   解析失败断连无副作用）。
-- `daemon/unix_impl/mod.rs` 连接分发：收到后 `set_active_channel(state, "popup").await`
+- `daemon/runtime/mod.rs` 连接分发：收到后 `set_active_channel(state, "popup").await`
   （自然获得旧 IM 反激活回执与 auto-end-watch 语义），不回包。
 - `client/mod.rs`：新增 `pub async fn activate_popup_slot()`：`connect_split()` 成功则写
   `ActivatePopupSlot`（模式同 `notify_update_state_changed`，不做 Hello）；连接失败（daemon

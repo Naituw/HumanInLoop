@@ -16,9 +16,9 @@ import { useAgentTasks } from "./useAgentTasks";
 import { useLifecycleSettings } from "./useLifecycleSettings";
 import { useChannels } from "./useChannels";
 import { useSettingsSearch } from "./useSearch";
-import { isMac, isWindows } from "../../lib/platform";
+import { isMac, isWindows, supportsAgentTasks } from "../../lib/platform";
 
-export { isMac, isWindows };
+export { isMac, isWindows, supportsAgentTasks };
 
 export type Tab = "general" | "integration" | "channel" | "advanced" | "experimental";
 export const TABS: readonly Tab[] = ["general", "integration", "channel", "advanced", "experimental"];
@@ -160,6 +160,7 @@ export function createSettingsContext() {
   const ctx = {
     isMac,
     isWindows,
+    supportsAgentTasks,
     ...core,
     ...general,
     ...updates,

@@ -2,10 +2,12 @@
 // Agent 权限确认面板（confirm 交互）：标题 + 理由 + 工具详情 + 单选动作 + 可选备注输入。
 import { computed, nextTick, ref } from "vue";
 import { useI18n } from "vue-i18n";
+import { primaryShortcutLabel } from "../../lib/platform";
 import { usePopupContext } from "./context";
 import PermissionDiffPane from "./PermissionDiffPane.vue";
 
 const { t } = useI18n();
+const optionShortcut = (index: number) => primaryShortcutLabel(String(index + 1));
 const {
   confirmRequest,
   confirmChoiceIndex,
@@ -159,7 +161,7 @@ async function moveVariantFocus(
           <span>{{ row.choice.label }}</span>
           <small v-if="row.choice.description">{{ row.choice.description }}</small>
         </span>
-        <kbd v-if="rowPosition < 9" class="opt-sc" data-find-skip>⌘{{ rowPosition + 1 }}</kbd>
+        <kbd v-if="rowPosition < 9" class="opt-sc" data-find-skip>{{ optionShortcut(rowPosition) }}</kbd>
       </div>
     </div>
     <label v-if="showConfirmInput && confirmInput" class="confirm-input-block">

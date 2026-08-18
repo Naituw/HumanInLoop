@@ -57,12 +57,12 @@ fn resolve_one(
     })
 }
 
-/// `~` 或 `~/...` 展开为家目录；其余原样返回。
+/// `~`, `~/...`, or `~\...` expands to the home directory; other paths are unchanged.
 pub fn expand_tilde(raw: &str, home: &Path) -> PathBuf {
     if raw == "~" {
         return home.to_path_buf();
     }
-    if let Some(rest) = raw.strip_prefix("~/") {
+    if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
         return home.join(rest);
     }
     PathBuf::from(raw)
@@ -87,6 +87,10 @@ mod tests {
         assert_eq!(
             expand_tilde("~/Documents/a.md", &home),
             home.join("Documents/a.md")
+        );
+        assert_eq!(
+            expand_tilde("~\\Documents\\a.md", &home),
+            home.join("Documents\\a.md")
         );
     }
 

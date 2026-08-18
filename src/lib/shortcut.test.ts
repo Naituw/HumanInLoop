@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { primaryModifierPressed, primaryShortcutLabel } from "./platform";
 import {
   eventToSpec,
+  formatModifierPreview,
   formatShortcut,
   isModifierOnly,
   matchShortcut,
@@ -20,8 +22,19 @@ function spec(partial: Partial<ShortcutSpec>): ShortcutSpec {
 
 describe("eventToSpec", () => {
   it("normalizes the physical key so Shift does not change the result", () => {
-    const s = eventToSpec(keyEvent({ key: "D", code: "KeyD", metaKey: true, shiftKey: true }));
+    const s = eventToSpec(
+      keyEvent({ key: "D", code: "KeyD", metaKey: true, shiftKey: true }),
+      "mac",
+    );
     expect(s).toEqual(spec({ cmd: true, shift: true, key: "d" }));
+  });
+
+  it("stores Windows Ctrl as the portable primary modifier", () => {
+    const s = eventToSpec(
+      keyEvent({ key: "d", code: "KeyD", ctrlKey: true }),
+      "windows",
+    );
+    expect(s).toEqual(spec({ cmd: true, key: "d" }));
   });
 
   it("maps digits and punctuation codes", () => {
@@ -57,18 +70,50 @@ describe("specToString / parseShortcut", () => {
 
 describe("formatShortcut", () => {
   it("renders macOS-style symbols", () => {
-    expect(formatShortcut("cmd+shift+d")).toBe("⇧⌘D");
-    expect(formatShortcut("ctrl+alt+enter")).toBe("⌃⌥↩");
-    expect(formatShortcut("")).toBe("");
+    expect(formatShortcut("cmd+shift+d", "mac")).toBe("⇧⌘D");
+    expect(formatShortcut("ctrl+alt+enter", "mac")).toBe("⌃⌥↩");
+    expect(formatShortcut("", "mac")).toBe("");
+  });
+
+  it("renders Windows and Linux shortcuts with Ctrl labels", () => {
+    expect(formatShortcut("cmd+shift+d", "windows")).toBe("Ctrl+Shift+D");
+    expect(formatShortcut("ctrl+alt+enter", "linux")).toBe("Ctrl+Alt+Enter");
+    expect(formatModifierPreview(keyEvent({ ctrlKey: true, key: "Control" }), "windows"))
+      .toBe("Ctrl+…");
+  });
+});
+
+describe("primary shortcut labels", () => {
+  it("uses Command symbols on macOS and Ctrl names elsewhere", () => {
+    expect(primaryShortcutLabel("enter", "mac")).toBe("⌘↵");
+    expect(primaryShortcutLabel("enter", "windows")).toBe("Ctrl+Enter");
+    expect(primaryShortcutLabel("1", "linux")).toBe("Ctrl+1");
+  });
+
+  it("matches only the modifier shown for that platform", () => {
+    const command = keyEvent({ metaKey: true });
+    const control = keyEvent({ ctrlKey: true });
+    expect(primaryModifierPressed(command, "mac")).toBe(true);
+    expect(primaryModifierPressed(control, "mac")).toBe(false);
+    expect(primaryModifierPressed(control, "windows")).toBe(true);
+    expect(primaryModifierPressed(command, "windows")).toBe(false);
   });
 });
 
 describe("matchShortcut", () => {
   it("requires an exact modifier + key match", () => {
     const ev = keyEvent({ key: "d", code: "KeyD", metaKey: true });
-    expect(matchShortcut(ev, "cmd+d")).toBe(true);
-    expect(matchShortcut(ev, "cmd+shift+d")).toBe(false);
-    expect(matchShortcut(ev, "")).toBe(false);
+    expect(matchShortcut(ev, "cmd+d", "mac")).toBe(true);
+    expect(matchShortcut(ev, "cmd+shift+d", "mac")).toBe(false);
+    expect(matchShortcut(ev, "", "mac")).toBe(false);
+  });
+
+  it("maps historical cmd and ctrl tokens to Windows Ctrl", () => {
+    const control = keyEvent({ key: "d", code: "KeyD", ctrlKey: true });
+    expect(matchShortcut(control, "cmd+d", "windows")).toBe(true);
+    expect(matchShortcut(control, "ctrl+d", "windows")).toBe(true);
+    expect(matchShortcut(keyEvent({ key: "d", code: "KeyD", metaKey: true }), "cmd+d", "windows"))
+      .toBe(false);
   });
 });
 
@@ -85,10 +130,7 @@ describe("shortcutConflict", () => {
   });
 
   it("rejects bare editing shortcuts but allows them with extra modifiers", () => {
-    expect(shortcutConflict(spec({ cmd: true, key: "c" }))).toEqual({
-      key: "editing",
-      params: { key: "C" },
-    });
+    expect(shortcutConflict(spec({ cmd: true, key: "c" }))?.key).toBe("editing");
     expect(shortcutConflict(spec({ cmd: true, shift: true, key: "v" }))).toBeNull();
   });
 

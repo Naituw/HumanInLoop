@@ -1,4 +1,11 @@
 fn main() {
+    // WebView2 invokes commands while a deep native callback stack is active. Reserve enough
+    // virtual stack for the Windows UI thread so a future large command cannot regress into a
+    // process-wide stack overflow. Pages are committed on demand, not eagerly allocated.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        println!("cargo:rustc-link-arg=/STACK:8388608");
+    }
+
     // macOS 原生 QuickLook 预览面板（QLPreviewPanel）位于 Quartz 框架（QuickLookUI）。
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rustc-link-lib=framework=Quartz");

@@ -1,5 +1,8 @@
 # 开发计划：菜单栏状态图标 + 统一 GUI 宿主进程
 
+> Windows 注（2026-08）：本文保留首期 macOS/Linux 实施步骤；Windows tray、GUI Host、named-pipe
+> 单窗路由与 HKCU Run 已由平台对齐项目实现，以下 Windows 隐藏/单进程描述仅作历史记录。
+
 > 关联需求：`docs/specs/menu-bar-tray.md`
 > 计划描述方案与技术/规则细节；具体代码以实现为准。本计划自成一体，可脱离 spec 阅读。
 

@@ -9,11 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-#[cfg(unix)]
-use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader};
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -53,11 +49,15 @@ pub fn refresh() -> Vec<Workspace> {
             .filter(|workspace| !workspace.hidden)
             .collect();
     };
-    let mut by_path: HashMap<String, Workspace> = load()
-        .workspaces
-        .into_iter()
-        .map(|w| (w.path.clone(), w))
-        .collect();
+    let mut by_path: HashMap<String, Workspace> = HashMap::new();
+    for workspace in load().workspaces {
+        let key = crate::path_identity::key(&workspace.path);
+        if let Some(existing) = by_path.get_mut(&key) {
+            merge_workspace(existing, workspace);
+        } else {
+            by_path.insert(key, workspace);
+        }
+    }
     for (path, kind, timestamp) in scan_recent() {
         let Ok(canonical) = fs::canonicalize(&path) else {
             continue;
@@ -66,7 +66,8 @@ pub fn refresh() -> Vec<Workspace> {
             continue;
         }
         let path = canonical.to_string_lossy().to_string();
-        let entry = by_path.entry(path.clone()).or_insert_with(|| Workspace {
+        let key = crate::path_identity::key(&path);
+        let entry = by_path.entry(key).or_insert_with(|| Workspace {
             label: workspace_label(&canonical),
             path,
             last_used_at: timestamp,
@@ -100,7 +101,11 @@ pub fn add(path: &Path, pinned: bool) -> Result<Workspace, String> {
     let path_text = canonical.to_string_lossy().to_string();
     let mut state = load();
     let now = epoch_secs(SystemTime::now());
-    let value = if let Some(existing) = state.workspaces.iter_mut().find(|w| w.path == path_text) {
+    let value = if let Some(existing) = state
+        .workspaces
+        .iter_mut()
+        .find(|w| crate::path_identity::equivalent(&w.path, &path_text))
+    {
         existing.hidden = false;
         existing.pinned |= pinned;
         existing.last_used_at = existing.last_used_at.max(now);
@@ -136,51 +141,27 @@ pub fn set_hidden(path: &str, hidden: bool) -> Result<(), String> {
 pub fn forget(path: &str) -> Result<(), String> {
     let _lock = WorkspaceLock::acquire().map_err(|e| e.to_string())?;
     let mut state = load();
-    state.workspaces.retain(|w| w.path != path);
+    state
+        .workspaces
+        .retain(|w| !crate::path_identity::equivalent(&w.path, path));
     save(&state).map_err(|e| e.to_string())
 }
 
-#[cfg(unix)]
-struct WorkspaceLock(fs::File);
-
-#[cfg(not(unix))]
-struct WorkspaceLock;
+struct WorkspaceLock(crate::file_lock::FileLock);
 
 impl WorkspaceLock {
     fn acquire() -> std::io::Result<Self> {
-        #[cfg(unix)]
-        {
-            if let Some(parent) = paths::agent_workspaces_lock().parent() {
-                fs::create_dir_all(parent)?;
-            }
-            let file = OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(paths::agent_workspaces_lock())?;
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(Self(file))
-        }
-        #[cfg(not(unix))]
-        Ok(Self)
-    }
-}
-
-#[cfg(unix)]
-impl Drop for WorkspaceLock {
-    fn drop(&mut self) {
-        unsafe {
-            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
-        }
+        crate::file_lock::FileLock::exclusive(&paths::agent_workspaces_lock()).map(Self)
     }
 }
 
 fn mutate(path: &str, f: impl FnOnce(&mut Workspace)) -> Result<(), String> {
     let mut state = load();
-    let Some(item) = state.workspaces.iter_mut().find(|w| w.path == path) else {
+    let Some(item) = state
+        .workspaces
+        .iter_mut()
+        .find(|w| crate::path_identity::equivalent(&w.path, path))
+    else {
         return Err("workspace not found".to_string());
     };
     f(item);
@@ -210,8 +191,25 @@ fn sort_workspaces(items: &mut [Workspace]) {
         b.pinned
             .cmp(&a.pinned)
             .then_with(|| b.last_used_at.cmp(&a.last_used_at))
-            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| {
+                crate::path_identity::key(&a.path).cmp(&crate::path_identity::key(&b.path))
+            })
     });
+}
+
+fn merge_workspace(existing: &mut Workspace, incoming: Workspace) {
+    if incoming.last_used_at > existing.last_used_at {
+        existing.path = incoming.path.clone();
+        existing.label = incoming.label.clone();
+    }
+    existing.last_used_at = existing.last_used_at.max(incoming.last_used_at);
+    existing.pinned |= incoming.pinned;
+    existing.hidden &= incoming.hidden;
+    for agent in incoming.agents {
+        if !existing.agents.contains(&agent) {
+            existing.agents.push(agent);
+        }
+    }
 }
 
 fn workspace_label(path: &Path) -> String {
@@ -300,10 +298,15 @@ fn scan_grok(out: &mut Vec<(PathBuf, AgentKind, u64)>) {
 
 fn scan_cursor(out: &mut Vec<(PathBuf, AgentKind, u64)>) {
     let root = paths::cursor_dir().join("projects");
+    let mut seen = HashSet::new();
+    for (path, modified) in super::cursor_vscdb::recent_workspaces() {
+        if seen.insert(path.clone()) {
+            out.push((path, AgentKind::Cursor, modified));
+        }
+    }
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
-    let mut seen = HashSet::new();
     for entry in entries.flatten().take(MAX_SCAN_FILES_PER_AGENT) {
         let Ok(kind) = entry.file_type() else {
             continue;
@@ -312,7 +315,7 @@ fn scan_cursor(out: &mut Vec<(PathBuf, AgentKind, u64)>) {
             continue;
         }
         let encoded = entry.file_name().to_string_lossy().to_string();
-        let matches = recover_cursor_path(&encoded, Path::new("/"), 0, 2);
+        let matches = recover_cursor_project_key(&encoded);
         if matches.len() != 1 {
             continue;
         }
@@ -328,6 +331,39 @@ fn scan_cursor(out: &mut Vec<(PathBuf, AgentKind, u64)>) {
             .unwrap_or(0);
         out.push((path, AgentKind::Cursor, modified));
     }
+}
+
+#[cfg(not(windows))]
+fn recover_cursor_project_key(encoded: &str) -> Vec<PathBuf> {
+    recover_cursor_path(encoded, Path::new("/"), 0, 2)
+}
+
+#[cfg(windows)]
+fn recover_cursor_project_key(encoded: &str) -> Vec<PathBuf> {
+    let Some((root, remainder)) = windows_cursor_key_root(encoded) else {
+        return Vec::new();
+    };
+    recover_cursor_path(remainder, Path::new(&root), 0, 2)
+}
+
+/// Parse the unambiguous Windows key prefixes Cursor emits for drive paths. An explicit `UNC`
+/// prefix is also accepted for forward compatibility; current UNC workspaces are recovered from
+/// Cursor's exact database index before this lossy-key fallback is considered.
+fn windows_cursor_key_root(encoded: &str) -> Option<(String, &str)> {
+    let mut parts = encoded.splitn(2, '-');
+    let first = parts.next()?;
+    let remainder = parts.next().unwrap_or("");
+    if first.len() == 1 && first.as_bytes()[0].is_ascii_alphabetic() {
+        return Some((format!("{}:\\", first), remainder));
+    }
+    if first.eq_ignore_ascii_case("unc") {
+        let mut unc = remainder.splitn(3, '-');
+        let server = unc.next().filter(|part| !part.is_empty())?;
+        let share = unc.next().filter(|part| !part.is_empty())?;
+        let remainder = unc.next().unwrap_or("");
+        return Some((format!("\\\\{server}\\{share}"), remainder));
+    }
+    None
 }
 
 /// Resolve Cursor's hyphen-joined project key against the real filesystem. Exploration stops as
@@ -459,18 +495,49 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_workspace_metadata_is_merged_without_loss() {
+        let mut existing = Workspace {
+            path: r"C:\Work\Repo".into(),
+            label: "old".into(),
+            last_used_at: 1,
+            agents: vec![AgentKind::Claude],
+            pinned: true,
+            hidden: true,
+        };
+        merge_workspace(
+            &mut existing,
+            Workspace {
+                path: "c:/work/repo".into(),
+                label: "new".into(),
+                last_used_at: 2,
+                agents: vec![AgentKind::Codex],
+                pinned: false,
+                hidden: false,
+            },
+        );
+
+        assert_eq!(existing.path, "c:/work/repo");
+        assert_eq!(existing.label, "new");
+        assert_eq!(existing.last_used_at, 2);
+        assert!(existing.pinned);
+        assert!(!existing.hidden);
+        assert_eq!(existing.agents, vec![AgentKind::Claude, AgentKind::Codex]);
+    }
+
+    #[test]
     fn cursor_recovery_requires_unique_existing_path() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("one").join("two-three")).unwrap();
+        let root = dir.path().ancestors().last().unwrap();
         let encoded = format!(
             "{}-one-two-three",
             dir.path()
-                .strip_prefix("/")
+                .strip_prefix(root)
                 .unwrap()
                 .to_string_lossy()
-                .replace('/', "-")
+                .replace(['/', '\\'], "-")
         );
-        let matches = recover_cursor_path(&encoded, Path::new("/"), 0, 2);
+        let matches = recover_cursor_path(&encoded, root, 0, 2);
         assert_eq!(matches, vec![dir.path().join("one").join("two-three")]);
     }
 
@@ -480,15 +547,33 @@ mod tests {
         // Both interpretations of "one-two" exist: the nested one/two and the hyphenated one-two.
         fs::create_dir_all(dir.path().join("one").join("two")).unwrap();
         fs::create_dir_all(dir.path().join("one-two")).unwrap();
+        let root = dir.path().ancestors().last().unwrap();
         let encoded = format!(
             "{}-one-two",
             dir.path()
-                .strip_prefix("/")
+                .strip_prefix(root)
                 .unwrap()
                 .to_string_lossy()
-                .replace('/', "-")
+                .replace(['/', '\\'], "-")
         );
-        let matches = recover_cursor_path(&encoded, Path::new("/"), 0, 2);
+        let matches = recover_cursor_path(&encoded, root, 0, 2);
         assert_eq!(matches.len(), 2, "ambiguity must surface both candidates");
+    }
+
+    #[test]
+    fn windows_cursor_key_roots_preserve_drive_and_unc_identity() {
+        assert_eq!(
+            windows_cursor_key_root("C-Users-Alice-Repo"),
+            Some(("C:\\".to_string(), "Users-Alice-Repo"))
+        );
+        assert_eq!(
+            windows_cursor_key_root("e-project-中文-Space Here"),
+            Some(("e:\\".to_string(), "project-中文-Space Here"))
+        );
+        assert_eq!(
+            windows_cursor_key_root("UNC-server-share-Team-Repo"),
+            Some(("\\\\server\\share".to_string(), "Team-Repo"))
+        );
+        assert_eq!(windows_cursor_key_root("Users-Alice-Repo"), None);
     }
 }

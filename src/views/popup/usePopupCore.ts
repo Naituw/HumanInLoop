@@ -29,7 +29,11 @@ import {
   todosRemove,
 } from "../../lib/ipc";
 import { isFocusableTerminal } from "../../lib/terminals";
-import { isWindows } from "../../lib/platform";
+import {
+  isWindows,
+  primaryModifierPressed,
+  primaryShortcutLabel,
+} from "../../lib/platform";
 import { matchShortcut } from "../../lib/shortcut";
 import { applyLanguage } from "../../i18n";
 import { renderMarkdown, handleCodeCopyClick } from "../../lib/markdown";
@@ -588,6 +592,7 @@ export function usePopupCore() {
   // 来源 agent：家族标识 + pid + 所在终端类型（决定 badge 是否可点击激活 tab）。
   const agentKind = ref("");
   const agentPid = ref<number | null>(null);
+  const agentLaunchId = ref<string | null>(null);
   const agentConsoleSessionId = ref("");
   const agentTerminal = ref<string | null>(null);
   // agent badge 文案：本地化家族名（Claude Code / Codex / Cursor / Grok）；未知家族回退原始标识。
@@ -597,9 +602,11 @@ export function usePopupCore() {
     const label = t(`agents.kind.${k}`);
     return label === `agents.kind.${k}` ? k : label;
   });
-  // agent badge 是否可点击：所在终端可激活 tab 且有 pid。
+  // macOS uses a pid/TTY; Windows uses a daemon-registered launch UUID.
   const agentFocusable = computed(
-    () => !!agentPid.value && isFocusableTerminal(agentTerminal.value)
+    () =>
+      (!!agentPid.value || !!agentLaunchId.value) &&
+      isFocusableTerminal(agentTerminal.value)
   );
   const agentConsoleAvailable = computed(
     () => agentConsoleSessionId.value.length > 0
@@ -607,9 +614,9 @@ export function usePopupCore() {
 
   // 点击 agent badge：聚焦该 agent 所在终端的 tab（失败静默，仅日志）。
   async function onFocusAgentTerminal() {
-    if (!agentFocusable.value || agentPid.value == null) return;
+    if (!agentFocusable.value) return;
     try {
-      await focusAgentTerminal(agentPid.value);
+      await focusAgentTerminal(agentPid.value, agentLaunchId.value);
     } catch (err) {
       console.warn("focus agent terminal failed", err);
     }
@@ -897,7 +904,7 @@ export function usePopupCore() {
   );
   /** Label for the submit shortcut badge (⌘↵ vs ↵). */
   const submitKeyLabel = computed(() =>
-    submitWithBareEnter.value ? "↵" : "⌘↵"
+    submitWithBareEnter.value ? "↵" : primaryShortcutLabel("enter")
   );
   const submitPrimary = computed(() => submitShowsCmdEnter.value);
   // 下一个是否主按钮：末题从不主；否则在「提交尚未成为主按钮」时为主（读题引导）。
@@ -908,7 +915,7 @@ export function usePopupCore() {
   // CMD+数字 选项快捷键上限（1-9）；超出的选项不分配快捷键。
   const OPTION_HOTKEY_MAX = 9;
   function optionHotkey(i: number): string | null {
-    return i < OPTION_HOTKEY_MAX ? `⌘${i + 1}` : null;
+    return i < OPTION_HOTKEY_MAX ? primaryShortcutLabel(String(i + 1)) : null;
   }
 
   function isAnswered(i: number): boolean {
@@ -1859,7 +1866,7 @@ export function usePopupCore() {
   // 仅「纯」⌘/Ctrl（未叠加 Shift/Option）才算命中快捷键修饰键：例如 Cmd+Shift（截屏）下
   // 再按 1–9 不会命中选项快捷键，故此时不应高亮。
   function onlyCmdHeld(e: KeyboardEvent): boolean {
-    return (e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey;
+    return primaryModifierPressed(e) && !e.shiftKey && !e.altKey;
   }
 
   /** Insert a newline at the caret of the focused textarea (enter-submit mode). */
@@ -1890,7 +1897,7 @@ export function usePopupCore() {
   }
 
   function onKeydown(e: KeyboardEvent) {
-    const mod = e.metaKey || e.ctrlKey;
+    const mod = primaryModifierPressed(e);
     cmdHeld.value = onlyCmdHeld(e);
     // In-page find (⌘/Ctrl+F, Esc while open, ⌘G, …) — before business shortcuts.
     if (find.handleFindKeydown(e)) return;
@@ -1905,7 +1912,7 @@ export function usePopupCore() {
         if (e.isComposing || (e as KeyboardEvent & { keyCode?: number }).keyCode === 229) {
           return;
         }
-        const anyMod = mod || e.shiftKey || e.altKey;
+        const anyMod = e.metaKey || e.ctrlKey || e.shiftKey || e.altKey;
         const isPrimarySendMod = mod && !e.shiftKey && !e.altKey;
         const shouldSubmit = submitWithBareEnter.value ? !anyMod : isPrimarySendMod;
         if (shouldSubmit) {
@@ -1947,7 +1954,7 @@ export function usePopupCore() {
       if (e.isComposing || (e as KeyboardEvent & { keyCode?: number }).keyCode === 229) {
         return;
       }
-      const anyMod = mod || e.shiftKey || e.altKey;
+      const anyMod = e.metaKey || e.ctrlKey || e.shiftKey || e.altKey;
       const isPrimarySendMod = mod && !e.shiftKey && !e.altKey; // pure ⌘/Ctrl+Enter
       const shouldSubmit = submitWithBareEnter.value
         ? !anyMod
@@ -2275,17 +2282,27 @@ export function usePopupCore() {
     // 升级成「可点 + ↗」（终端类型探测仍要跑进程链 ps，故也在此渲染后异步进行）。旧 daemon 可能随
     // popup_init 直接带 pid → 一并处理。
     if (init.agentPid != null) {
-      void applyAgentResolved(init.agentKind, init.agentPid);
+      void applyAgentResolved(init.agentKind, init.agentPid, undefined);
     }
-    unlistenAgent = await listen<{ kind?: string | null; pid?: number | null }>(
+    unlistenAgent = await listen<{
+      kind?: string | null;
+      pid?: number | null;
+      launchId?: string | null;
+    }>(
       "agent-resolved",
       (e) => {
-        void applyAgentResolved(e.payload.kind, e.payload.pid);
+        void applyAgentResolved(
+          e.payload.kind,
+          e.payload.pid,
+          e.payload.launchId
+        );
       },
     );
     try {
       const r = await popupAgentResolved();
-      if (r.kind || r.pid != null) void applyAgentResolved(r.kind, r.pid);
+      if (r.kind || r.pid != null || r.launchId) {
+        void applyAgentResolved(r.kind, r.pid, r.launchId);
+      }
     } catch {
       /* 无 daemon / 单进程回退：忽略 */
     }
@@ -2301,11 +2318,17 @@ export function usePopupCore() {
   /// 「可点 + ↗」。幂等：pull 初值与事件可能各触发一次，重复设值无副作用。
   async function applyAgentResolved(
     kind: string | null | undefined,
-    pid: number | null | undefined
+    pid: number | null | undefined,
+    launchId: string | null | undefined
   ) {
     if (kind && !agentKind.value) agentKind.value = kind;
+    if (launchId) {
+      agentLaunchId.value = launchId;
+      if (isWindows) agentTerminal.value = "windows-terminal";
+    }
     if (pid != null) {
       agentPid.value = pid;
+      if (launchId && isWindows) return;
       try {
         agentTerminal.value = (await popupAgentTerminal(pid)) ?? null;
       } catch {

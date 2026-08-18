@@ -1,14 +1,12 @@
 //! 前端可调用的 Tauri 命令（弹窗模式）。
 
-use crate::app::coordinator::Coordinator;
 use crate::app::AppState;
 use crate::config::{AppConfig, ThemeMode, WindowEffect};
 use crate::integrations::cursor_hook;
-use crate::models::{ChannelAction, ChannelResult, InteractionRequest, QuestionAnswer};
+use crate::models::{InteractionRequest, QuestionAnswer};
 use crate::telegram::TelegramClient;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -60,11 +58,10 @@ pub struct PopupInit {
 #[tauri::command]
 pub fn popup_init(app: AppHandle, state: State<AppState>) -> PopupInit {
     // 方案6 预热弹窗：内容来自领用槽（`WarmPopup.show`）——`Some`=已领用、`None`=待命（request 返回 null，
-    // 前端等 `popup-show` 唤醒后再 pull）。冷 / 单进程：内容在构建时已注入 `AppState`。
+    // 前端等 `popup-show` 唤醒后再 pull）。冷 helper 的内容在构建时已注入 `AppState`。
     // language：预热弹窗进程长期存活、`state.config` 可能滞后，故领用时优先用 `Show.lang`（已解析的
     // en/zh）；其余路径用本进程 config 的原始值（auto/en/zh）。
     let default_lang = state.config.general.language.clone();
-    #[cfg(unix)]
     let (
         interaction,
         popup_edit,
@@ -117,34 +114,8 @@ pub fn popup_init(app: AppHandle, state: State<AppState>) -> PopupInit {
             state.created_at_ms,
         )
     };
-    #[cfg(not(unix))]
-    let (
-        interaction,
-        popup_edit,
-        source,
-        project,
-        agent_kind,
-        agent_pid,
-        agent_console_session_id,
-        language,
-        warm,
-        created_at_ms,
-    ) = (
-        Some(state.interaction.clone()),
-        state.popup_edit.clone(),
-        state.source.clone(),
-        state.project.clone(),
-        state.agent_kind.clone(),
-        state.agent_pid,
-        state.agent_console_session_id.clone(),
-        default_lang,
-        false,
-        state.created_at_ms,
-    );
-    let _ = &app;
-
     // 预热进程长存、`state.config` 可能滞后：领用时按最新 config 取主题/置顶/语音（无钥匙串）；
-    // 其余路径（刚 spawn 的冷 helper / 单进程）用本进程 config 即可。
+    // 刚 spawn 的冷 helper 直接使用本进程 config。
     let fresh = if warm {
         Some(AppConfig::load_without_secrets())
     } else {
@@ -158,7 +129,7 @@ pub fn popup_init(app: AppHandle, state: State<AppState>) -> PopupInit {
         popup_edit,
         theme: theme_str(cfg.general.theme),
         always_on_top: cfg.general.always_on_top,
-        // GUI Helper 模式下来源名由 Daemon 上送（A11）；单进程 / 设置回退取本进程环境。
+        // Popup helper source metadata is supplied by the daemon.
         source_name: source,
         project,
         project_name,
@@ -183,7 +154,6 @@ pub async fn enrich_permission_diff(
     state: State<'_, AppState>,
     request_id: String,
 ) -> Result<crate::permission_diff::PermissionDiffModel, String> {
-    #[cfg(unix)]
     let (current_id, intent) = if let Some(warm) = app.try_state::<crate::app::WarmPopup>() {
         let show = warm
             .show
@@ -200,17 +170,6 @@ pub async fn enrich_permission_diff(
             .ok_or_else(|| "permission diff requires a confirmation".to_string())?;
         (id, state.popup_edit.clone())
     };
-    #[cfg(not(unix))]
-    let (current_id, intent) = {
-        let _ = &app;
-        let id = state
-            .interaction
-            .confirm()
-            .map(|request| request.id.clone())
-            .ok_or_else(|| "permission diff requires a confirmation".to_string())?;
-        (id, state.popup_edit.clone())
-    };
-
     if current_id != request_id {
         return Err("permission diff request changed".to_string());
     }
@@ -251,29 +210,24 @@ pub async fn enrich_permission_diff(
 /// authoritative foreground/background presentation after cross-process focus arbitration.
 #[tauri::command]
 pub fn popup_show_window(app: AppHandle) {
-    #[cfg(unix)]
-    {
-        let app2 = app.clone();
-        let _ = app.run_on_main_thread(move || {
-            let window_number = {
-                #[cfg(target_os = "macos")]
-                {
-                    app2.get_webview_window("popup")
-                        .and_then(|window| window.ns_window().ok())
-                        .and_then(crate::macos_window_order::window_number)
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    None
-                }
-            };
-            if let Some(bridge) = app2.try_state::<crate::app::GuiBridge>() {
-                bridge.send_popup_ready(window_number);
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let window_number = {
+            #[cfg(target_os = "macos")]
+            {
+                app2.get_webview_window("popup")
+                    .and_then(|window| window.ns_window().ok())
+                    .and_then(crate::macos_window_order::window_number)
             }
-        });
-    }
-    #[cfg(not(unix))]
-    let _ = app;
+            #[cfg(not(target_os = "macos"))]
+            {
+                None
+            }
+        };
+        if let Some(bridge) = app2.try_state::<crate::app::GuiBridge>() {
+            bridge.send_popup_ready(window_number);
+        }
+    });
 }
 
 /// 前端性能埋点回传：把某阶段标记写入 `perf.log`（关联 id 取自 helper 进程的 `ASKHUMAN_PERF_ID`）。
@@ -307,6 +261,7 @@ pub fn popup_agent_terminal(pid: u32) -> Option<String> {
 pub struct PushedAgent {
     pub kind: Option<String>,
     pub pid: Option<u32>,
+    pub launch_id: Option<String>,
 }
 
 static PUSHED_AGENT: std::sync::OnceLock<std::sync::Mutex<PushedAgent>> =
@@ -709,7 +664,7 @@ pub struct TodosInit {
     lang: String,
     /// 与弹窗一致的提交快捷键：`cmdEnter`（⌘/Ctrl+Enter）或 `enter`（裸 Enter）。
     popup_submit_key: String,
-    /// 「创建任务」入口是否可用（spec gui-agent-task-launch G1）：macOS 且 Terminal.app 存在。
+    /// Whether a supported platform terminal is available for creating Agent tasks.
     new_task_supported: bool,
 }
 
@@ -890,10 +845,7 @@ pub fn todos_projects() -> Vec<TodoProjectInfo> {
 /// 前端在首屏 `todos_projects` 之后后台调用，避免下拉打开前卡在 IPC。
 #[tauri::command]
 pub async fn todos_projects_enriched() -> Vec<TodoProjectInfo> {
-    #[cfg(unix)]
     let agents = crate::client::agents_snapshot_if_running().await;
-    #[cfg(not(unix))]
-    let agents: Option<serde_json::Value> = None;
     build_todo_project_list(agents.as_ref())
 }
 
@@ -901,27 +853,19 @@ pub async fn todos_projects_enriched() -> Vec<TodoProjectInfo> {
 /// `dir` 为预选项目定位目录（如 agent 的 cwd），后端映射到 git 根 key；None＝前端自选默认。
 #[tauri::command]
 pub fn open_todos(app: AppHandle, dir: Option<String>) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        let project = dir
-            .filter(|d| !d.trim().is_empty())
-            .map(|d| crate::project::detect_from(std::path::Path::new(&d)))
-            .filter(|k| !k.is_empty());
-        route_open_window(
-            app,
-            crate::gui_host::WindowKind::Todos,
-            false,
-            project,
-            None,
-            None,
-        );
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (app, dir);
-        Err("unsupported".to_string())
-    }
+    let project = dir
+        .filter(|d| !d.trim().is_empty())
+        .map(|d| crate::project::detect_from(std::path::Path::new(&d)))
+        .filter(|k| !k.is_empty());
+    route_open_window(
+        app,
+        crate::gui_host::WindowKind::Todos,
+        false,
+        project,
+        None,
+        None,
+    );
+    Ok(())
 }
 
 /// 打开（或聚焦）「新建 Agent 任务」窗口（spec gui-agent-task-launch）：经统一宿主路由
@@ -932,23 +876,15 @@ pub fn open_new_task(
     project: Option<String>,
     todo: Option<String>,
 ) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        route_open_window(
-            app,
-            crate::gui_host::WindowKind::NewTask,
-            false,
-            project.filter(|p| !p.trim().is_empty()),
-            None,
-            todo.filter(|t| !t.trim().is_empty()),
-        );
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (app, project, todo);
-        Err("unsupported".to_string())
-    }
+    route_open_window(
+        app,
+        crate::gui_host::WindowKind::NewTask,
+        false,
+        project.filter(|p| !p.trim().is_empty()),
+        None,
+        todo.filter(|t| !t.trim().is_empty()),
+    );
+    Ok(())
 }
 
 #[tauri::command]
@@ -957,27 +893,19 @@ pub fn open_fork_task(app: AppHandle, session: String) -> Result<(), String> {
     if session.is_empty() {
         return Err("source session is required".into());
     }
-    #[cfg(unix)]
-    {
-        route_open_window(
-            app,
-            crate::gui_host::WindowKind::ForkTask,
-            false,
-            None,
-            Some(crate::gui_host::InterjectTarget {
-                session: session.to_string(),
-                agent: None,
-                cwd: None,
-            }),
-            None,
-        );
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = app;
-        Err("unsupported".into())
-    }
+    route_open_window(
+        app,
+        crate::gui_host::WindowKind::ForkTask,
+        false,
+        None,
+        Some(crate::gui_host::InterjectTarget {
+            session: session.to_string(),
+            agent: None,
+            cwd: None,
+        }),
+        None,
+    );
+    Ok(())
 }
 
 /// 前端提交的作答内容（按问题顺序，每题一项）。
@@ -990,19 +918,8 @@ pub struct PopupSubmission {
 
 #[tauri::command]
 pub fn submit_popup(app: AppHandle, submission: PopupSubmission) {
-    // GUI Helper 模式：经 IPC 回传 Daemon。
     if let Some(bridge) = app.try_state::<crate::app::GuiBridge>() {
         bridge.send_answer(submission.answers);
-        return;
-    }
-    // 单进程（非 unix 回退）模式：投递本地协调器。
-    let result = ChannelResult {
-        action: ChannelAction::Send,
-        answers: submission.answers,
-        source_channel_id: "popup".to_string(),
-    };
-    if let Some(c) = app.try_state::<Arc<Coordinator>>() {
-        c.submit(result);
     }
 }
 
@@ -1032,10 +949,6 @@ pub fn confirm_popup_ready(app: AppHandle) -> Result<(), String> {
 pub fn cancel_popup(app: AppHandle) {
     if let Some(bridge) = app.try_state::<crate::app::GuiBridge>() {
         bridge.send_cancel();
-        return;
-    }
-    if let Some(c) = app.try_state::<Arc<Coordinator>>() {
-        c.submit(ChannelResult::cancel("popup"));
     }
 }
 
@@ -1236,7 +1149,7 @@ pub struct AgentsInit {
     lang: String,
     /// 与弹窗一致的提交快捷键（控制台输入框 ⌘↵ 发送）。
     popup_submit_key: String,
-    /// 「新建任务」入口是否可用（spec gui-agent-task-launch G1 同口径）：macOS 且 Terminal.app 存在。
+    /// Whether a supported platform terminal is available for creating Agent tasks.
     new_task_supported: bool,
 }
 
@@ -1258,16 +1171,12 @@ pub fn agents_init() -> AgentsInit {
 /// （幂等）。延迟到此刻才连 daemon，是为避免 daemon 的首帧立即快照早于前端监听而丢失。
 #[tauri::command]
 pub fn agents_start_subscription(app: AppHandle) {
-    #[cfg(unix)]
     crate::app::start_agents_subscription(app);
-    #[cfg(not(unix))]
-    let _ = app;
 }
 
 /// 把「打开窗口」请求路由到统一 GUI 宿主（spec D3）：宿主在则聚焦/新建（全局单窗），不在则拉起。
 /// 失败兜底：在当前（弹窗）进程内直接建窗，保证按钮始终能开窗。整个过程在后台线程进行，
 /// 避免阻塞调用方（弹窗 UI 线程）——`host_open` 在宿主冷启动时可能耗时上百毫秒到数秒。
-#[cfg(unix)]
 fn route_open_window(
     app: AppHandle,
     kind: crate::gui_host::WindowKind,
@@ -1363,7 +1272,6 @@ fn effective_popup_history_context(
     app: &AppHandle,
     state: &State<AppState>,
 ) -> (String, Option<crate::gui_host::HistoryOpenTarget>) {
-    #[cfg(unix)]
     if let Some(warm) = app.try_state::<crate::app::WarmPopup>() {
         if let Some(show) = warm.show.lock().ok().and_then(|show| show.clone()) {
             let target = history_open_target(
@@ -1384,7 +1292,6 @@ fn effective_popup_history_context(
     (state.project.clone(), target)
 }
 
-#[cfg(unix)]
 fn route_open_history_window(
     app: AppHandle,
     project: String,
@@ -1412,7 +1319,6 @@ fn route_open_history_window(
 
 /// Resolve the popup's daemon-validated Agent Window target. Warm helpers keep per-request context
 /// in `WarmPopup.show`; cold helpers keep it in `AppState`.
-#[cfg(unix)]
 fn effective_popup_agent_console_session(
     app: &AppHandle,
     state: &State<AppState>,
@@ -1432,55 +1338,30 @@ fn effective_popup_agent_console_session(
 /// The frontend supplies no session identifier of its own; absence means the shortcut is invalid.
 #[tauri::command]
 pub fn open_agent_console(app: AppHandle, state: State<AppState>) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        let session_id = effective_popup_agent_console_session(&app, &state)
-            .filter(|session_id| !session_id.trim().is_empty())
-            .ok_or_else(|| "no matched agent session".to_string())?;
-        route_open_window(
-            app,
-            crate::gui_host::WindowKind::Agents,
-            false,
-            None,
-            Some(crate::gui_host::InterjectTarget {
-                session: session_id,
-                agent: None,
-                cwd: None,
-            }),
-            None,
-        );
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (app, state);
-        Err("unsupported".to_string())
-    }
+    let session_id = effective_popup_agent_console_session(&app, &state)
+        .filter(|session_id| !session_id.trim().is_empty())
+        .ok_or_else(|| "no matched agent session".to_string())?;
+    route_open_window(
+        app,
+        crate::gui_host::WindowKind::Agents,
+        false,
+        None,
+        Some(crate::gui_host::InterjectTarget {
+            session: session_id,
+            agent: None,
+            cwd: None,
+        }),
+        None,
+    );
+    Ok(())
 }
 
 /// 从弹窗导航栏打开独立历史窗口：路由到统一宿主（全局单窗），默认过滤到弹窗所属项目。
 #[tauri::command]
 pub fn open_history(app: AppHandle, state: State<AppState>) -> Result<(), String> {
     let (project, target) = effective_popup_history_context(&app, &state);
-    #[cfg(unix)]
-    {
-        route_open_history_window(app, project, target);
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let cfg = AppConfig::load_without_secrets();
-        let pin = crate::app::popup_pin(&app, &cfg);
-        crate::app::create_history_window(
-            &app,
-            &cfg,
-            false,
-            Some(project.as_str()),
-            target.as_ref(),
-            pin,
-        )
-        .map_err(|e| e.to_string())
-    }
+    route_open_history_window(app, project, target);
+    Ok(())
 }
 
 /// 读取历史记录：`all` 为 true 时返回全部项目，否则按 `project`（缺省空串）过滤；按时间倒序。
@@ -1719,7 +1600,6 @@ pub async fn save_settings(
 ) -> Result<(), String> {
     if config.agent_tasks.enabled {
         config.general.daemon_lifecycle = crate::config::DaemonLifecycleMode::KeepAlive;
-        #[cfg(unix)]
         crate::integrations::login_item::sync_daemon(true).map_err(|e| e.to_string())?;
     }
     // Secrets are governed solely by the explicit actions (the incoming config carries blank
@@ -1751,7 +1631,6 @@ pub async fn save_settings(
         secret_actions.slack_app_token,
     );
     config.save().map_err(|e| e.to_string())?;
-    #[cfg(unix)]
     if config.agent_tasks.enabled {
         crate::client::ensure_running()
             .await
@@ -1776,15 +1655,7 @@ pub async fn save_settings(
 pub async fn permission_rules_panel(
     op: crate::ipc::PermissionRulesOp,
 ) -> Result<crate::ipc::PermissionRulesResult, String> {
-    #[cfg(unix)]
-    {
-        crate::client::permission_rules_op(op).await
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = op;
-        Err("unsupported platform".to_string())
-    }
+    crate::client::permission_rules_op(op).await
 }
 
 #[tauri::command]
@@ -1802,26 +1673,6 @@ pub fn agent_task_workspace_add(
     path: String,
 ) -> Result<crate::agents::workspaces::Workspace, String> {
     crate::agents::workspaces::add(std::path::Path::new(&path), false)
-}
-
-/// Open the native system directory picker used by the Agent-task workspace manager.
-#[tauri::command]
-pub fn agent_task_workspace_pick(app: AppHandle) -> Result<Option<String>, String> {
-    #[cfg(target_os = "macos")]
-    {
-        use std::sync::mpsc::channel;
-        let (tx, rx) = channel();
-        app.run_on_main_thread(move || {
-            let _ = tx.send(crate::macos_menu::choose_directory());
-        })
-        .map_err(|e| e.to_string())?;
-        rx.recv().map_err(|e| e.to_string())?
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = app;
-        Err("Agent task workspace picker is only supported on macOS".to_string())
-    }
 }
 
 #[tauri::command]
@@ -1847,26 +1698,10 @@ pub async fn agent_task_readiness(
         .map_err(|e| e.to_string())
 }
 
-/// Open a harmless Terminal.app self-check. It never resolves or starts an Agent binary.
+/// Open a harmless platform terminal self-check. It never resolves or starts an Agent binary.
 #[tauri::command]
 pub fn agent_task_test_terminal() -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let script = r#"tell application "Terminal"
-activate
-do script "printf '\\nAskHuman Terminal test succeeded.\\n'"
-end tell"#;
-        let status = std::process::Command::new("/usr/bin/osascript")
-            .args(["-e", script])
-            .status()
-            .map_err(|e| e.to_string())?;
-        status
-            .success()
-            .then_some(())
-            .ok_or_else(|| "Terminal.app rejected the test".to_string())
-    }
-    #[cfg(not(target_os = "macos"))]
-    Err("Terminal.app test is only available on macOS".to_string())
+    crate::integrations::agent_launch::test_terminal().map_err(|error| error.to_string())
 }
 
 // ===== 「新建 Agent 任务」窗口（spec gui-agent-task-launch）=====
@@ -1985,7 +1820,7 @@ pub fn project_key_of(dir: String) -> String {
     crate::project::detect_from(std::path::Path::new(&dir))
 }
 
-/// 启动新任务（spec gui-agent-task-launch §2.5）：复用 IM 的 LaunchRecord + Terminal.app 链路。
+/// Start a task through the same private LaunchRecord and platform-terminal bridge used by IM.
 /// `task` 由前端拼装（选待办时 = 待办原文快照 + 空行 + 补充）；`todo_project`/`todo_id` 非空时
 /// Terminal 成功打开后 best-effort 出队（G7）。成功后 best-effort 把活跃槽切到 popup（G11）。
 #[tauri::command]
@@ -2055,7 +1890,6 @@ pub async fn new_task_launch(
     .await
     .map_err(|e| e.to_string())??;
     // 活跃槽切 popup（G11）：人在电脑旁，新 Agent 的提问默认弹窗。即发即走，不影响启动结果。
-    #[cfg(unix)]
     tokio::spawn(crate::client::activate_popup_slot());
     Ok(())
 }
@@ -2140,14 +1974,11 @@ fn fork_task_source(
 #[tauri::command]
 pub async fn fork_task_init(session: String) -> Result<ForkTaskInit, String> {
     if !crate::integrations::agent_launch::terminal_available() {
-        return Err("Terminal.app is unavailable".into());
+        return Err("A supported system terminal is unavailable".into());
     }
-    #[cfg(unix)]
     let snapshot = crate::client::agents_snapshot_if_running()
         .await
         .ok_or_else(|| "Agent daemon is unavailable".to_string())?;
-    #[cfg(not(unix))]
-    let snapshot = serde_json::Value::Array(Vec::new());
     let source = fork_task_source(&snapshot, session.trim(), true)?;
     let kind = crate::agents::AgentKind::parse(&source.kind).ok_or("unknown source Agent")?;
     let readiness = tokio::task::spawn_blocking(move || {
@@ -2190,12 +2021,9 @@ pub async fn fork_task_launch(
         return Err("Fork instruction must not contain NUL characters".into());
     }
     let session = session.trim().to_string();
-    #[cfg(unix)]
     let snapshot = crate::client::agents_snapshot_if_running()
         .await
         .ok_or_else(|| "Agent daemon is unavailable".to_string())?;
-    #[cfg(not(unix))]
-    let snapshot = serde_json::Value::Array(Vec::new());
     // Re-resolve kind/cwd from the daemon's locked source identity. The source may have ended
     // since the window opened, but renderer-provided adapter/path values are never trusted.
     let locked_source = fork_task_source(&snapshot, &session, false)?;
@@ -2219,7 +2047,6 @@ pub async fn fork_task_launch(
     })
     .await
     .map_err(|error| error.to_string())??;
-    #[cfg(unix)]
     crate::client::register_launch(&record).await;
     let launch_id = record.id.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -2229,7 +2056,6 @@ pub async fn fork_task_launch(
     .await
     .map_err(|error| error.to_string())?;
     if result.is_err() {
-        #[cfg(unix)]
         crate::client::cancel_launch(launch_id).await;
     }
     result
@@ -2341,7 +2167,7 @@ pub fn open_test_popup() -> Result<(), String> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PopupSoundSupport {
-    /// `"named"` (macOS with `names`), `"toggle"` (Linux), or `"none"` (hidden).
+    /// `"named"` (macOS with `names`), `"toggle"` (Windows/Linux), or `"none"` (hidden).
     kind: String,
     /// Optional sound names, only non-empty for `"named"`.
     names: Vec<String>,
@@ -2406,28 +2232,16 @@ pub(crate) fn apply_theme_to_windows(app: &AppHandle, theme: &str) {
 /// `tab` 可选：打开后定位到指定 tab（如 R6 引导跳「渠道」）。
 #[tauri::command]
 pub fn open_settings(app: AppHandle, tab: Option<String>) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        // 路由到统一宿主（全局单窗）；宿主不可用时回退到本进程内建窗。
-        route_open_window(
-            app,
-            crate::gui_host::WindowKind::Settings,
-            false,
-            tab,
-            None,
-            None,
-        );
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        // Settings window only needs general (theme) to build; the page fetches secret presence via
-        // get_settings() separately. Skip keychain here.
-        let cfg = AppConfig::load_without_secrets();
-        let pin = crate::app::popup_pin(&app, &cfg);
-        crate::app::create_settings_window(&app, &cfg, pin, tab.as_deref())
-            .map_err(|e| e.to_string())
-    }
+    // Route to the unified Host; fall back to an in-process window if Host startup fails.
+    route_open_window(
+        app,
+        crate::gui_host::WindowKind::Settings,
+        false,
+        tab,
+        None,
+        None,
+    );
+    Ok(())
 }
 
 // ===== 弹窗一次性引导（R6）=====
@@ -2458,20 +2272,13 @@ pub fn apply_window_effect(app: AppHandle, effect: WindowEffect) {
 }
 
 /// 渠道健康快照（R7）：向 daemon 查询各渠道最近未恢复的故障，设置页渠道 tab 据此显示错误横幅。
-/// daemon 未运行（或非 Unix 无 daemon）→ 空列表。
+/// daemon 未运行或不可达时返回空列表。
 #[tauri::command]
 pub async fn channel_health() -> Vec<crate::ipc::ChannelIssueInfo> {
-    #[cfg(unix)]
-    {
-        crate::client::request_status()
-            .await
-            .map(|s| s.channel_issues)
-            .unwrap_or_default()
-    }
-    #[cfg(not(unix))]
-    {
-        Vec::new()
-    }
+    crate::client::request_status()
+        .await
+        .map(|s| s.channel_issues)
+        .unwrap_or_default()
 }
 
 // ===== 语音输入（macOS 26 SpeechAnalyzer，离线，经 Swift 桥） =====
@@ -2745,7 +2552,6 @@ pub fn agent_permission_set(
 ) -> Result<(), String> {
     let a = parse_agent(&agent)?;
     agent_permission::set_enabled(a, enabled).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
     crate::app::gui_host::refresh_integration_updates(&app);
     Ok(())
 }
@@ -2774,7 +2580,6 @@ pub fn agent_mode_set(app: tauri::AppHandle, agent: String, mode: String) -> Res
         crate::i18n::tr(crate::i18n::Lang::current(), "cmd.unknownMode").to_string()
     })?;
     agent_mode::set(a, m).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
     crate::app::gui_host::refresh_integration_updates(&app);
     Ok(())
 }
@@ -2784,7 +2589,6 @@ pub fn agent_mode_set(app: tauri::AppHandle, agent: String, mode: String) -> Res
 pub fn agent_mode_update(app: tauri::AppHandle, agent: String) -> Result<(), String> {
     let a = parse_agent(&agent)?;
     agent_mode::update(a).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
     crate::app::gui_host::refresh_integration_updates(&app);
     Ok(())
 }
@@ -2801,7 +2605,6 @@ pub fn agent_mode_update_artifact(
         crate::i18n::tr(crate::i18n::Lang::current(), "cmd.unknownArtifact").to_string()
     })?;
     agent_mode::update_artifact(a, art).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
     crate::app::gui_host::refresh_integration_updates(&app);
     Ok(())
 }
@@ -2876,21 +2679,18 @@ pub fn agent_lifecycle_uninstall(app: AppHandle, agent: String) -> Result<String
     Ok(msg)
 }
 
-/// 聚焦某 Agent 所在的终端（实验性，macOS：Terminal.app / iTerm2）。由 Agent 状态窗口逐行调用，
-/// 传入该会话的 agent 进程 pid；失败（无 tty / 不支持的终端 / 未授权 / 找不到）返回 Err。
+/// Focus an Agent's registered terminal surface. macOS resolves an exact TTY from `pid`; Windows
+/// resolves the exact AskHuman-created Windows Terminal window from `launch_id`.
 #[tauri::command]
-pub fn focus_agent_terminal(pid: u32) -> Result<(), String> {
-    crate::integrations::terminal_focus::focus_agent_terminal(pid)
+pub fn focus_agent_terminal(pid: Option<u32>, launch_id: Option<String>) -> Result<(), String> {
+    crate::integrations::terminal_focus::focus_agent_terminal(pid, launch_id.as_deref())
 }
 
 /// 手动把某 agent 置为「空闲」（状态窗口纠正漏 hook 卡「工作中」场景）：向 daemon 发一条
 /// `AgentForceIdle`，daemon 改状态后会经订阅推回新快照刷新窗口。即发即走、best-effort。
 #[tauri::command]
 pub fn agent_force_idle(session_id: String) {
-    #[cfg(unix)]
     crate::client::force_agent_idle(session_id);
-    #[cfg(not(unix))]
-    let _ = session_id;
 }
 
 // ===== Agent 插话（spec agent-interject）=====
@@ -2904,28 +2704,20 @@ pub fn open_interject(
     kind: Option<String>,
     cwd: Option<String>,
 ) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        let target = crate::gui_host::InterjectTarget {
-            session: session_id,
-            agent: kind,
-            cwd,
-        };
-        route_open_window(
-            app,
-            crate::gui_host::WindowKind::Interject,
-            false,
-            None,
-            Some(target),
-            None,
-        );
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (app, session_id, kind, cwd);
-        Err("unsupported".to_string())
-    }
+    let target = crate::gui_host::InterjectTarget {
+        session: session_id,
+        agent: kind,
+        cwd,
+    };
+    route_open_window(
+        app,
+        crate::gui_host::WindowKind::Interject,
+        false,
+        None,
+        Some(target),
+        None,
+    );
+    Ok(())
 }
 
 /// 插话窗口初始化负载：主题 + 语言 + 待送达预填全文、条数与附件。
@@ -3012,17 +2804,7 @@ pub async fn interject_init(session_id: String) -> Result<InterjectInit, String>
     let lang = crate::i18n::Lang::resolve(&config.general.language)
         .code()
         .to_string();
-    #[cfg(unix)]
     let (text, entries, attachments) = crate::client::composer::open(&session_id).await;
-    #[cfg(not(unix))]
-    let (text, entries, attachments) = {
-        let _ = &session_id;
-        (
-            String::new(),
-            0usize,
-            Vec::<crate::models::FileAttachment>::new(),
-        )
-    };
     Ok(InterjectInit {
         theme,
         lang,
@@ -3045,19 +2827,14 @@ pub async fn interject_submit(
     file_paths: Option<Vec<String>>,
     pasted_images: Option<Vec<crate::models::ImageAttachment>>,
 ) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        let attachments = prepare_interject_attachments(
-            file_paths.unwrap_or_default(),
-            pasted_images.unwrap_or_default(),
-        )
-        .await?;
-        crate::client::composer::submit(&session_id, &text, attachments).await;
-        crate::client::composer::close(&session_id);
-        close_interject_window(&app, &session_id);
-    }
-    #[cfg(not(unix))]
-    let _ = (app, session_id, text, file_paths, pasted_images);
+    let attachments = prepare_interject_attachments(
+        file_paths.unwrap_or_default(),
+        pasted_images.unwrap_or_default(),
+    )
+    .await?;
+    crate::client::composer::submit(&session_id, &text, attachments).await;
+    crate::client::composer::close(&session_id);
+    close_interject_window(&app, &session_id);
     Ok(())
 }
 
@@ -3065,23 +2842,15 @@ pub async fn interject_submit(
 /// 队列不动（已排队消息保留）。
 #[tauri::command]
 pub fn interject_cancel(app: AppHandle, session_id: String) {
-    #[cfg(unix)]
-    {
-        crate::client::composer::close(&session_id);
-        close_interject_window(&app, &session_id);
-    }
-    #[cfg(not(unix))]
-    let _ = (app, session_id);
+    crate::client::composer::close(&session_id);
+    close_interject_window(&app, &session_id);
 }
 
 /// 撤回某 session 的全部待送达插话（AgentsView 徽标撤回按钮）。即发即走、best-effort；
 /// daemon 清空后经订阅推回新快照（徽标消失）。
 #[tauri::command]
 pub fn interject_clear(session_id: String) {
-    #[cfg(unix)]
     crate::client::report_agent_event(crate::ipc::ClientMsg::InterjectClear { session_id });
-    #[cfg(not(unix))]
-    let _ = session_id;
 }
 
 // ===== Agent 控制台（spec gui-agent-console）=====
@@ -3089,19 +2858,13 @@ pub fn interject_clear(session_id: String) {
 /// 控制台焦点会话（C8）：daemon 对焦点会话按签名推 `agent-detail` 帧；`None`/空串＝取消焦点。
 #[tauri::command]
 pub fn agents_focus(session_id: Option<String>) {
-    #[cfg(unix)]
     crate::app::set_agents_focus(session_id.filter(|s| !s.trim().is_empty()));
-    #[cfg(not(unix))]
-    let _ = session_id;
 }
 
 /// 「去回答」（C7）：请求 daemon 聚焦对应请求的弹窗（托盘「待答」子菜单同款链路，即发即走）。
 #[tauri::command]
 pub fn focus_request(request_id: String) {
-    #[cfg(unix)]
     crate::client::report_agent_event(crate::ipc::ClientMsg::FocusRequest { request_id });
-    #[cfg(not(unix))]
-    let _ = request_id;
 }
 
 /// 控制台输入框发消息（C3 追加语义，同 IM `/msg`）：不覆盖既有待送达队列，即发即走。
@@ -3112,59 +2875,40 @@ pub async fn interject_append(
     file_paths: Option<Vec<String>>,
     pasted_images: Option<Vec<crate::models::ImageAttachment>>,
 ) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        let attachments = prepare_interject_attachments(
-            file_paths.unwrap_or_default(),
-            pasted_images.unwrap_or_default(),
-        )
-        .await?;
-        crate::client::report_agent_event(crate::ipc::ClientMsg::InterjectAppend {
-            session_id,
-            text,
-            attachments,
-        });
-    }
-    #[cfg(not(unix))]
-    let _ = (session_id, text, file_paths, pasted_images);
+    let attachments = prepare_interject_attachments(
+        file_paths.unwrap_or_default(),
+        pasted_images.unwrap_or_default(),
+    )
+    .await?;
+    crate::client::report_agent_event(crate::ipc::ClientMsg::InterjectAppend {
+        session_id,
+        text,
+        attachments,
+    });
     Ok(())
 }
 
 /// 待送达气泡内容查询（C3）：返回全文、条数与附件；daemon 未运行 → 空状态。
 #[tauri::command]
 pub async fn interject_peek(session_id: String) -> Result<InterjectPendingView, String> {
-    #[cfg(unix)]
-    {
-        let (text, entries, attachments) = crate::client::interject_peek(session_id).await;
-        Ok(InterjectPendingView {
-            text,
-            entries,
-            attachments: attachments
-                .into_iter()
-                .map(InterjectAttachmentView::from)
-                .collect(),
-        })
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = session_id;
-        Ok(InterjectPendingView {
-            text: String::new(),
-            entries: 0,
-            attachments: Vec::new(),
-        })
-    }
+    let (text, entries, attachments) = crate::client::interject_peek(session_id).await;
+    Ok(InterjectPendingView {
+        text,
+        entries,
+        attachments: attachments
+            .into_iter()
+            .map(InterjectAttachmentView::from)
+            .collect(),
+    })
 }
 
 /// 控制台 git 调用闸门（C16）：同一时刻只跑一个 git 任务；抢不到锁（上次未返回）直接
 /// 返回 busy 由前端跳过本次刷新，另有 10s 硬超时兜底慢仓库。
-#[cfg(unix)]
 fn diff_gate() -> &'static tokio::sync::Mutex<()> {
     static GATE: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
     GATE.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-#[cfg(unix)]
 async fn run_git_bounded<T, F>(f: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -3187,96 +2931,71 @@ where
 /// 项目未暂存变更统计（C15 第一级）：状态条数据。`project` 为任意项目内目录（映射 git 根）。
 #[tauri::command]
 pub async fn console_diff_stat(project: String) -> Result<serde_json::Value, String> {
-    #[cfg(unix)]
-    {
-        run_git_bounded(move || {
-            let root = crate::gitutil::find_git_root(std::path::Path::new(&project))
-                .ok_or_else(|| "not a git repository".to_string())?;
-            let files = crate::gitutil::diff_stat(&root)?;
-            Ok(serde_json::json!({
-                "root": root.to_string_lossy(),
-                "files": files,
-            }))
-        })
-        .await
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = project;
-        Err("unsupported platform".to_string())
-    }
+    run_git_bounded(move || {
+        let root = crate::gitutil::find_git_root(std::path::Path::new(&project))
+            .ok_or_else(|| "not a git repository".to_string())?;
+        let files = crate::gitutil::diff_stat(&root)?;
+        Ok(serde_json::json!({
+            "root": root.to_string_lossy(),
+            "files": files,
+        }))
+    })
+    .await
 }
 
 /// 单文件 hunk 视图（C15 第二级，展开时才调）。`path` 应来自 `console_diff_stat` 输出。
 #[tauri::command]
 pub async fn console_diff_file(project: String, path: String) -> Result<serde_json::Value, String> {
-    #[cfg(unix)]
-    {
-        run_git_bounded(move || {
-            use crate::gitutil::{FileChangeKind, LineKind};
-            let root = crate::gitutil::find_git_root(std::path::Path::new(&project))
-                .ok_or_else(|| "not a git repository".to_string())?;
-            let f = crate::gitutil::diff_file(&root, &path)?;
-            let lines: Vec<serde_json::Value> = f
-                .lines
-                .iter()
-                .map(|l| {
-                    serde_json::json!({
-                        "kind": match l.kind {
-                            LineKind::Insert => "add",
-                            LineKind::Delete => "del",
-                            LineKind::Header => "header",
-                            LineKind::Equal => "context",
-                        },
-                        "text": l.text,
-                    })
+    run_git_bounded(move || {
+        use crate::gitutil::{FileChangeKind, LineKind};
+        let root = crate::gitutil::find_git_root(std::path::Path::new(&project))
+            .ok_or_else(|| "not a git repository".to_string())?;
+        let f = crate::gitutil::diff_file(&root, &path)?;
+        let lines: Vec<serde_json::Value> = f
+            .lines
+            .iter()
+            .map(|l| {
+                serde_json::json!({
+                    "kind": match l.kind {
+                        LineKind::Insert => "add",
+                        LineKind::Delete => "del",
+                        LineKind::Header => "header",
+                        LineKind::Equal => "context",
+                    },
+                    "text": l.text,
                 })
-                .collect();
-            Ok(serde_json::json!({
-                "path": f.path,
-                "kind": match f.kind {
-                    FileChangeKind::Untracked => "A",
-                    FileChangeKind::Deleted => "D",
-                    FileChangeKind::Binary => "B",
-                    FileChangeKind::Modified => "M",
-                },
-                "skipped": f.skipped,
-                "skipReason": f.skip_reason,
-                "lines": lines,
-            }))
-        })
-        .await
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (project, path);
-        Err("unsupported platform".to_string())
-    }
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "path": f.path,
+            "kind": match f.kind {
+                FileChangeKind::Untracked => "A",
+                FileChangeKind::Deleted => "D",
+                FileChangeKind::Binary => "B",
+                FileChangeKind::Modified => "M",
+            },
+            "skipped": f.skipped,
+            "skipReason": f.skip_reason,
+            "lines": lines,
+        }))
+    })
+    .await
 }
 
 /// 暂存指定路径（C15）：单文件与「全部暂存」共用（后者传全量路径）。返回实际暂存数。
 #[tauri::command]
 pub async fn console_stage(project: String, paths: Vec<String>) -> Result<usize, String> {
-    #[cfg(unix)]
-    {
-        run_git_bounded(move || {
-            let root = crate::gitutil::find_git_root(std::path::Path::new(&project))
-                .ok_or_else(|| "not a git repository".to_string())?;
-            let r = crate::gitutil::stage_paths(&root, &paths)?;
-            Ok(r.paths.len())
-        })
-        .await
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (project, paths);
-        Err("unsupported platform".to_string())
-    }
+    run_git_bounded(move || {
+        let root = crate::gitutil::find_git_root(std::path::Path::new(&project))
+            .ok_or_else(|| "not a git repository".to_string())?;
+        let r = crate::gitutil::stage_paths(&root, &paths)?;
+        Ok(r.paths.len())
+    })
+    .await
 }
 
 /// 完整会话分页缓存：`(kind, session) → (transcript mtime, 解析结果)`。mtime 变即重解析
 /// （解析受 `MAX_READ_BYTES` 上限保护，重解析成本有界）。
-#[cfg(unix)]
 type TxCache = std::collections::HashMap<
     (String, String),
     (
@@ -3285,7 +3004,6 @@ type TxCache = std::collections::HashMap<
     ),
 >;
 
-#[cfg(unix)]
 fn tx_cache() -> &'static std::sync::Mutex<TxCache> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<TxCache>> = std::sync::OnceLock::new();
     CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
@@ -3300,63 +3018,53 @@ pub async fn console_transcript(
     before: Option<usize>,
     limit: Option<usize>,
 ) -> Result<serde_json::Value, String> {
-    #[cfg(unix)]
-    {
-        use crate::agents::transcript_full;
-        let agent = crate::agents::AgentKind::parse(&kind).ok_or("unknown agent kind")?;
-        let limit = limit.unwrap_or(200).clamp(1, 500);
-        tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
-            let mtime = transcript_full::transcript_mtime(agent, &session_id)
-                .ok_or_else(|| "transcript not found".to_string())?;
-            let key = (kind.clone(), session_id.clone());
-            let cached = {
-                let cache = tx_cache().lock().unwrap();
-                cache
-                    .get(&key)
-                    .filter(|(t, _)| *t == mtime)
-                    .map(|(_, doc)| doc.clone())
-            };
-            let doc = match cached {
-                Some(doc) => doc,
-                None => {
-                    let doc =
-                        std::sync::Arc::new(transcript_full::load_events(agent, &session_id)?);
-                    let mut cache = tx_cache().lock().unwrap();
-                    // 缓存有界：超过 8 个会话时整体清空（控制台常用 1–2 个，简单粗暴即可）。
-                    if cache.len() >= 8 {
-                        cache.clear();
-                    }
-                    cache.insert(key, (mtime, doc.clone()));
-                    doc
+    use crate::agents::transcript_full;
+    let agent = crate::agents::AgentKind::parse(&kind).ok_or("unknown agent kind")?;
+    let limit = limit.unwrap_or(200).clamp(1, 500);
+    tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let mtime = transcript_full::transcript_mtime(agent, &session_id)
+            .ok_or_else(|| "transcript not found".to_string())?;
+        let key = (kind.clone(), session_id.clone());
+        let cached = {
+            let cache = tx_cache().lock().unwrap();
+            cache
+                .get(&key)
+                .filter(|(t, _)| *t == mtime)
+                .map(|(_, doc)| doc.clone())
+        };
+        let doc = match cached {
+            Some(doc) => doc,
+            None => {
+                let doc = std::sync::Arc::new(transcript_full::load_events(agent, &session_id)?);
+                let mut cache = tx_cache().lock().unwrap();
+                // 缓存有界：超过 8 个会话时整体清空（控制台常用 1–2 个，简单粗暴即可）。
+                if cache.len() >= 8 {
+                    cache.clear();
                 }
-            };
-            let total = doc.events.len();
-            let end = before.unwrap_or(total).min(total);
-            let start = end.saturating_sub(limit);
-            let events: Vec<serde_json::Value> = doc.events[start..end]
-                .iter()
-                .map(transcript_full::event_json)
-                .collect();
-            Ok(serde_json::json!({
-                "events": events,
-                "start": start,
-                "total": total,
-                "truncatedHead": doc.truncated_head,
-                "partial": doc.partial,
-            }))
-        })
-        .await
-        .map_err(|e| e.to_string())?
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (kind, session_id, before, limit);
-        Err("unsupported platform".to_string())
-    }
+                cache.insert(key, (mtime, doc.clone()));
+                doc
+            }
+        };
+        let total = doc.events.len();
+        let end = before.unwrap_or(total).min(total);
+        let start = end.saturating_sub(limit);
+        let events: Vec<serde_json::Value> = doc.events[start..end]
+            .iter()
+            .map(transcript_full::event_json)
+            .collect();
+        Ok(serde_json::json!({
+            "events": events,
+            "start": start,
+            "total": total,
+            "truncatedHead": doc.truncated_head,
+            "partial": doc.partial,
+        }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 关闭某 session 的插话窗口（提交/取消后收尾）。窗口不存在时静默。
-#[cfg(unix)]
 fn close_interject_window(app: &AppHandle, session_id: &str) {
     let label = crate::gui_host::interject_label(session_id);
     if let Some(w) = app.get_webview_window(&label) {
@@ -3367,15 +3075,8 @@ fn close_interject_window(app: &AppHandle, session_id: &str) {
 /// 生命周期 hook 装/卸后刷新托盘菜单，使「Agent 状态」入口随之显隐。仅在统一 GUI 宿主进程内
 /// （持有 `HostState`）实际生效；其它进程自动 no-op。
 fn refresh_host_tray(app: &AppHandle) {
-    #[cfg(unix)]
-    {
-        let app2 = app.clone();
-        let _ = app.run_on_main_thread(move || crate::app::gui_host::refresh_tray(&app2));
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = app;
-    }
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || crate::app::gui_host::refresh_tray(&app2));
 }
 
 // ===== Telegram 测试连接 =====
@@ -3496,8 +3197,7 @@ pub async fn dingtalk_detect_wait(args: DingTalkWaitArgs) -> Result<String, Stri
 
     detect_with_cancel(lang, async move {
         // Q6：经 Daemon 长连接识别（避免与 Daemon 单连接冲突）。Daemon 接管即用其结果；
-        // 接不通 Daemon 才回退进程内临时连接（非 Unix 无 Daemon，直接走回退）。
-        #[cfg(unix)]
+        // 接不通 Daemon 才回退进程内临时连接。
         {
             let req = crate::ipc::DetectRequest {
                 kind: "dingtalk".to_string(),
@@ -3639,7 +3339,6 @@ pub async fn feishu_detect_wait(args: FeishuWaitArgs) -> Result<String, String> 
 
     detect_with_cancel(lang, async move {
         // Q6：经 Daemon 长连接识别（见钉钉同段说明）。
-        #[cfg(unix)]
         {
             let req = crate::ipc::DetectRequest {
                 kind: "feishu".to_string(),
@@ -3806,7 +3505,6 @@ pub async fn slack_detect_wait(args: SlackWaitArgs) -> Result<String, String> {
     detect_with_cancel(lang, async move {
         // Q6：经 Daemon 长连接识别（见钉钉/飞书同段说明）。app_key=App Token（Socket 复用键），
         // app_secret=Bot Token（建连时校验齐全）。
-        #[cfg(unix)]
         {
             let req = crate::ipc::DetectRequest {
                 kind: "slack".to_string(),
@@ -3927,6 +3625,7 @@ pub struct PushedUpdateState {
     pub available: bool,
     pub latest_version: String,
     pub pending: bool,
+    pub apply_mode: crate::update::UpdateApplyMode,
 }
 
 static PUSHED_UPDATE: std::sync::OnceLock<std::sync::Mutex<PushedUpdateState>> =
@@ -3974,16 +3673,13 @@ pub async fn update_check(
     let info = match checked {
         Ok(info) => crate::update::persist_check_result(info, manual),
         Err(error) => {
-            #[cfg(unix)]
             if manual {
                 crate::app::gui_host::sync_update_check_error(&app, &error.to_string());
             }
             return Err(error.to_string());
         }
     };
-    #[cfg(unix)]
     crate::app::gui_host::sync_checked_update(&app, &info, manual);
-    #[cfg(unix)]
     crate::client::notify_update_state_changed().await;
     Ok(info)
 }
@@ -4025,6 +3721,7 @@ pub async fn update_get_notes(aggregate: bool) -> Result<String, String> {
 /// `update_download_progress` 事件回传；完成发 `update_apply_finished`。
 #[tauri::command]
 pub async fn update_apply(app: AppHandle) -> Result<(), String> {
+    crate::update::ensure_automatic_apply_allowed().map_err(|e| e.to_string())?;
     let updater = crate::update::select_updater();
     let app_for_cb = app.clone();
     let cb: crate::update::ProgressCb = Box::new(move |p| {
@@ -4032,10 +3729,18 @@ pub async fn update_apply(app: AppHandle) -> Result<(), String> {
     });
     updater.apply(Some(cb)).await.map_err(|e| e.to_string())?;
     crate::update::state::set_pending(true);
-    #[cfg(unix)]
     crate::client::notify_update_applied().await;
     let _ = app.emit("update_apply_finished", ());
+    #[cfg(windows)]
+    app.exit(0);
     Ok(())
+}
+
+/// Spawn the public `update prepare` helper. The helper waits for active requests before shutting
+/// down the daemon and GUI Host; this command returns once that helper is safely detached.
+#[tauri::command]
+pub fn update_prepare() -> Result<(), String> {
+    crate::update::spawn_manual_prepare().map_err(|error| error.to_string())
 }
 
 /// 忽略某版本（不再主动弹该版本提示；设置内手动检查可重置）。

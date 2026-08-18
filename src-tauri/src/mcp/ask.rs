@@ -28,6 +28,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -66,6 +68,125 @@ fn metadata_id<'a>(metadata: &'a Value, snake_case: &str, camel_case: &str) -> O
         .get(snake_case)
         .or_else(|| metadata.get(camel_case))
         .and_then(Value::as_str)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CodexTurnIdentity {
+    session_id: String,
+    turn_id: String,
+}
+
+fn codex_turn_identity(meta: &Meta) -> Option<CodexTurnIdentity> {
+    let metadata = codex_turn_metadata(meta)?;
+    let session_id = metadata_id(&metadata, "session_id", "sessionId")?
+        .trim()
+        .to_string();
+    let turn_id = metadata_id(&metadata, "turn_id", "turnId")?
+        .trim()
+        .to_string();
+    if session_id.is_empty() || turn_id.is_empty() {
+        return None;
+    }
+    Some(CodexTurnIdentity {
+        session_id,
+        turn_id,
+    })
+}
+
+fn codex_turn_aborted_line(line: &[u8], turn_id: &str) -> bool {
+    let Ok(value) = serde_json::from_slice::<Value>(line) else {
+        return false;
+    };
+    if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return false;
+    }
+    let payload = value.get("payload").unwrap_or(&Value::Null);
+    payload.get("type").and_then(Value::as_str) == Some("turn_aborted")
+        && payload.get("turn_id").and_then(Value::as_str) == Some(turn_id)
+}
+
+/// Codex 0.147 can abandon a tools/call locally on Ctrl+C without emitting MCP
+/// `notifications/cancelled`. Its rollout still records an exact, durable `turn_aborted` event.
+/// Tail that one turn's rollout as a fallback and cancel only this child request. Native MCP
+/// cancellation remains the primary protocol path; non-Codex clients never start this monitor.
+fn start_codex_turn_abort_monitor(
+    meta: &Meta,
+    cancel: CancellationToken,
+) -> Option<AbortOnDropHandle<()>> {
+    let identity = codex_turn_identity(meta)?;
+    let path = crate::agents::title::transcript_path(
+        crate::agents::AgentKind::Codex,
+        &identity.session_id,
+    )?;
+    // Capture the offset synchronously before spawning the blocking AskHuman child. This avoids
+    // missing a very fast Ctrl+C between child launch and the monitor's first scheduled poll.
+    let offset = std::fs::metadata(&path).ok()?.len();
+    Some(AbortOnDropHandle::new(tokio::spawn(async move {
+        watch_codex_turn_abort(path, offset, identity.turn_id, cancel).await;
+    })))
+}
+
+async fn watch_codex_turn_abort(
+    path: PathBuf,
+    mut offset: u64,
+    turn_id: String,
+    cancel: CancellationToken,
+) {
+    let mut pending = Vec::new();
+    loop {
+        if cancel.is_cancelled() {
+            return;
+        }
+        let Ok(metadata) = tokio::fs::metadata(&path).await else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        };
+        if metadata.len() < offset {
+            offset = 0;
+            pending.clear();
+        }
+        if metadata.len() == offset {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+
+        let Ok(mut file) = tokio::fs::File::open(&path).await else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        };
+        if file.seek(std::io::SeekFrom::Start(offset)).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+        let mut appended = Vec::new();
+        let Ok(read) = file.read_to_end(&mut appended).await else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        };
+        offset = offset.saturating_add(read as u64);
+        pending.extend_from_slice(&appended);
+
+        let mut consumed = 0;
+        for (index, byte) in pending.iter().enumerate() {
+            if *byte != b'\n' {
+                continue;
+            }
+            let line = &pending[consumed..index];
+            consumed = index + 1;
+            if codex_turn_aborted_line(line, &turn_id) {
+                crate::daemon::lifecycle::log_runtime_event(
+                    "mcp_tool",
+                    "codex_turn_abort_detected",
+                    None,
+                );
+                cancel.cancel();
+                return;
+            }
+        }
+        if consumed > 0 {
+            pending.drain(..consumed);
+        }
+    }
 }
 
 /// Guard decision + audit label for one call: `(action, reason)`. `None` means the call does not
@@ -311,7 +432,11 @@ of files the human attached), and `[status]` (present on cancel or for a replaye
         let mut command = tokio::process::Command::new(exe);
         command.args(&argv);
         self.configure_child(&mut command, binding.as_ref());
-        let output = match capture_output(command, cancel).await {
+        let call_cancel = cancel.child_token();
+        let turn_abort_monitor = start_codex_turn_abort_monitor(&context.meta, call_cancel.clone());
+        let output_result = capture_output(command, call_cancel).await;
+        drop(turn_abort_monitor);
+        let output = match output_result {
             Ok(o) => o,
             Err(CaptureError::Cancelled) => {
                 // Caller abort — not a human cancel. Do not invent answers or action:"cancel".
@@ -396,7 +521,11 @@ approves ending the turn — only then may you end it.",
         let mut command = tokio::process::Command::new(exe);
         command.args(&argv);
         self.configure_child(&mut command, binding.as_ref());
-        let output = match capture_output(command, cancel).await {
+        let call_cancel = cancel.child_token();
+        let turn_abort_monitor = start_codex_turn_abort_monitor(&context.meta, call_cancel.clone());
+        let output_result = capture_output(command, call_cancel).await;
+        drop(turn_abort_monitor);
+        let output = match output_result {
             Ok(o) => o,
             Err(CaptureError::Cancelled) => {
                 return Ok(CallToolResult::error(vec![ContentBlock::text(
@@ -864,17 +993,12 @@ pub(crate) fn whats_next_arguments_value(params: &WhatsNextParams) -> Value {
     Value::Object(object)
 }
 
-#[cfg(unix)]
 async fn register_mcp_instance(mcp_instance_id: String, project: String, server_pid: u32) {
-    let parent_pid_hint = Some(unsafe { libc::getppid() } as u32);
+    let parent_pid_hint = crate::agents::detect::parent_pid(std::process::id());
     crate::client::register_mcp_instance(mcp_instance_id, project, server_pid, parent_pid_hint)
         .await;
 }
 
-#[cfg(not(unix))]
-async fn register_mcp_instance(_mcp_instance_id: String, _project: String, _server_pid: u32) {}
-
-#[cfg(unix)]
 async fn claim_grok_binding(
     mcp_instance_id: String,
     project: String,
@@ -890,17 +1014,6 @@ async fn claim_grok_binding(
         server_pid,
     )
     .await
-}
-
-#[cfg(not(unix))]
-async fn claim_grok_binding(
-    _mcp_instance_id: String,
-    _project: String,
-    _tool_name: String,
-    _arguments_sha256: String,
-    _server_pid: u32,
-) -> Option<String> {
-    None
 }
 
 /// Errors from [`capture_output`].
@@ -1097,6 +1210,7 @@ mod tests {
     use super::*;
     use rmcp::ServiceExt;
     use serde_json::json;
+    use std::io::Write as _;
     use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
     use std::time::Duration;
@@ -1196,6 +1310,95 @@ mod tests {
             None
         );
         assert_eq!(guard_decision(&Meta::default()), None);
+    }
+
+    #[test]
+    fn codex_turn_identity_requires_exact_session_and_turn_ids() {
+        assert_eq!(
+            codex_turn_identity(&codex_meta(json!({
+                "session_id": "session-1",
+                "turn_id": "turn-1"
+            }))),
+            Some(CodexTurnIdentity {
+                session_id: "session-1".into(),
+                turn_id: "turn-1".into(),
+            })
+        );
+        assert!(codex_turn_identity(&codex_meta(json!({
+            "session_id": "session-1"
+        })))
+        .is_none());
+    }
+
+    #[test]
+    fn codex_turn_abort_parser_matches_only_the_target_event() {
+        let target = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "turn_aborted",
+                "turn_id": "turn-1",
+                "reason": "interrupted"
+            }
+        })
+        .to_string();
+        assert!(codex_turn_aborted_line(target.as_bytes(), "turn-1"));
+        assert!(!codex_turn_aborted_line(target.as_bytes(), "turn-2"));
+        assert!(!codex_turn_aborted_line(
+            json!({
+                "type": "event_msg",
+                "payload": { "type": "turn_complete", "turn_id": "turn-1" }
+            })
+            .to_string()
+            .as_bytes(),
+            "turn-1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn rollout_monitor_cancels_only_after_matching_turn_abort() {
+        let mut rollout = tempfile::NamedTempFile::new().unwrap();
+        writeln!(rollout, "{}", json!({ "type": "session_meta" })).unwrap();
+        rollout.flush().unwrap();
+        let offset = rollout.as_file().metadata().unwrap().len();
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(watch_codex_turn_abort(
+            rollout.path().to_path_buf(),
+            offset,
+            "turn-1".into(),
+            cancel.clone(),
+        ));
+
+        writeln!(
+            rollout,
+            "{}",
+            json!({
+                "type": "event_msg",
+                "payload": { "type": "turn_aborted", "turn_id": "turn-other" }
+            })
+        )
+        .unwrap();
+        rollout.flush().unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(!cancel.is_cancelled());
+
+        writeln!(
+            rollout,
+            "{}",
+            json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "turn_aborted",
+                    "turn_id": "turn-1",
+                    "reason": "interrupted"
+                }
+            })
+        )
+        .unwrap();
+        rollout.flush().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), cancel.cancelled())
+            .await
+            .expect("matching turn abort must cancel the call");
+        task.await.unwrap();
     }
 
     #[tokio::test]

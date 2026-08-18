@@ -9,7 +9,7 @@
 跨平台的「Human-in-the-loop」交互工具。当 AI Agent 准备结束对话或需要确认时，调用命令行 `AskHuman` 弹出窗口，让你继续提问、勾选选项、补充文字或附带图片，并把结果回传给 AI。
 
 - 单一可执行文件 `AskHuman`，允许 Agent 通过 CLI 方式调用提问
-- 基于 **Tauri 2（Rust + Vue 3）**，支持 **macOS / Linux**
+- 基于 **Tauri 2（Rust + Vue 3）**，支持 **macOS / Linux / Windows**
 - 多通信渠道：本地弹窗 + 钉钉 + 飞书 + Telegram + Slack，可独立开关、多开并行「抢答」
 
 ## 工作原理

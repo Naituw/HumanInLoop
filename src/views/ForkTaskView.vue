@@ -6,6 +6,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { applyLanguage } from "../i18n";
 import { forkTaskInit, forkTaskLaunch } from "../lib/ipc";
 import { applyTheme } from "../lib/theme";
+import { primaryModifierPressed, primaryShortcutLabel } from "../lib/platform";
 import type { ForkTaskSource, PopupSubmitKey, ThemeMode } from "../lib/types";
 import LaunchPermission from "./newtask/LaunchPermission.vue";
 
@@ -37,7 +38,9 @@ const canLaunch = computed(
     taskChars.value > 0 &&
     !tooLong.value
 );
-const submitKeyLabel = computed(() => (popupSubmitKey.value === "enter" ? "↵" : "⌘↵"));
+const submitKeyLabel = computed(() =>
+  popupSubmitKey.value === "enter" ? "↵" : primaryShortcutLabel("enter")
+);
 const shortSession = (id?: string | null) => id?.slice(0, 8) ?? "";
 let loadGeneration = 0;
 
@@ -89,7 +92,7 @@ async function launch(): Promise<void> {
 
 function onKeydown(event: KeyboardEvent): void {
   if (event.key !== "Enter" || event.isComposing) return;
-  const modified = (event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey;
+  const modified = primaryModifierPressed(event) && !event.shiftKey && !event.altKey;
   const bare = !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
   if (popupSubmitKey.value === "enter" ? !bare : !modified) return;
   event.preventDefault();

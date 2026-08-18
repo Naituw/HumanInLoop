@@ -1,6 +1,6 @@
 # 需求：引入常驻 Daemon 架构（CLI 瘦客户端 + Daemon + GUI Helper）
 
-> 状态：Unix 主路径已实现；非 Unix 仍走单进程回退，Windows named pipe Daemon 尚未落地。
+> 状态：已实现（macOS/Linux/Windows）；三平台共用 daemon 业务核心，Windows 使用安全 named pipe 与原生进程/锁适配。
 > 关联计划：`docs/plans/daemon-architecture.md`
 > 影响面：**全局架构级**。这不是单一渠道需求，会重塑运行模型，影响后续所有需求。
 
@@ -8,6 +8,11 @@
 > 预热、graceful drain、主动 IM 入站和统一 GUI Host；当前代码地图见 `docs/overview.md`，专项边界见
 > `docs/specs/popup-prewarm.md`、`docs/specs/daemon-graceful-drain.md`、`docs/specs/menu-bar-tray.md`。
 > 本文 §6 的示例帧是设计期协议草图，当前消息真值以 `src-tauri/src/ipc/mod.rs` 为准。
+>
+> **Windows 对齐补充（2026-08）**：server、Router、Coordinator、订阅与主动命令位于平台中性的
+> `daemon/runtime/` shared core。`ipc::transport` 在 Unix 使用私有 socket，在 Windows
+> 使用按当前用户 SID、会话与配置目录隔离的 byte-mode named pipe；pipe DACL 仅允许当前用户和
+> LocalSystem，并拒绝远程客户端。后台启动、HKCU Run 登录项、进程识别与文件锁由平台适配器承接。
 
 ## 1. 背景与动机
 
@@ -77,7 +82,8 @@ GUI Host 负责设置、历史、Agent、Interject 窗口与托盘，不进入�
 3. Daemon 为该请求建一套 Coordinator：IM Channel 作为进程内任务（共享那条长连接，经 Router 按 `out_track_id`/`user_id` 分流）；Popup Channel 则 spawn 一个 GUI Helper 进程并经 IPC 下发题目。
 4. 任一渠道先到终态 → Coordinator 采纳它、cancel 其余（通知 GUI Helper 收尾、取消 IM 任务）。
 5. Daemon 跑 `emit_result`（图片落盘到临时目录）→ 把渲染好的结果文本与退出码流式回 CLI；CLI 原样打印 stdout 并退出；GUI Helper 答完即退。
-6. CLI 被 Ctrl-C / 杀掉 → socket 断开 → Daemon 取消该请求并清理 GUI + IM 任务。
+6. CLI 被 Ctrl-C / 杀掉 → socket 断开 → Daemon 先从活动 registry 移除该请求并关闭 GUI，再在既有
+   有界收尾窗口内等待所有 IM 渠道把卡片更新为 terminal 状态；完成或超时后释放请求。
 
 ## 4. 已确认决策
 
@@ -95,7 +101,7 @@ GUI Host 负责设置、历史、Agent、Interject 窗口与托盘，不进入�
 | A10 | 临时文件清理 | Daemon 常驻，**启动时 + 定期**清理过期的 `temp/askhuman/<request_id>/` 目录（修历史「从不清理」的小泄漏）。 |
 | A11 | 请求上下文（D-B） | `-f` 解析留在 CLI（输出绝对路径 → **不传 cwd**，并保留「文件不存在即退 1」）；**硬性上送 source name**（来自调用方环境变量 `ASKHUMAN_ENV_SOURCE_NAME`）；上送 CLI 解析好的 `lang`（使 `auto` 跟随调用方而非 Daemon）；`request_id` 由 **Daemon 分配**（权威，用于临时目录）。 |
 | A12 | 配置实时生效（D-F） | Daemon **监听 `~/.askhuman/config.json`**（`notify`，去抖、处理原子写/rename）：变更即重载 + 比对差异重连/增删 IM 连接 + 刷新缓存；并经 Daemon↔GUI IPC 向活动 GUI Helper 下发 `configChanged` → 弹窗实时切主题/语言。独立设置窗口仍在自身进程内更新自己。 |
-| P1 | 自启 + 单实例 | CLI 连不上 socket → 拉起 `daemon run`，轮询等可连再连。macOS 优先 bootstrap 到当前 `gui/<uid>` launchd domain，使 daemon 在用户登出时随 GUI 会话退出，避免旧 bootstrap namespace 跨重登残留；无 GUI domain 的 headless 环境才回退 `setsid`。Production 使用固定 launchd label，Dev Instance 使用配置目录派生的隔离 label。其它 Unix 维持 detach。`daemon run` 启动先抢 `flock(daemon.lock)`：抢不到=已有活 Daemon → 退出（`start` 幂等）。抢到后清理 stale socket 再 bind。 |
+| P1 | 自启 + 单实例 | CLI 连不上 endpoint → 拉起 `daemon run`，轮询等可连再连。macOS 优先 bootstrap 到当前 `gui/<uid>` launchd domain；无 GUI domain 的 headless 环境回退 `setsid`。Linux detach；Windows 用禁止 handle inheritance 的 `CreateProcessW` + `CREATE_NO_WINDOW` / 新进程组后台启动，避免脚本捕获输出时后台子进程持有调用者 pipe。`daemon run` 先抢跨进程 `daemon.lock`：抢不到=已有活 Daemon → 退出（`start` 幂等）；Unix 抢锁后清理 stale socket，Windows named pipe 无残留文件。`keepalive` 分别使用 launchd、autostart desktop；Windows HKCU Run 指向受管 UTF-16 VBScript，由 `wscript.exe //B //NoLogo` 以 hidden window style 启动 console-subsystem EXE。 |
 | P2 | 版本治理 | 两层并存：`protocol_version`（管 IPC 不兼容）+ **二进制内容指纹**（内容哈希，按路径/mtime/size 缓存，路径或时间变化不等于内容变化）。指纹/协议不一致 → Daemon graceful drain 后退出，CLI 用新二进制重新拉起。开关 `ASKHUMAN_DAEMON_AUTORESTART=0` 可关闭自动换新。 |
 | P3 | 空闲退出 | 默认 `general.daemonLifecycle=activity`：无在途请求、无工作中 Agent、无活跃 watch/需保活窗口连接时按空闲策略退出；人在环里的题不会被空闲计时杀掉。`keepalive` 模式跳过空闲退出并安装登录项。 |
 | P4 | 崩溃中途 | Daemon 在请求中途意外死亡 → CLI 连接断开 → 该请求判失败，CLI **退出码 3 + 明确报错**（不静默重试交互题）。 |
@@ -142,7 +148,8 @@ GUI Host 负责设置、历史、Agent、Interject 窗口与托盘，不进入�
 - `accepted`（D→CLI）：`{type:"accepted", requestId}`
 - `warn`（D→CLI，流式）：`{type:"warn", text}` → CLI stderr。
 - `final`（D→CLI）：`{type:"final", stdout, exitCode:0|1|3}` → CLI 原样打印 stdout 后退出。
-- 取消：CLI 断开连接即视为取消（无需显式帧）。
+- 取消：CLI 断开连接即视为取消（无需显式帧）；Daemon 在回收 Coordinator 前等待非 Popup 渠道的
+  terminal finalizer，避免进程内异步任务随请求 future 一起被丢弃而留下可交互旧卡。
 
 ### 6.2 Daemon ↔ GUI Helper（复用任务契约）
 
@@ -198,6 +205,6 @@ GUI Host 负责设置、历史、Agent、Interject 窗口与托盘，不进入�
 - 路由表清理 + 幂等：题目结束/被抢答即删路由；钉钉可能重推，注销后到达的重复回调要「ACK 后丢弃」。
 - **同一用户并发两题的自由附件归属**仍有歧义（卡片回调带 `out_track_id` 可精确路由，但聊天里的自由图片/文件只能按 `user_id` 归属）—— 这是固有限制，Daemon 也不能完全消除，需文档说明。
 - 单实例启动竞争（TOCTOU）：靠 `flock` 原子化；stale socket 在抢锁后清理。
-- 跨平台：Windows 无 `fork`（用 `DETACHED_PROCESS`）；named pipe 与 Unix socket 的抽象与权限差异。
+- 跨平台：Windows 后台角色使用 `CREATE_NO_WINDOW` / 新进程组；named pipe 必须维持用户 SID、会话、配置目录隔离与远程拒绝，Unix socket 维持用户私有文件权限。
 - config watch：去抖、原子写触发 rename 事件、跨平台由 `notify` 兜。
 - 副作用记录：`ASKHUMAN_FEISHU_DEBUG` 等环境调试开关，daemon 化后看 **Daemon 进程**的环境（飞书连接住在 Daemon 里）。

@@ -1,7 +1,7 @@
 //! 统一 GUI 宿主进程的「自有 IPC」协议与客户端（spec D2/D3/D13）。
 //!
 //! 宿主进程（`AskHuman --gui-host`）单实例承载托盘图标 + 设置/历史/待办/Agent 窗口。它另起一条
-//! **与 daemon 解耦**的 Unix socket（`~/.askhuman/gui-host.sock`），接收来自 CLI（`--settings`
+//! **与 daemon 解耦**的本地 IPC endpoint（Unix socket / Windows named pipe），接收来自 CLI（`--settings`
 //! /`--history`/`--todos`/`agents monitor`）与弹窗导航按钮的「打开窗口」请求，从而保证每类窗口全局唯一。
 //!
 //! 传输复用 `ipc::codec` 的 NDJSON 编解码；协议见 `HostMsg`。客户端入口为 `host_open`。
@@ -106,40 +106,51 @@ pub fn interject_label(session_id: &str) -> String {
     format!("interject-{:016x}", h.finish())
 }
 
-#[cfg(unix)]
-pub use unix_impl::{bind, host_open, host_open_history, spawn_detached, spawn_detached_from};
+pub use platform_impl::shutdown_if_running;
+pub use platform_impl::{bind, host_open, host_open_history, spawn_detached, spawn_detached_from};
 
-#[cfg(unix)]
-mod unix_impl {
+mod platform_impl {
     use super::{HistoryOpenTarget, HostMsg, InterjectTarget, WindowKind};
-    use crate::ipc;
-    use crate::paths::gui_host_sock;
+    use crate::ipc::{self, transport};
     use std::io::{Error, ErrorKind};
     use std::time::{Duration, Instant};
     use tokio::io::BufReader;
-    use tokio::net::{UnixListener, UnixStream};
 
-    /// 宿主侧绑定监听 `gui-host.sock`。调用前应已持有 `gui-host.lock`（flock），
-    /// 故可安全删除残留 socket 再 bind。权限 0600。
-    pub fn bind() -> std::io::Result<UnixListener> {
-        use std::os::unix::fs::PermissionsExt;
-        let path = gui_host_sock();
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let _ = std::fs::remove_file(&path);
-        let listener = UnixListener::bind(&path)?;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        Ok(listener)
+    /// Bind the GUI Host's private local endpoint.
+    pub fn bind() -> std::io::Result<transport::Listener> {
+        transport::bind_role("gui-host")
     }
 
-    /// 客户端连接到宿主 socket。
-    pub async fn connect() -> std::io::Result<UnixStream> {
-        UnixStream::connect(gui_host_sock()).await
+    /// Connect to the GUI Host's private local endpoint.
+    async fn connect() -> std::io::Result<transport::Stream> {
+        transport::connect_role("gui-host").await
+    }
+
+    /// Ask an existing GUI Host to exit without starting one when none is running.
+    pub async fn shutdown_if_running() -> bool {
+        let Ok(stream) = connect().await else {
+            return false;
+        };
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        if ipc::write_msg(&mut writer, &HostMsg::Shutdown)
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        // New Hosts acknowledge before scheduling exit. Old Hosts close the stream without an
+        // acknowledgement; keep the send backward-compatible and bound the wait either way.
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            ipc::read_msg::<_, HostMsg>(&mut reader),
+        )
+        .await;
+        true
     }
 
     /// 后台拉起宿主进程（`AskHuman --gui-host`，detach 新会话脱离调用方终端）。
-    /// 单实例由宿主自身的 flock 去重——重复 spawn 的多余进程会因抢锁失败而立即退出。
+    /// 单实例由宿主自身的跨进程文件锁去重——重复 spawn 的多余进程会因抢锁失败而立即退出。
     pub fn spawn_detached() -> std::io::Result<()> {
         let exe = std::env::current_exe()?;
         spawn_detached_from(&exe)
@@ -150,7 +161,6 @@ mod unix_impl {
     /// The running executable can be replaced during self-update. In particular, Linux may then
     /// report `current_exe()` as a deleted inode path, so the old Host passes its launch path here.
     pub fn spawn_detached_from(exe: &std::path::Path) -> std::io::Result<()> {
-        use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
 
         let mut cmd = Command::new(exe);
@@ -158,12 +168,15 @@ mod unix_impl {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        #[cfg(unix)]
         unsafe {
+            use std::os::unix::process::CommandExt;
             cmd.pre_exec(|| {
                 libc::setsid();
                 Ok(())
             });
         }
+        crate::daemon::spawn::configure_background(&mut cmd);
         cmd.spawn().map(|_| ())
     }
 
@@ -254,7 +267,7 @@ mod unix_impl {
     }
 
     async fn send_open(
-        stream: UnixStream,
+        stream: transport::Stream,
         kind: WindowKind,
         all: bool,
         project: Option<String>,

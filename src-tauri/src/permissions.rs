@@ -63,7 +63,6 @@ enum ParseOutcome {
     Popup(Box<ParsedPermission>),
 }
 
-#[cfg(unix)]
 pub fn run(agent: Option<&str>) -> Option<String> {
     let agent = Agent::parse(agent)?;
     let mut bytes = Vec::new();

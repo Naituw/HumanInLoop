@@ -5,7 +5,9 @@ use crate::config::AppConfig;
 use crate::i18n::Lang;
 use crate::secrets;
 use serde_json::Value;
-use std::io::{BufRead, IsTerminal, Read, Write};
+#[cfg(unix)]
+use std::io::BufRead;
+use std::io::{IsTerminal, Read, Write};
 
 /// 本地化：按语言选英 / 中。CLI 配置命令专属文案用它（既有错误仍走 `i18n::tr`）。
 pub fn t(lang: Lang, en: &str, zh: &str) -> String {
@@ -38,15 +40,9 @@ pub fn block_on<F: std::future::Future>(fut: F) -> F::Output {
         .block_on(fut)
 }
 
-/// daemon 运行状态（仅 unix 有 daemon；非 unix 无 `client` 模块，一律 None）。
-/// 供 channel list / doctor 跨平台复用，避免在 Windows 直接引用 unix-only 的 `crate::client`。
-#[cfg(unix)]
+/// Return daemon status on every supported desktop platform.
 pub fn daemon_status() -> Option<crate::ipc::StatusInfo> {
     block_on(crate::client::request_status())
-}
-#[cfg(not(unix))]
-pub fn daemon_status() -> Option<crate::ipc::StatusInfo> {
-    None
 }
 
 // ——— 点号路径读写（基于 serde_json::Value，camelCase）———
@@ -179,14 +175,9 @@ pub fn read_secret(src: &SecretSource, lang: Lang) -> Result<String, String> {
     Ok(raw.trim().to_string())
 }
 
-/// 展开开头的 `~/`。
+/// Expand a leading tilde using the platform home-directory provider.
 pub fn expand_tilde(p: &str) -> std::path::PathBuf {
-    if let Some(rest) = p.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return std::path::Path::new(&home).join(rest);
-        }
-    }
-    std::path::PathBuf::from(p)
+    crate::cli::file_attachment::expand_tilde(p, &crate::paths::home())
 }
 
 /// stdin 是否为终端（决定走交互向导还是报错要求 flag）。
@@ -212,7 +203,7 @@ pub fn prompt_line(label: &str, current: &str) -> Result<String, String> {
     Ok(if v.is_empty() { current.to_string() } else { v })
 }
 
-/// 隐藏输入（密钥用）；Unix 关 echo，其它平台退化为可见。
+/// Hidden secret input on Unix terminals.
 #[cfg(unix)]
 pub fn prompt_hidden(label: &str) -> Result<String, String> {
     use std::os::unix::io::AsRawFd;
@@ -241,15 +232,144 @@ pub fn prompt_hidden(label: &str) -> Result<String, String> {
     Ok(line.trim_end_matches(['\n', '\r']).to_string())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+struct WindowsConsoleModeGuard {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    original: u32,
+    restored: bool,
+}
+
+#[cfg(windows)]
+impl WindowsConsoleModeGuard {
+    fn restore(&mut self) -> std::io::Result<()> {
+        if self.restored {
+            return Ok(());
+        }
+        let ok = unsafe {
+            windows_sys::Win32::System::Console::SetConsoleMode(self.handle, self.original)
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        self.restored = true;
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsConsoleModeGuard {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+#[cfg(windows)]
+enum SecretInputUnit {
+    Continue,
+    Complete,
+    Cancelled,
+    Eof,
+}
+
+#[cfg(windows)]
+fn consume_secret_input_unit(buffer: &mut Vec<u16>, unit: u16) -> SecretInputUnit {
+    match unit {
+        0x0d | 0x0a => SecretInputUnit::Complete,
+        0x03 => SecretInputUnit::Cancelled,
+        0x1a => SecretInputUnit::Eof,
+        0x08 => {
+            if buffer
+                .pop()
+                .is_some_and(|last| (0xdc00..=0xdfff).contains(&last))
+                && buffer
+                    .last()
+                    .is_some_and(|first| (0xd800..=0xdbff).contains(first))
+            {
+                buffer.pop();
+            }
+            SecretInputUnit::Continue
+        }
+        0 => SecretInputUnit::Continue,
+        _ => {
+            buffer.push(unit);
+            SecretInputUnit::Continue
+        }
+    }
+}
+
+/// Hidden secret input using the Windows console directly. Processed input is disabled while
+/// reading so Ctrl+C is returned as a character and the mode guard can restore every changed bit.
+#[cfg(windows)]
 pub fn prompt_hidden(label: &str) -> Result<String, String> {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, ReadConsoleW, SetConsoleMode, ENABLE_ECHO_INPUT,
+        ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, STD_INPUT_HANDLE,
+    };
+
+    if !stdin_is_tty() {
+        return Err(
+            "hidden secret input requires an interactive console; use --from-env, --from-file, or --from-stdin"
+                .to_string(),
+        );
+    }
+    let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let mut original = 0u32;
+    if unsafe { GetConsoleMode(handle, &mut original) } == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let hidden = original & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT);
+    if unsafe { SetConsoleMode(handle, hidden) } == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let mut guard = WindowsConsoleModeGuard {
+        handle,
+        original,
+        restored: false,
+    };
+
     eprint!("{label}: ");
     std::io::stderr().flush().ok();
-    let mut line = String::new();
-    std::io::stdin()
-        .read_line(&mut line)
-        .map_err(|e| e.to_string())?;
-    Ok(line.trim_end_matches(['\n', '\r']).to_string())
+    let mut units = Vec::new();
+    let result = loop {
+        let mut unit = 0u16;
+        let mut read = 0u32;
+        if unsafe {
+            ReadConsoleW(
+                handle,
+                (&mut unit as *mut u16).cast(),
+                1,
+                &mut read,
+                std::ptr::null(),
+            )
+        } == 0
+        {
+            break Err(std::io::Error::last_os_error().to_string());
+        }
+        if read == 0 {
+            break Err("secret input reached EOF".to_string());
+        }
+        match consume_secret_input_unit(&mut units, unit) {
+            SecretInputUnit::Continue => {}
+            SecretInputUnit::Complete => {
+                break String::from_utf16(&units).map_err(|e| e.to_string())
+            }
+            SecretInputUnit::Cancelled => break Err("secret input cancelled".to_string()),
+            SecretInputUnit::Eof => break Err("secret input reached EOF".to_string()),
+        }
+    };
+    let restored = guard.restore().map_err(|e| e.to_string());
+    eprintln!();
+    restored?;
+    result
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn prompt_hidden(_label: &str) -> Result<String, String> {
+    Err("hidden secret input is unsupported on this platform".to_string())
 }
 
 #[cfg(test)]
@@ -300,5 +420,60 @@ mod tests {
         assert!(is_secret_key("channels.telegram.botToken"));
         assert!(is_secret_key("channels.slack.appToken"));
         assert!(!is_secret_key("channels.telegram.chatId"));
+    }
+
+    #[test]
+    fn config_paths_expand_all_home_forms() {
+        let home = crate::paths::home();
+        assert_eq!(expand_tilde("~"), home);
+        assert_eq!(expand_tilde("~/secret.txt"), home.join("secret.txt"));
+        assert_eq!(expand_tilde("~\\secret.txt"), home.join("secret.txt"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_secret_units_handle_unicode_edit_cancel_and_eof() {
+        let mut value = Vec::new();
+        for unit in "密🔑".encode_utf16() {
+            assert!(matches!(
+                consume_secret_input_unit(&mut value, unit),
+                SecretInputUnit::Continue
+            ));
+        }
+        assert!(matches!(
+            consume_secret_input_unit(&mut value, 0x08),
+            SecretInputUnit::Continue
+        ));
+        assert_eq!(String::from_utf16(&value).unwrap(), "密");
+        assert!(matches!(
+            consume_secret_input_unit(&mut value, 0x03),
+            SecretInputUnit::Cancelled
+        ));
+        assert!(matches!(
+            consume_secret_input_unit(&mut value, 0x1a),
+            SecretInputUnit::Eof
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_secret_console_smoke_when_requested() {
+        use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE};
+
+        let Ok(expected) = std::env::var("ASKHUMAN_WINDOWS_SECRET_SMOKE") else {
+            return;
+        };
+        let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+        let mut before = 0u32;
+        assert_ne!(unsafe { GetConsoleMode(handle, &mut before) }, 0);
+        let result = prompt_hidden("secret-smoke");
+        let mut after = 0u32;
+        assert_ne!(unsafe { GetConsoleMode(handle, &mut after) }, 0);
+        assert_eq!(after, before, "console mode must always be restored");
+        if expected == "<cancel>" {
+            assert_eq!(result.unwrap_err(), "secret input cancelled");
+        } else {
+            assert_eq!(result.unwrap(), expected);
+        }
     }
 }

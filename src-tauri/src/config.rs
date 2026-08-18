@@ -70,7 +70,7 @@ impl PopupAnimation {
     }
 }
 
-/// Menu bar / tray icon mode (spec D4). Available on macOS and Linux desktops; hidden on Windows.
+/// Menu bar / tray icon mode (spec D4). Available on macOS, Windows, and Linux desktops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MenuBarIconMode {
@@ -83,7 +83,7 @@ pub enum MenuBarIconMode {
     Always,
 }
 
-/// 守护进程生命周期模式（实验 Tab，仅 Unix daemon 有意义；Windows 无 daemon、忽略）。
+/// 守护进程生命周期模式（跨平台；实验 Tab）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum DaemonLifecycleMode {
@@ -197,8 +197,8 @@ pub struct GeneralConfig {
     /// 语义：停止新增记录，既有历史保留。
     pub todo_history_limit: u32,
     /// Built-in sound played when a popup appears. Empty string disables it.
-    /// macOS stores a sound name, such as "Glass"; Linux treats any non-empty
-    /// value as enabled and plays a freedesktop notification sound.
+    /// macOS stores a sound name, such as "Glass"; Linux and Windows treat any non-empty
+    /// value as enabled and play the platform notification sound.
     pub popup_sound: String,
     /// Menu bar / tray icon mode (off/active/always, spec D4). Defaults to always.
     pub menu_bar_icon: MenuBarIconMode,
@@ -206,7 +206,7 @@ pub struct GeneralConfig {
     /// `Show` 上屏（省掉 WebView 初始化 + 页面加载 + 挂载的关键路径开销）。默认开；可关（非实验项）。
     /// 代价是常驻一个隐藏 WebView 进程（少量内存）。无显示环境（headless）自动不生效。
     pub popup_prewarm: bool,
-    /// 守护进程生命周期模式（activity 默认 / keepalive 保活）。UI 入口在「实验」Tab；仅 Unix daemon 有意义。
+    /// 守护进程生命周期模式（activity 默认 / keepalive 保活）。三平台共享 daemon；UI 入口在「高级」Tab。
     pub daemon_lifecycle: DaemonLifecycleMode,
 }
 
@@ -405,7 +405,7 @@ impl Default for ChannelsConfig {
 }
 
 /// 实验性高级功能（spec D15）：默认隐藏，需在「通用」Tab 底部的隐蔽开关里打开后才显示「实验」Tab。
-/// 仅 macOS/Linux 暴露该设置；Windows 不显示（无 daemon / 生命周期追踪）。
+/// macOS、Linux 与 Windows 都暴露该设置；生命周期追踪由共享 daemon 承载。
 /// 各 Agent 的「追踪开启」真值以 lifecycle hook 是否已安装为准（实时查询），故此处只需保存「是否显露实验区」。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]

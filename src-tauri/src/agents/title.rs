@@ -231,7 +231,7 @@ fn unwrap_tag(text: &str, tag: &str) -> Option<String> {
 
 /// 按 `session_id` 定位某家 agent 的 transcript（jsonl）文件路径。取不到返回 `None`。
 /// 与 `resolve_title` 的取标题不同，这里定位的是**对话流水**文件（供解析尾部「当前活动」）。
-pub(super) fn transcript_path(kind: AgentKind, session_id: &str) -> Option<PathBuf> {
+pub(crate) fn transcript_path(kind: AgentKind, session_id: &str) -> Option<PathBuf> {
     if session_id.is_empty() {
         return None;
     }

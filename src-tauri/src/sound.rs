@@ -4,11 +4,11 @@
 //! - macOS: `afplay /System/Library/Sounds/<name>.aiff`; settings lists available names.
 //! - Linux: best-effort freedesktop sound via `canberra-gtk-play`, `paplay`,
 //!   `pw-play`, or `ogg123`; unsupported when no player is found.
-//! - Other platforms: unsupported.
+//! - Windows: native system notification sound via `MessageBeep`.
 //!
 //! Playback is fire-and-forget: a background thread waits on the spawned player
 //! process to avoid zombies.
-//! `support()` returns `"named"` (macOS), `"toggle"` (Linux), or `"none"`.
+//! `support()` returns `"named"` (macOS), `"toggle"` (Linux/Windows), or `"none"`.
 
 /// Platform support and UI shape: `"named"` / `"toggle"` / `"none"`.
 pub fn support() -> &'static str {
@@ -198,7 +198,27 @@ mod imp {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(target_os = "windows")]
+mod imp {
+    use windows_sys::Win32::System::Diagnostics::Debug::MessageBeep;
+    use windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONASTERISK;
+
+    pub fn support() -> &'static str {
+        "toggle"
+    }
+
+    pub fn names() -> Vec<String> {
+        Vec::new()
+    }
+
+    pub fn play(_name: &str) {
+        unsafe {
+            MessageBeep(MB_ICONASTERISK);
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod imp {
     pub fn support() -> &'static str {
         "none"

@@ -63,7 +63,7 @@
   ——触发时在上报 activity 之余顺带向 daemon 查询/等待插话。
 - **Grok 首期排除**：不改其 hook 行为，AgentsView / 托盘对 grok 会话不显示「发送消息」入口。
   理由：无可靠「传话」通道（见 §2），deny-only 只能拦停不能解释，体验差；等 Grok hook 能力演进。
-- Unix only（生命周期追踪/托盘/宿主本就 Unix only）。
+- macOS、Linux 与 Windows 共用 lifecycle hook、daemon 队列和 GUI Host；Grok 仍排除。
 
 ### D2 消息模型：每 session 一份条目列表（queue of entries）
 
@@ -147,7 +147,7 @@ Cursor 若按其文档语义改用 `agent_message` 也不断；代价是 Cursor 
 - **热路径零文件 IO**：队列在 daemon 内存（HashMap，O(1) 查询）；`interject.json` 只在**变更时**
   （提交/追加/撤回/消费/会话结束）原子落盘、daemon 启动时读一次（D8）。**hook 不读任何文件**。
 - **复用既有连接**：activity hook 本就 spawn `AskHuman __agent-hook` 并连 daemon 发 `AgentEvent`；
-  插话只在同一连接上**多一次请求-响应往返**（本地 UDS，微秒~毫秒级）。无新进程、无新连接。
+  插话只在同一连接上**多一次请求-响应往返**（本地 Unix socket / Windows named pipe，通常为微秒～毫秒级）。无新进程、无新连接。
 - 协议：`ClientMsg::AgentEvent` 增 `interject_poll: bool`（serde default，旧 daemon 忽略）。
   daemon 收到 `interject_poll=true` 立即回一帧三选一：
   - `None` → hook 直接 allow 退出；
@@ -231,7 +231,7 @@ map 按 session 与条目下标对齐保存附件数组；旧文件缺少该字�
 |---|---|---|
 | 进程 spawn | 已有（`__agent-hook`） | **不变**（复用同一进程） |
 | daemon 连接 | 已有（发 AgentEvent） | **不变**（复用同一连接） |
-| 消息往返 | 0（即发即走） | **+1 次 UDS 请求-响应**（daemon 侧 O(1) 内存查表） |
+| 消息往返 | 0（即发即走） | **+1 次本地 IPC 请求-响应**（daemon 侧 O(1) 内存查表） |
 | 文件 IO | 0 | **0**（hook 热路径不读附件；持久化只在插话变更时写、启动读一次） |
 
 - 无插话时增量 ≈ 一次本地 socket 往返（微秒~毫秒级），相对 hook 进程 spawn 本身（几十 ms 量级）可忽略。

@@ -1,10 +1,40 @@
 //! Comment-preserving JSONC edits for nested command-hook groups.
 
 use anyhow::{anyhow, Result};
+use base64::Engine;
 use jsonc_parser::cst::{CstNode, CstRootNode};
 use jsonc_parser::json;
 use jsonc_parser::ParseOptions;
 use serde_json::Value;
+
+pub fn command_handler_matches(
+    handler: &Value,
+    expected: &str,
+    expected_windows: Option<&str>,
+) -> bool {
+    handler.get("command").and_then(Value::as_str) == Some(expected)
+        && expected_windows.is_none_or(|expected_windows| {
+            handler.get("commandWindows").and_then(Value::as_str) == Some(expected_windows)
+        })
+}
+
+/// Build a Windows hook command that is independent of the outer session shell chosen by Codex.
+/// `-EncodedCommand` avoids a second round of cmd.exe/PowerShell quoting and expansion for paths
+/// containing spaces, apostrophes, dollar signs, or other shell metacharacters.
+pub fn powershell_command(executable: &str, args: &[&str]) -> String {
+    fn literal(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
+    let mut script = format!("& {}", literal(executable));
+    for arg in args {
+        script.push(' ');
+        script.push_str(&literal(arg));
+    }
+    let utf16le: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(utf16le);
+    format!("powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}")
+}
 
 fn command_has_marker(value: &Value, marker: &str) -> bool {
     value
@@ -12,11 +42,12 @@ fn command_has_marker(value: &Value, marker: &str) -> bool {
         .and_then(Value::as_array)
         .map(|handlers| {
             handlers.iter().any(|handler| {
-                handler
-                    .get("command")
-                    .and_then(Value::as_str)
-                    .map(|command| command.contains(marker))
-                    .unwrap_or(false)
+                ["command", "commandWindows"].iter().any(|field| {
+                    handler
+                        .get(*field)
+                        .and_then(Value::as_str)
+                        .is_some_and(|command| command.contains(marker))
+                })
             })
         })
         .unwrap_or(false)
@@ -25,11 +56,12 @@ fn command_has_marker(value: &Value, marker: &str) -> bool {
 fn handler_node_has_marker(node: &CstNode, marker: &str) -> bool {
     node.to_serde_value()
         .map(|value: Value| {
-            value
-                .get("command")
-                .and_then(Value::as_str)
-                .map(|command| command.contains(marker))
-                .unwrap_or(false)
+            ["command", "commandWindows"].iter().any(|field| {
+                value
+                    .get(*field)
+                    .and_then(Value::as_str)
+                    .is_some_and(|command| command.contains(marker))
+            })
         })
         .unwrap_or(false)
 }
@@ -39,6 +71,18 @@ pub fn upsert_nested_group(
     event: &str,
     marker: &str,
     command: &str,
+    timeout: u64,
+    status_message: Option<&str>,
+) -> Result<String> {
+    upsert_nested_group_with_windows(text, event, marker, command, None, timeout, status_message)
+}
+
+pub fn upsert_nested_group_with_windows(
+    text: &str,
+    event: &str,
+    marker: &str,
+    command: &str,
+    command_windows: Option<&str>,
     timeout: u64,
     status_message: Option<&str>,
 ) -> Result<String> {
@@ -54,14 +98,27 @@ pub fn upsert_nested_group(
     let groups = hooks
         .array_value_or_create(event)
         .ok_or_else(|| anyhow!("hook event '{event}' is not an array"))?;
-    let replacement_handler = match status_message {
-        Some(message) => json!({
+    let replacement_handler = match (command_windows, status_message) {
+        (Some(command_windows), Some(message)) => json!({
+            "type": "command",
+            "command": command,
+            "commandWindows": command_windows,
+            "timeout": timeout,
+            "statusMessage": message
+        }),
+        (Some(command_windows), None) => json!({
+            "type": "command",
+            "command": command,
+            "commandWindows": command_windows,
+            "timeout": timeout
+        }),
+        (None, Some(message)) => json!({
             "type": "command",
             "command": command,
             "timeout": timeout,
             "statusMessage": message
         }),
-        None => json!({ "type": "command", "command": command, "timeout": timeout }),
+        (None, None) => json!({ "type": "command", "command": command, "timeout": timeout }),
     };
     let mut replaced = false;
     for group in groups.elements() {
@@ -103,6 +160,18 @@ pub fn upsert_nested_group_matched(
     command: &str,
     timeout: u64,
 ) -> Result<String> {
+    upsert_nested_group_matched_with_windows(text, event, marker, matcher, command, None, timeout)
+}
+
+pub fn upsert_nested_group_matched_with_windows(
+    text: &str,
+    event: &str,
+    marker: &str,
+    matcher: Option<&str>,
+    command: &str,
+    command_windows: Option<&str>,
+    timeout: u64,
+) -> Result<String> {
     let source = if text.trim().is_empty() { "{}" } else { text };
     let root = CstRootNode::parse(source, &ParseOptions::default())
         .map_err(|error| anyhow!("failed to parse hook config: {error}"))?;
@@ -115,7 +184,15 @@ pub fn upsert_nested_group_matched(
     let groups = hooks
         .array_value_or_create(event)
         .ok_or_else(|| anyhow!("hook event '{event}' is not an array"))?;
-    let handler = json!({ "type": "command", "command": command, "timeout": timeout });
+    let handler = match command_windows {
+        Some(command_windows) => json!({
+            "type": "command",
+            "command": command,
+            "commandWindows": command_windows,
+            "timeout": timeout
+        }),
+        None => json!({ "type": "command", "command": command, "timeout": timeout }),
+    };
     let replacement = match matcher {
         Some(matcher) => json!({ "matcher": matcher, "hooks": [handler] }),
         None => json!({ "hooks": [handler] }),
@@ -308,18 +385,7 @@ pub fn atomic_write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> 
         file.write_all(bytes)?;
         file.flush()?;
         drop(file);
-        #[cfg(not(windows))]
         std::fs::rename(&temporary, path)?;
-        #[cfg(windows)]
-        {
-            // std::fs::rename cannot replace an existing destination on Windows. The private
-            // file remains unavailable to other users throughout, although replacement itself
-            // cannot be atomic with the portable standard-library API.
-            if std::fs::rename(&temporary, path).is_err() {
-                std::fs::remove_file(path)?;
-                std::fs::rename(&temporary, path)?;
-            }
-        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -336,6 +402,29 @@ pub fn atomic_write_private(path: &std::path::Path, bytes: &[u8]) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn powershell_command_round_trips_shell_metacharacters_without_outer_quoting() {
+        let command = powershell_command(
+            r"C:\Users\O'Brien $dev\Ask Human.exe",
+            &["__agent-hook", "codex", "activity"],
+        );
+        let encoded = command.split_whitespace().last().unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
+        assert_eq!(
+            String::from_utf16(&units).unwrap(),
+            "& 'C:\\Users\\O''Brien $dev\\Ask Human.exe' '__agent-hook' 'codex' 'activity'"
+        );
+        assert!(!command.contains("Ask Human.exe"));
+        assert!(command
+            .starts_with("powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand "));
+    }
 
     #[test]
     fn upsert_appends_and_preserves_other_groups_and_comments() {

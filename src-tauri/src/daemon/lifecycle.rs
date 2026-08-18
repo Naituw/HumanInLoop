@@ -1,4 +1,4 @@
-//! Daemon 生命周期支撑：二进制指纹、运行元信息（daemon.json）、单实例锁（flock）。
+//! Daemon 生命周期支撑：二进制指纹、运行元信息（daemon.json）、跨平台单实例锁。
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -256,6 +256,60 @@ pub fn log_guard_audit(audit: GuardAudit<'_>) {
     let _ = line;
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeEventLine<'a> {
+    timestamp_ms: u64,
+    pid: u32,
+    event: &'static str,
+    component: &'a str,
+    action: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<&'a str>,
+}
+
+/// Append one privacy-safe process/window lifecycle event to `daemon.log` (best-effort).
+///
+/// Only fixed action labels and an opaque request UUID are accepted. Prompt text, answers,
+/// attachments, paths, channel identities, and arbitrary error strings must not use this API.
+pub fn log_runtime_event(component: &str, action: &str, request_id: Option<&str>) {
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    let Ok(mut line) = serde_json::to_string(&RuntimeEventLine {
+        timestamp_ms,
+        pid: std::process::id(),
+        event: "askhuman_runtime",
+        component,
+        action,
+        request_id,
+    }) else {
+        return;
+    };
+    line.push('\n');
+
+    #[cfg(not(test))]
+    {
+        use std::io::Write;
+
+        let path = log_path();
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
+}
+
 /// daemon.log 轮转阈值：超过即把现有内容挪到 `daemon.log.1`（覆盖上一代）并清空当前文件。
 /// 上限约束为「两代 × 5MB」，正常运行量级下够追溯数周。
 const LOG_ROTATE_LIMIT: u64 = 5 * 1024 * 1024;
@@ -302,44 +356,21 @@ pub fn write_meta(meta: &DaemonMeta) -> std::io::Result<()> {
     std::fs::write(meta_path(), data)
 }
 
-/// 持有期间代表「本进程为唯一 Daemon」。Drop（文件关闭）时锁自动释放。
-#[cfg(unix)]
-pub struct LockGuard {
-    _file: std::fs::File,
-}
+/// 持有期间代表「本进程为唯一 Daemon」。Drop 时系统文件锁自动释放。
+pub type LockGuard = crate::file_lock::FileLock;
 
 /// 尝试获取单实例锁（非阻塞）。
 /// - `Ok(Some(guard))`：成功，本进程是唯一 Daemon。
 /// - `Ok(None)`：已有其它 Daemon 持锁。
 /// - `Err`：其它 IO 错误。
-#[cfg(unix)]
 pub fn acquire_lock() -> std::io::Result<Option<LockGuard>> {
     acquire_lock_at(&lock_path())
 }
 
-/// 在指定路径上尝试获取 flock 单实例锁（非阻塞）。供 daemon（`daemon.lock`）与
+/// 在指定路径上尝试获取单实例文件锁（非阻塞）。供 daemon（`daemon.lock`）与
 /// GUI 宿主（`gui-host.lock`）共用。返回值语义同 `acquire_lock`。
-#[cfg(unix)]
 pub fn acquire_lock_at(path: &Path) -> std::io::Result<Option<LockGuard>> {
-    use std::os::unix::io::AsRawFd;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(path)?;
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        // 已被其它进程持有（EWOULDBLOCK 与 EAGAIN 在各 Unix 上同值）。
-        if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            return Ok(None);
-        }
-        return Err(err);
-    }
-    Ok(Some(LockGuard { _file: file }))
+    crate::file_lock::FileLock::try_exclusive(path)
 }
 
 #[cfg(test)]

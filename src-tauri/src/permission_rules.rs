@@ -76,8 +76,8 @@ impl RuleKey {
         const MAX_TEXT: usize = 8_192;
         let text_ok = |value: &str| !value.is_empty() && value.len() <= MAX_TEXT;
         match self {
-            Self::FileExact { path } => text_ok(path) && path.starts_with('/'),
-            Self::FileProject { root } => text_ok(root) && root.starts_with('/'),
+            Self::FileExact { path } => text_ok(path) && path_is_absolute_text(path),
+            Self::FileProject { root } => text_ok(root) && path_is_absolute_text(root),
             Self::FileDisk => true,
             Self::McpTool { tool } => text_ok(tool) && tool.starts_with("mcp__"),
             Self::NetworkHost { host, protocol, .. } => {
@@ -245,38 +245,24 @@ fn total_rules(data: &RuleFile) -> usize {
 
 // ===== Cross-process write lock (same pattern as todos.rs) =====
 
-#[cfg(unix)]
-struct LockGuard {
-    _file: std::fs::File,
-}
-
-#[cfg(unix)]
-fn lock_at(path: &Path) -> Option<LockGuard> {
-    use std::os::unix::io::AsRawFd;
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(path)
-        .ok()?;
-    unsafe {
-        libc::flock(file.as_raw_fd(), libc::LOCK_EX);
-    }
-    Some(LockGuard { _file: file })
-}
-
-#[cfg(not(unix))]
-fn lock_at(_path: &Path) -> Option<()> {
-    None
+fn lock_at(path: &Path) -> Option<crate::file_lock::FileLock> {
+    crate::file_lock::FileLock::exclusive(path).ok()
 }
 
 // ===== Matching =====
 
+pub(crate) fn path_is_absolute_text(value: &str) -> bool {
+    value.starts_with('/') || Path::new(value).is_absolute()
+}
+
+fn comparable_path(value: &str) -> String {
+    crate::path_identity::key(value)
+}
+
 /// Lexical prefix check on normalized absolute paths (component boundary aware).
-fn path_within(path: &str, root: &str) -> bool {
+pub(crate) fn path_within_text(path: &str, root: &str) -> bool {
+    let path = comparable_path(path);
+    let root = comparable_path(root);
     if path == root {
         return true;
     }
@@ -287,6 +273,10 @@ fn path_within(path: &str, root: &str) -> bool {
     }
     path.strip_prefix(root_trimmed)
         .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn path_within(path: &str, root: &str) -> bool {
+    path_within_text(path, root)
 }
 
 /// D46: on an aggregated-scope hit, refuse auto-allow when any existing component of the
@@ -709,38 +699,73 @@ pub fn normalize_path(raw: &str, cwd: &str) -> Option<String> {
     let expanded: String = if raw == "~" {
         dirs_home()?
     } else if let Some(rest) = raw.strip_prefix("~/") {
-        format!("{}/{rest}", dirs_home()?)
+        Path::new(&dirs_home()?)
+            .join(rest)
+            .to_string_lossy()
+            .to_string()
     } else {
         raw.to_string()
     };
-    let joined = if expanded.starts_with('/') {
+
+    // Keep POSIX-shaped protocol fixtures valid on every host. Native Windows paths use
+    // the component-aware branch below.
+    if expanded.starts_with('/') || (cwd.starts_with('/') && !Path::new(&expanded).is_absolute()) {
+        let joined = if expanded.starts_with('/') {
+            expanded
+        } else {
+            format!("{}/{expanded}", cwd.trim_end_matches('/'))
+        };
+        let mut parts: Vec<&str> = Vec::new();
+        for component in joined.split('/') {
+            match component {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                other => parts.push(other),
+            }
+        }
+        let mut result = String::from("/");
+        result.push_str(&parts.join("/"));
+        return Some(result);
+    }
+
+    let expanded = PathBuf::from(expanded);
+    let joined = if expanded.is_absolute() {
         expanded
     } else {
-        if !cwd.starts_with('/') {
+        let cwd = PathBuf::from(cwd);
+        if !cwd.is_absolute() {
             return None;
         }
-        format!("{}/{expanded}", cwd.trim_end_matches('/'))
+        cwd.join(expanded)
     };
-    let mut parts: Vec<&str> = Vec::new();
-    for component in joined.split('/') {
+    let mut result = PathBuf::new();
+    for component in joined.components() {
         match component {
-            "" | "." => {}
-            ".." => {
-                // `..` above root stays at root, same as lexical normalize_lexically.
-                parts.pop();
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if matches!(
+                    result.components().next_back(),
+                    Some(std::path::Component::Normal(_))
+                ) {
+                    result.pop();
+                }
             }
-            other => parts.push(other),
+            other => result.push(other.as_os_str()),
         }
     }
-    let mut result = String::from("/");
-    result.push_str(&parts.join("/"));
-    Some(result)
+    result
+        .is_absolute()
+        .then(|| result.to_string_lossy().to_string())
 }
 
 fn dirs_home() -> Option<String> {
-    std::env::var("HOME")
-        .ok()
-        .filter(|value| value.starts_with('/'))
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+        .filter(|value| value.is_absolute())
+        .map(|value| value.to_string_lossy().to_string())
 }
 
 // ===== Wire payload: hook -> daemon =====
@@ -825,8 +850,8 @@ impl NativeWrite {
                 server,
                 tool,
             } => {
-                config_path.starts_with('/')
-                    && config_path.ends_with("/config.toml")
+                path_is_absolute_text(config_path)
+                    && comparable_path(config_path).ends_with("/config.toml")
                     && config_path.len() <= 4_096
                     && !server.is_empty()
                     && server.len() <= 512
@@ -838,15 +863,15 @@ impl NativeWrite {
                 host,
                 protocol,
             } => {
-                rules_path.starts_with('/')
-                    && rules_path.ends_with("/rules/default.rules")
+                path_is_absolute_text(rules_path)
+                    && comparable_path(rules_path).ends_with("/rules/default.rules")
                     && rules_path.len() <= 4_096
                     && network_host_is_valid(host)
                     && NETWORK_PROTOCOLS.contains(&protocol.as_str())
             }
             Self::PrefixRule { rules_path, prefix } => {
-                rules_path.starts_with('/')
-                    && rules_path.ends_with("/rules/default.rules")
+                path_is_absolute_text(rules_path)
+                    && comparable_path(rules_path).ends_with("/rules/default.rules")
                     && rules_path.len() <= 4_096
                     && !prefix.is_empty()
                     && prefix.len() <= 64

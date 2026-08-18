@@ -1,4 +1,4 @@
-//! Daemon 主体（Unix）：状态与类型、serve 主循环、连接分发、请求提交与生命周期命令。
+//! Cross-platform daemon runtime: state, accept loop, routing, channels, and lifecycle commands.
 //! watch/select/inbound/subs/detect 的自由函数拆为子模块，经 glob 导入保持单一命名空间。
 
 use super::ask_dedup;
@@ -31,8 +31,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::BufReader;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::UnixStream;
+use transport::{OwnedReadHalf, OwnedWriteHalf, Stream};
 
 mod detect;
 mod fork;
@@ -92,9 +91,29 @@ fn now_ms() -> u64 {
 }
 
 fn log(msg: &str) {
-    // `daemon run` 经 spawn 时 stderr 已重定向到 daemon.log；前台运行则打到终端。
-    eprintln!("[askhuman-daemon {}] {}", now_secs(), msg);
+    let line = format!("[askhuman-daemon {}] {}\n", now_secs(), msg);
+    #[cfg(windows)]
+    if BACKGROUND_LOG_TO_FILE.load(Ordering::Relaxed) {
+        use std::io::Write;
+
+        let path = lifecycle::log_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = file.write_all(line.as_bytes());
+        }
+        return;
+    }
+    eprint!("{line}");
 }
+
+#[cfg(windows)]
+static BACKGROUND_LOG_TO_FILE: AtomicBool = AtomicBool::new(false);
 
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
@@ -106,13 +125,20 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 
 pub fn dispatch(args: &[String]) -> i32 {
     let force = args.iter().skip(1).any(|a| a == "--force");
-    // 子命令后仅允许 `--force`（且只对 stop/restart 有意义），其余一律报错。
-    if let Some(extra) = args.iter().skip(1).find(|a| a.as_str() != "--force") {
+    let background = cfg!(windows)
+        && args.first().is_some_and(|arg| arg == "run")
+        && args.iter().skip(1).any(|arg| arg == "--background");
+    // 子命令后仅允许 `--force`，以及 Windows 内部 detached run 的 `--background`。
+    if let Some(extra) = args
+        .iter()
+        .skip(1)
+        .find(|arg| arg.as_str() != "--force" && !(background && arg.as_str() == "--background"))
+    {
         eprintln!("unknown daemon argument: {}", extra);
         return 1;
     }
     match args.first().map(|s| s.as_str()).unwrap_or("") {
-        "run" => run_cmd(),
+        "run" => run_cmd(background),
         "start" => start_cmd(),
         "stop" => stop_cmd(force),
         "restart" => restart_cmd(force),
@@ -134,7 +160,11 @@ pub fn dispatch(args: &[String]) -> i32 {
 
 // —— run：前台运行 Daemon 主体 ——
 
-fn run_cmd() -> i32 {
+fn run_cmd(background: bool) -> i32 {
+    #[cfg(windows)]
+    BACKGROUND_LOG_TO_FILE.store(background, Ordering::Relaxed);
+    #[cfg(not(windows))]
+    let _ = background;
     let lock = match lifecycle::acquire_lock() {
         Ok(Some(l)) => l,
         Ok(None) => {
@@ -1195,7 +1225,7 @@ enum Control {
     Closed,
 }
 
-async fn handle_conn(stream: UnixStream, state: Arc<ServerState>) {
+async fn handle_conn(stream: Stream, state: Arc<ServerState>) {
     state.active.fetch_add(1, Ordering::SeqCst);
     let (r, w) = stream.into_split();
     let mut reader = BufReader::new(r);
@@ -1407,10 +1437,13 @@ async fn control_loop(
                         pid.or_else(|| state.agents.resolve_pid(&session_id, kind, hint_pid));
 
                     let event_cwd = cwd.clone();
-                    let changed =
+                    let mut changed =
                         state
                             .agents
                             .apply_event(kind, ev, &session_id, resolved_pid, cwd, ts);
+                    if let Some(launch_id) = launch_id.as_deref() {
+                        changed |= state.agents.set_launch_id(&session_id, launch_id);
+                    }
                     if changed {
                         state.agents.persist();
                         broadcast_agents_state(state);
@@ -2161,13 +2194,23 @@ async fn handle_submit(
                 request_id
             ));
             // Cancel the whole request: IM cards finalize to "Cancelled by caller", popup closes.
-            // The IM finalize runs in the channels' own tasks (which outlive this entry), so the
-            // daemon need not wait here — it stays alive.
             let caller = crate::i18n::tr(lang, "channel.sourceCaller").to_string();
             entry.coordinator.cancel_request(caller, "caller");
             update_popup_focus(state, |focus| focus.terminal(&request_id));
             entry.cancel.notify_waiters();
+            // Remove first so an immediate Agent retry cannot coalesce onto a terminal request.
+            // Keep the local Arc alive while every IM task patches its card to the cancelled state.
             state.registry.remove(&request_id);
+            let finalized = entry.coordinator.wait_for_finalizers().await;
+            log(&format!(
+                "request {} cancellation {}",
+                request_id,
+                if finalized {
+                    "finalized"
+                } else {
+                    "finalize timed out"
+                }
+            ));
             // 不标记扰动：取消只是就地 PATCH 提问卡定格，不产生新消息（不淹没 watch 卡）。
             state.watch.notify.notify_one();
             return;
@@ -2397,10 +2440,36 @@ async fn serve_gui(
 
     // 方案5(b)：若调用方 agent 已异步解析完成（walk 早于本连接），握手即补发 AgentResolved
     // （覆盖「解析早于 helper 连接」竞态；解析晚于连接的情形由 spawn_agent_resolve 自行推送）。
-    if let Some(r) = entry.resolved_agent.lock().unwrap().clone() {
+    let pushed = entry
+        .resolved_agent
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_default();
+    let registered = entry
+        .agent_session_id
+        .as_deref()
+        .and_then(|session_id| state.agents.focus_identity(session_id));
+    let resolved = request::ResolvedAgent {
+        kind: pushed.kind.or_else(|| {
+            registered
+                .as_ref()
+                .map(|(kind, _, _)| kind.as_str().to_string())
+        }),
+        pid: pushed
+            .pid
+            .or_else(|| registered.as_ref().and_then(|(_, pid, _)| *pid)),
+        launch_id: pushed.launch_id.or_else(|| {
+            registered
+                .as_ref()
+                .and_then(|(_, _, launch_id)| launch_id.clone())
+        }),
+    };
+    if resolved.kind.is_some() || resolved.pid.is_some() || resolved.launch_id.is_some() {
         let _ = gui_tx.send(ServerMsg::AgentResolved {
-            kind: r.kind,
-            pid: r.pid,
+            kind: resolved.kind,
+            pid: resolved.pid,
+            launch_id: resolved.launch_id,
         });
     }
 
@@ -2717,6 +2786,10 @@ fn tray_supported() -> bool {
     {
         std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
     }
+    #[cfg(windows)]
+    {
+        has_display()
+    }
 }
 
 /// 按配置兜底拉起 GUI 宿主（spec D14）：`menu_bar_icon != off` 且托盘可用时尝试 spawn。
@@ -2952,9 +3025,16 @@ fn spawn_agent_resolve(
         entry.coordinator.set_agent_kind(kind.as_str().to_string());
 
         // 存入 entry + 后推弹窗（helper 已连上则即送；未连则握手时由 handle_gui 补发，覆盖竞态）。
+        let launch_id = sid_env.as_deref().and_then(|session_id| {
+            state
+                .agents
+                .focus_identity(session_id)
+                .and_then(|(_, _, launch_id)| launch_id)
+        });
         let resolved = request::ResolvedAgent {
             kind: Some(kind.as_str().to_string()),
             pid: Some(pid),
+            launch_id,
         };
         if let Ok(mut slot) = entry.resolved_agent.lock() {
             *slot = Some(resolved.clone());
@@ -2964,6 +3044,7 @@ fn spawn_agent_resolve(
                 let _ = tx.send(ServerMsg::AgentResolved {
                     kind: resolved.kind,
                     pid: resolved.pid,
+                    launch_id: resolved.launch_id,
                 });
             }
         }
@@ -3592,6 +3673,7 @@ fn spawn_gui_helper(token: &str, perf_id: &str, perf_autodismiss: bool) -> std::
             cmd.env("ASKHUMAN_PERF_AUTODISMISS", "1");
         }
     }
+    crate::daemon::spawn::configure_background(&mut cmd);
     cmd.spawn().map(|_| ())
 }
 
@@ -3608,6 +3690,7 @@ fn spawn_warm_helper() -> std::io::Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    crate::daemon::spawn::configure_background(&mut cmd);
     cmd.spawn().map(|_| ())
 }
 
@@ -3630,8 +3713,8 @@ fn warm_enabled(state: &Arc<ServerState>) -> bool {
         .unwrap_or(false)
 }
 
-/// 是否有可用显示（§D-M3）：无显示（headless）不预热，零浪费。macOS 恒真（GUI 会话）；
-/// Linux 看 `DISPLAY`/`WAYLAND_DISPLAY`。
+/// Whether an interactive display is available (§D-M3). macOS is always a GUI session,
+/// Linux checks DISPLAY/WAYLAND_DISPLAY, and Windows rejects the Services session.
 fn has_display() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -3640,6 +3723,12 @@ fn has_display() -> bool {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
+    }
+    #[cfg(windows)]
+    {
+        !std::env::var("SESSIONNAME")
+            .map(|name| name.eq_ignore_ascii_case("services"))
+            .unwrap_or(false)
     }
 }
 
@@ -3742,6 +3831,7 @@ fn recycle_warm(state: &Arc<ServerState>) {
 }
 
 fn cleanup() {
+    #[cfg(unix)]
     let _ = std::fs::remove_file(transport::socket_path());
     let _ = std::fs::remove_file(lifecycle::meta_path());
 }

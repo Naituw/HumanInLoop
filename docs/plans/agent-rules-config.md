@@ -1,5 +1,8 @@
 # 开发计划：按 Agent 分组的「全局提示词（Rules）」配置入口
 
+> Windows 注（2026-08）：本文保留首期 Cursor Hook 限制；当前 Windows Cursor/Claude timeout hooks
+> 使用 PowerShell 5 兼容 `.ps1`，Codex 使用 `commandWindows`，旧占位/unsupported 描述仅作历史记录。
+
 > 关联需求：`docs/specs/agent-rules-config.md`
 > 计划描述方案与技术/规则细节，具体代码以实现为准。
 

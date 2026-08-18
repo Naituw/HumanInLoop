@@ -1,4 +1,4 @@
-//! 跨渠道单选卡（select/picker）：发送、路由与四渠道回调分发。
+//! Cross-channel select/picker delivery, routing, and callback dispatch.
 
 use super::*;
 

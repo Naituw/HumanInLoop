@@ -8,7 +8,6 @@ import { useSettingsContext } from "./context";
 const { t } = useI18n();
 const ctx = useSettingsContext();
 const {
-  isWindows,
   persist,
   secretsPresent,
   SECRET_PLACEHOLDER,
@@ -126,7 +125,7 @@ const config = computed(() => ctx.config.value!);
 
   <!-- 引导到「高级 · 按需发送」：独立 tip 卡，走 .card+.card 间距；仅未开启时显示（默认关时的发现性） -->
   <div
-    v-if="!isWindows && !config.channels.autoActivation"
+    v-if="!config.channels.autoActivation"
     class="card channels-tip"
   >
     <p class="channels-tip-title">

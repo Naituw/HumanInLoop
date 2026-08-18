@@ -1347,6 +1347,11 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
             "Update to v{v} (applies after answering)",
             "更新到 v{v}（答完后生效）",
         ),
+        "tray.prepareManualUpdate" => pick(
+            lang,
+            "Prepare manual update to v{v}…",
+            "准备手动更新至 v{v}…",
+        ),
         "tray.applyingUpdate" => pick(lang, "Updating AskHuman…", "正在更新 AskHuman…"),
         "tray.applyUpdateFailed" => pick(
             lang,

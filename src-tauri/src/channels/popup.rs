@@ -1,6 +1,6 @@
 //! 本地弹窗 Channel。
 //!
-//! - `PopupChannel`（单进程，非 unix 回退路径）：窗口在 `app::launch` setup 中创建，结果经命令进协调器；
+//! - `PopupChannel`（legacy in-process/test path）：窗口在 `app::launch` setup 中创建，结果经命令进协调器；
 //!   被抢答时关闭窗口。
 //! - `GuiHelperPopupChannel`（Daemon 模式）：弹窗在独立 GUI Helper 进程；该 adapter 仅在被抢答时
 //!   经 IPC 向 Helper 下发 `cancel`（窗口由 Helper 自行收尾关闭）。投递答案由 GUI 连接处理器

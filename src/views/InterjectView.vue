@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { applyTheme } from "../lib/theme";
+import { primaryModifierPressed, primaryShortcutLabel } from "../lib/platform";
 import { applyLanguage } from "../i18n";
 import { interjectCancel, interjectInit, interjectSubmit } from "../lib/ipc";
 import type { AgentKind, ThemeMode } from "../lib/types";
@@ -11,6 +12,8 @@ import ComposerAttachments from "../components/ComposerAttachments.vue";
 import { useInterjectAttachments } from "./interject/useInterjectAttachments";
 
 const { t } = useI18n();
+const cancelShortcut = primaryShortcutLabel("w");
+const submitShortcut = primaryShortcutLabel("enter");
 
 // 目标 agent 信息由 Rust 侧经窗口 URL 注入：?view=interject&session=...&kind=...&project=...
 const params = new URLSearchParams(window.location.search);
@@ -65,10 +68,13 @@ async function cancel(): Promise<void> {
 }
 
 function onKeydown(e: KeyboardEvent): void {
-  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+  if (primaryModifierPressed(e) && e.key === "Enter") {
     e.preventDefault();
     void send();
-  } else if (e.key === "Escape" || (e.metaKey && e.key.toLowerCase() === "w")) {
+  } else if (
+    e.key === "Escape" ||
+    (primaryModifierPressed(e) && e.key.toLowerCase() === "w")
+  ) {
     e.preventDefault();
     void cancel();
   }
@@ -174,14 +180,14 @@ onBeforeUnmount(() => {
 
     <footer class="footer ij-footer" data-tauri-drag-region>
       <button type="button" class="btn" :disabled="sending" @click="cancel">
-        {{ t("common.cancel") }} <kbd class="sc">⌘W</kbd>
+        {{ t("common.cancel") }} <kbd class="sc">{{ cancelShortcut }}</kbd>
       </button>
       <span v-if="pendingEntries > 0" class="ij-pending">
         {{ t("interject.overwriteNote", { n: pendingEntries }) }}
       </span>
       <span class="spacer" />
       <button type="button" class="btn btn-primary" :disabled="!canSend" @click="send">
-        {{ t("popup.send") }} <kbd class="sc">⌘↵</kbd>
+        {{ t("popup.send") }} <kbd class="sc">{{ submitShortcut }}</kbd>
       </button>
     </footer>
   </div>

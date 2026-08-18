@@ -1,5 +1,8 @@
 # 实现计划：并发 Popup 焦点仲裁与后方级联
 
+> Windows 注（2026-08）：本文的 Windows 单进程范围声明是首期历史记录；Windows 已接入 shared
+> daemon/GUI Host，焦点仲裁复用同一业务状态机，桌面实机矩阵仍是发布验收 gate。
+
 > 状态：已实现；macOS 真机验收与自动化验证通过。Linux 保留同构仲裁与 best-effort 展示路径，按确认不另记真机验收待办。
 > 范围：macOS 完整实现；Linux 复用 daemon 仲裁与级联位置策略，按窗口管理器能力兼容。
 > Windows 当前走非 Unix 单进程回退路径，不在本轮范围内。
@@ -363,7 +366,7 @@ Linux 至少做一次双 Popup 验收：新窗口不由代码显式请求 focus�
 ## 13. 预估影响文件
 
 - `src-tauri/src/daemon/popup_focus.rs`（新）：纯仲裁状态机。
-- `src-tauri/src/daemon/unix_impl/mod.rs`：ServerState、dispatch、GUI 服务循环、终态/断连、托盘 focus 接线。
+- `src-tauri/src/daemon/runtime/mod.rs`：ServerState、dispatch、GUI 服务循环、终态/断连、托盘 focus 接线。
 - `src-tauri/src/daemon/request.rs`：按 seq 暴露/统一 GUI surface 登记与移除辅助。
 - `src-tauri/src/ipc/mod.rs`：ready/focused/dismissed/presentation 消息与模型。
 - `src-tauri/src/app/mod.rs`：冷/热隐藏建窗、reader 消息、WindowEvent、统一展示。

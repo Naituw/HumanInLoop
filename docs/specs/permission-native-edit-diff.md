@@ -66,9 +66,9 @@
 
 ### 2.3 平台与渠道
 
-- 首期跟随现有原生权限审批能力，仅在 macOS / Linux 的 Claude Code + Codex 生效；
+- 原生权限审批在 macOS / Linux / Windows 的 Claude Code + Codex 生效；
 - Diff 只进入本地 Popup Helper；飞书、钉钉、Telegram、Slack 和历史记录保持现状；
-- Windows 将来具备相同 PermissionRequest / daemon IPC 后复用同一模型，首期不单独接线。
+- Windows 通过 `commandWindows`、安全 named pipe 与同一 Popup 模型复用相同 PermissionRequest 语义；PowerShell 复杂或含歧义命令 fail-closed 回基础审批。
 
 ## 3. 已确认产品决策
 

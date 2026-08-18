@@ -30,7 +30,7 @@ pub struct LifecycleStatus {
     pub installed: bool,
     /// 已安装但需更新（命令路径变化 / 事件缺失 / Codex 信任缺失或不匹配）。
     pub outdated: bool,
-    /// 当前平台是否支持（仅 unix）。
+    /// Whether lifecycle hooks are supported on the current platform.
     pub supported: bool,
 }
 
@@ -107,7 +107,7 @@ fn codex_label(event_key: &str) -> Option<&'static str> {
 }
 
 pub fn supported() -> bool {
-    cfg!(unix)
+    true
 }
 
 /// 是否有任意一家 agent 已开启生命周期追踪（即至少一家装了本功能的 lifecycle hook）。
@@ -194,6 +194,19 @@ fn hook_command(
         return super::agent_stop::hook_command_for(exe, kind, true, stop_confirm);
     }
     format!("\"{}\" {} {} {}", exe, MARKER, kind.as_str(), lc_event)
+}
+
+fn windows_hook_command(
+    exe: &str,
+    kind: AgentKind,
+    event_key: &str,
+    lc_event: &str,
+    stop_confirm: bool,
+) -> String {
+    if is_stop_event(kind, event_key) {
+        return super::agent_stop::windows_hook_command_for(exe, kind, true, stop_confirm);
+    }
+    super::hook_edit::powershell_command(exe, &[MARKER, kind.as_str(), lc_event])
 }
 
 fn is_stop_event(kind: AgentKind, event_key: &str) -> bool {
@@ -303,16 +316,19 @@ fn elem_has_command_marker(elem: &Value, shape: Shape, marker: &str) -> bool {
             .and_then(Value::as_array)
             .is_some_and(|handlers| {
                 handlers.iter().any(|handler| {
-                    handler
-                        .get("command")
-                        .and_then(Value::as_str)
-                        .is_some_and(|command| command.contains(marker))
+                    ["command", "commandWindows"].iter().any(|field| {
+                        handler
+                            .get(*field)
+                            .and_then(Value::as_str)
+                            .is_some_and(|command| command.contains(marker))
+                    })
                 })
             }),
-        Shape::Flat => elem
-            .get("command")
-            .and_then(Value::as_str)
-            .is_some_and(|command| command.contains(marker)),
+        Shape::Flat => ["command", "commandWindows"].iter().any(|field| {
+            elem.get(*field)
+                .and_then(Value::as_str)
+                .is_some_and(|command| command.contains(marker))
+        }),
     }
 }
 
@@ -391,6 +407,8 @@ fn json_presence_with_stop(
     let mut complete = true;
     for (event_key, lc) in events(kind) {
         let want = hook_command(exe, kind, event_key, lc, stop_confirm);
+        let want_windows = (kind == AgentKind::Codex)
+            .then(|| windows_hook_command(exe, kind, event_key, lc, stop_confirm));
         let want_timeout = if is_stop_event(kind, event_key) {
             Some(super::agent_stop::TIMEOUT_SECS)
         } else {
@@ -405,8 +423,16 @@ fn json_presence_with_stop(
             .unwrap_or(false);
         let has_exact = arr
             .map(|a| {
-                a.iter()
-                    .any(|e| elem_matches(e, shape, &want, want_timeout, want_unlimited_loop))
+                a.iter().any(|e| {
+                    elem_matches(
+                        e,
+                        shape,
+                        &want,
+                        want_windows.as_deref(),
+                        want_timeout,
+                        want_unlimited_loop,
+                    )
+                })
             })
             .unwrap_or(false);
         if has_ours {
@@ -425,6 +451,7 @@ fn elem_matches(
     elem: &Value,
     shape: Shape,
     want: &str,
+    want_windows: Option<&str>,
     want_timeout: Option<u64>,
     want_unlimited_loop: bool,
 ) -> bool {
@@ -438,7 +465,11 @@ fn elem_matches(
             .and_then(|h| h.as_array())
             .map(|arr| {
                 arr.iter().any(|h| {
-                    h.get("command").and_then(|c| c.as_str()) == Some(want) && timeout_ok(h)
+                    h.get("command").and_then(|c| c.as_str()) == Some(want)
+                        && want_windows.is_none_or(|want_windows| {
+                            h.get("commandWindows").and_then(Value::as_str) == Some(want_windows)
+                        })
+                        && timeout_ok(h)
                 })
             })
             .unwrap_or(false),
@@ -501,6 +532,9 @@ fn apply_json_install_with_stop(
     for (event_key, lc) in events(kind) {
         let command = hook_command(exe, kind, event_key, lc, stop_confirm);
         let cmd = command.as_str();
+        let command_windows = (kind == AgentKind::Codex)
+            .then(|| windows_hook_command(exe, kind, event_key, lc, stop_confirm));
+        let cmd_windows = command_windows.as_deref().unwrap_or(cmd);
         // Stop confirmation and PreToolUse interjection waits both need a 24-hour hook timeout.
         let timeout = if is_stop_event(kind, event_key) {
             Some(super::agent_stop::TIMEOUT_SECS)
@@ -508,6 +542,21 @@ fn apply_json_install_with_stop(
             event_timeout(kind, event_key)
         };
         let entry = match (shape, timeout) {
+            (Shape::Nested, Some(t)) if kind == AgentKind::Codex => json!({
+                "hooks": [ {
+                    "type": "command",
+                    "command": cmd,
+                    "commandWindows": cmd_windows,
+                    "timeout": t
+                } ]
+            }),
+            (Shape::Nested, None) if kind == AgentKind::Codex => json!({
+                "hooks": [ {
+                    "type": "command",
+                    "command": cmd,
+                    "commandWindows": cmd_windows
+                } ]
+            }),
             (Shape::Nested, Some(t)) => {
                 json!({ "hooks": [ { "type": "command", "command": cmd, "timeout": t } ] })
             }
@@ -667,12 +716,24 @@ fn codex_trust_entries(hooks_json: &std::path::Path) -> Result<Vec<(String, Stri
                 continue;
             };
             for (hi, handler) in handlers.iter().enumerate() {
-                let cmd = handler.get("command").and_then(|c| c.as_str());
+                #[cfg(windows)]
+                let cmd = handler
+                    .get("commandWindows")
+                    .or_else(|| handler.get("command"))
+                    .and_then(Value::as_str);
+                #[cfg(not(windows))]
+                let cmd = handler.get("command").and_then(Value::as_str);
                 let is_command = handler.get("type").and_then(|t| t.as_str()) == Some("command");
                 let Some(cmd) = cmd else { continue };
-                if !is_command
-                    || (!cmd.contains(MARKER) && !cmd.contains(super::agent_stop::MARKER))
-                {
+                let owned = ["command", "commandWindows"].iter().any(|field| {
+                    handler
+                        .get(*field)
+                        .and_then(Value::as_str)
+                        .is_some_and(|command| {
+                            command.contains(MARKER) || command.contains(super::agent_stop::MARKER)
+                        })
+                });
+                if !is_command || !owned {
                     continue;
                 }
                 let key = format!("{abs_str}:{label}:{gi}:{hi}");

@@ -45,7 +45,7 @@ AskHuman "看看这个改动？" -q "继续吗？" -o "继续" -o "停止" --out
 | D7 | JSON 结构 | snake_case、**美化多行**。顶层 `action`（`answer`\|`cancel`）+ `channel`（作答渠道 id）。`answers` 仅含**有作答**的题，每项 `question_index`（0 基，对应输入问题顺序）+ **仅非空字段**：`selected_options`、`selected_indices`、`user_input`、`files`。单选时数组长度 ≤ 1。取消 → `{ "action":"cancel", "channel":"<id>" }`。**无** `version` / `answered`（作答与否由字段有无推导） |
 | D6b | 附件字段合并 | `[图片]`（落盘的图片路径）与 `[文件]`（透传的非图片路径）**统一合并为单一 `files`**（文本 `[files]`、JSON `files`），值为本地路径数组（图片/文件/目录），模型按后缀区分类型；渲染时顺序为「落盘图片路径 + 透传文件路径」拼接。此为对**既有输出契约**的有意变更，对所有输出（含默认文本与 JSON）生效；严格模式禁附件，故无此字段 |
 | D8 | 字段语义 | `selected_indices`：按 `-o` 出现顺序的 0 基下标。推荐选项前缀不进 `selected_options`（保持原文），下标按原文匹配；重复文案取首个命中 |
-| D9 | JSON 产出位置 | 由 Daemon 的 `render_result` 产出（CLI 仍仅转发 `Final.stdout`，保持瘦客户端）；非 unix 单进程走同一 `render_result` |
+| D9 | JSON 产出位置 | 由 Daemon 的 `render_result` 产出（macOS/Linux/Windows CLI 均仅转发 `Final.stdout`，保持瘦客户端）。 |
 | D10 | help 体系 | `--help`/`-h` = **完整功能**，按「提问 / 管理」两块组织、列出新参数并指向另两者；`--agent-help` = **为 Agent 精调**的提问用法（仅把结果字段标记改名，不含脚本参数 / JSON）；`--scripting-help`（新）= **脚本/自动化用法**（`--select-only`/`--single`/`--output json` + JSON 结构 + 退出码，简洁精确、少量示例）。`--agent-help` 与 `--scripting-help` 用**共享片段 + 变量/条件组装**，不各写一份 |
 | D11 | 弹窗 | `--single`→选项渲染为 radio（恰好一个）；`--select-only`→隐藏补充文本框 + 回复附件拖拽区，且**必须选中才能提交**（仍可取消）；推荐展示沿用现有绿色徽标 |
 | D12 | Telegram | `--single`→inline 按钮互斥（选一个清其它，按钮 ✅ 高亮）+「提交」；`--select-only`→忽略卡片后聊天里的自由文字（不并入答案）；无选择就点提交 → `answerCallbackQuery` 弹 alert 提示。推荐展示 = **现状文字前缀**「【👍推荐】 」（平台按钮无法单独配色，沿用不变）。**demo 实测确认** |

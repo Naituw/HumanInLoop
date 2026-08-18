@@ -166,27 +166,39 @@ describe("renderMermaid", () => {
     ).rejects.toMatchObject({ code: "tooLarge" });
   });
 
-  it("enforces the configured edge limit", async () => {
-    const edges = Array.from(
-      { length: MERMAID_MAX_EDGES + 1 },
-      (_, index) => `N${index}-->N${index + 1}`,
-    ).join("\n");
-    await expect(renderMermaid(`flowchart TD\n${edges}`, "light")).rejects
-      .toMatchObject({ code: "renderFailed" });
-  });
+  it(
+    "enforces the configured edge limit",
+    async () => {
+      const edges = Array.from(
+        { length: MERMAID_MAX_EDGES + 1 },
+        (_, index) => `N${index}-->N${index + 1}`,
+      ).join("\n");
+      await expect(renderMermaid(`flowchart TD\n${edges}`, "light")).rejects
+        .toMatchObject({ code: "renderFailed" });
+    },
+    // Mermaid parses the intentionally oversized graph before rejecting it. Windows CI and
+    // constrained VMs can take longer than Vitest's generic 5-second unit-test default.
+    15_000,
+  );
 
-  it("renders and normalizes a real Mermaid flowchart", async () => {
-    const result = await renderMermaid(
-      "flowchart TD\n  A[开始] --> B[完成]",
-      "light",
-    );
-    expect(result.documentUrl).toMatch(
-      /^data:text\/html;charset=UTF-8;base64,/,
-    );
-    expect(result.findText).toContain("开始");
-    expect(result.findText).toContain("完成");
-    expect(decodeDocument(result.documentUrl)).toContain("default-src 'none'");
-  });
+  it(
+    "renders and normalizes a real Mermaid flowchart",
+    async () => {
+      const result = await renderMermaid(
+        "flowchart TD\n  A[开始] --> B[完成]",
+        "light",
+      );
+      expect(result.documentUrl).toMatch(
+        /^data:text\/html;charset=UTF-8;base64,/,
+      );
+      expect(result.findText).toContain("开始");
+      expect(result.findText).toContain("完成");
+      expect(decodeDocument(result.documentUrl)).toContain("default-src 'none'");
+    },
+    // The preceding edge-limit case intentionally stresses Mermaid's parser. Its cleanup can
+    // leave the next real render slower on Windows CI and constrained VMs.
+    15_000,
+  );
 
   it("uses the Markdown body font size in the Mermaid theme", async () => {
     const result = await renderMermaid("flowchart TD\nA[Readable]-->B", "light", 12);

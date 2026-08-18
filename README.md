@@ -9,7 +9,7 @@
 A cross-platform human-in-the-loop tool. When an AI agent is about to end a conversation or needs confirmation, it runs the `AskHuman` CLI to pop up a window so you can ask follow-ups, pick options, add text, or attach images — and the result is returned to the agent.
 
 - A single executable `AskHuman` that lets agents ask questions through the CLI
-- Built on **Tauri 2 (Rust + Vue 3)**, supports **macOS / Linux**
+- Built on **Tauri 2 (Rust + Vue 3)**, supports **macOS / Linux / Windows**
 - Multiple channels: local popup + Telegram + Slack + DingTalk + Feishu, independently toggleable and racing in parallel when several are on
 
 ## How it works

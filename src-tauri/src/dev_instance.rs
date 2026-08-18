@@ -61,6 +61,9 @@ pub enum CommandClass {
     Skip,
     /// `dev` / help / version: may run without instance bin.
     Meta,
+    /// Dev Instance management pins the target home but stays in the dispatcher binary. This lets
+    /// Windows purge an instance without running from the executable being deleted.
+    Dev,
     /// settings / history / config / channel: may run without instance bin (write instance home).
     Config,
     /// ask / daemon / mcp / …: require instance bin.
@@ -75,10 +78,14 @@ pub fn classify_command(argv: &[String]) -> CommandClass {
         return CommandClass::Meta;
     };
     match first {
-        "--popup" | "--gui-host" | "__permission-diff-worker" | "__permission-shell-worker" => {
-            CommandClass::Skip
-        }
-        "dev" | "--help" | "-h" | "--version" | "-v" | "--agent-help" | "--scripting-help" => {
+        "--popup"
+        | "--gui-host"
+        | "__permission-diff-worker"
+        | "__permission-shell-worker"
+        | "__update-worker"
+        | "__npm-update-worker" => CommandClass::Skip,
+        "dev" => CommandClass::Dev,
+        "--help" | "-h" | "--version" | "-v" | "--agent-help" | "--scripting-help" => {
             CommandClass::Meta
         }
         "--settings" | "--history" | "--todos" | "config" | "channel" => CommandClass::Config,
@@ -122,6 +129,10 @@ pub fn maybe_enter_dev_instance() {
 
     if !bin_exists {
         // Meta / Config: continue with current exe under instance env.
+        return;
+    }
+
+    if matches!(class, CommandClass::Dev) {
         return;
     }
 
@@ -206,12 +217,20 @@ mod tests {
         assert_eq!(classify_command(&prog(&["--popup"])), CommandClass::Skip);
         assert_eq!(classify_command(&prog(&["--gui-host"])), CommandClass::Skip);
         assert_eq!(
+            classify_command(&prog(&["__update-worker"])),
+            CommandClass::Skip
+        );
+        assert_eq!(
+            classify_command(&prog(&["__npm-update-worker"])),
+            CommandClass::Skip
+        );
+        assert_eq!(
             classify_command(&prog(&["__permission-diff-worker"])),
             CommandClass::Skip
         );
         assert_eq!(
             classify_command(&prog(&["dev", "enable"])),
-            CommandClass::Meta
+            CommandClass::Dev
         );
         assert_eq!(classify_command(&prog(&["--version"])), CommandClass::Meta);
         assert_eq!(

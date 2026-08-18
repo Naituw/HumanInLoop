@@ -69,7 +69,7 @@ AskHuman "请看看这个改动？" -f ./diff.patch -q "要继续吗？" -o "继
 - **配置容错**：新增 `channels.slack` 与其字段用 `#[serde(default)]`；旧配置无该字段走默认。
 - **密钥安全**：两个密钥默认迁入系统钥匙串（`config.json` 留空），沿用现有 `secrets` + `SECRET_SPECS` 策略；钥匙串不可用时回退明文。
 - **3 秒 ack**：Socket Mode 每条业务帧须 3 秒内回 `envelope_id` ack（**收帧即 ack**），否则平台重推。
-- **集群/单连接约束**：同一 App 可建多条 Socket Mode 连接，事件**只投递给其中一条**（负载均衡）。即「多开的 `AskHuman` 进程会相互抢消息」，与钉钉/飞书同源（见 §6 已知问题）。daemon 模式以**单条常热共享连接**根治；单进程回退保留该问题。
+- **集群/单连接约束**：同一 App 可建多条 Socket Mode 连接，事件**只投递给其中一条**（负载均衡）。因此 macOS、Linux 与 Windows 的所有公开入口都经 shared daemon，以**单条常热共享连接**根治多进程抢消息；不得恢复产品级逐请求连接。
 
 ### 前置条件（用户侧，需在 Slack App 后台一次性配置）
 
@@ -96,7 +96,7 @@ AskHuman "请看看这个改动？" -f ./diff.patch -q "要继续吗？" -o "继
 
 ## 6. 已知问题与风险（预登记）
 
-- **【已知问题 · 拟暂不修】Socket Mode 多开互抢**：同一 App 多条连接在线时事件只投随机一条；单进程每次 `AskHuman` 各开一条连接，**连续/并发提问可能相互干扰**（与钉钉/飞书同源）。daemon 模式以单条常热共享连接根治；**单进程回退仅记录、不额外修**。
+- **【已解决】Socket Mode 多开互抢**：同一 App 多条连接在线时事件只投随机一条；shared daemon 在三平台统一独占一条常热连接并按请求路由，连续/并发提问不再各建连接。
 - **复选框上限**：Slack `checkboxes` 单元素最多 10 个选项。超 10 个时**拆分为多个 `input` 复选框块**（每块 ≤10），提交时各块 `state.values` 合并；实现处注释固定。
 - **section 文本长度**：Block Kit `section` 文本上限约 3000 字符；超长正文截断或拆多块（实现处处理，不崩溃）。
 - **消息内 input 块取值**：依赖「点按钮的 `block_actions` 携带整条消息 `state.values`」这一行为；以真机联调确认字段路径（`state.values[block_id][action_id]`）并在 `blockkit.rs` 注释锁定。

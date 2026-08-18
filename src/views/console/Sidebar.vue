@@ -13,7 +13,7 @@ const props = defineProps<{
   /** 无活跃会话的最近项目（workspace 索引）。 */
   recent: { path: string; label: string }[];
   selectedId: string | null;
-  /** 「＋」入口是否可用（macOS + Terminal.app）。 */
+  /** Whether a supported platform terminal is available for the plus entry. */
   newTaskSupported: boolean;
   /** 项目 key（git 根）→ 待办数。 */
   todoCounts: Record<string, number>;

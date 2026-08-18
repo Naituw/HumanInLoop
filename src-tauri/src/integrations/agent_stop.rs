@@ -43,7 +43,7 @@ struct Preferences {
 }
 
 pub fn supported(kind: AgentKind) -> bool {
-    cfg!(unix) && kind != AgentKind::Grok
+    kind != AgentKind::Grok
 }
 
 pub fn enabled(kind: AgentKind) -> bool {
@@ -111,9 +111,23 @@ pub fn status(kind: AgentKind) -> StopStatus {
         super::agent_mode::current(target_for_kind(kind)),
     );
     let expected = hook_command(kind, track, confirm).unwrap_or_default();
+    let expected_windows = (kind == AgentKind::Codex)
+        .then(|| {
+            std::env::current_exe().map(|executable| {
+                windows_hook_command_for(&executable.to_string_lossy(), kind, track, confirm)
+            })
+        })
+        .transpose()
+        .unwrap_or_default();
     let path = hook_path(kind);
     let text = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".into());
-    let handler_state = inspect_handler_state(kind, &text, &expected, track || confirm);
+    let handler_state = inspect_handler_state(
+        kind,
+        &text,
+        &expected,
+        expected_windows.as_deref(),
+        track || confirm,
+    );
     StopStatus {
         supported: true,
         enabled: preference_enabled,
@@ -127,6 +141,7 @@ fn inspect_handler_state(
     kind: AgentKind,
     text: &str,
     expected: &str,
+    expected_windows: Option<&str>,
     desired_exists: bool,
 ) -> HandlerState {
     let handlers = stop_handlers(kind, text);
@@ -142,7 +157,10 @@ fn inspect_handler_state(
             let timeout_ok = handler.get("timeout").and_then(Value::as_u64) == Some(TIMEOUT_SECS);
             let loop_ok =
                 kind != AgentKind::Cursor || handler.get("loop_limit").is_some_and(Value::is_null);
-            if command == expected && timeout_ok && loop_ok {
+            if hook_edit::command_handler_matches(&handler, expected, expected_windows)
+                && timeout_ok
+                && loop_ok
+            {
                 exact_count += 1;
             }
         } else {
@@ -225,6 +243,22 @@ pub(crate) fn hook_command_for(exe: &str, kind: AgentKind, track: bool, confirm:
     command
 }
 
+pub(crate) fn windows_hook_command_for(
+    exe: &str,
+    kind: AgentKind,
+    track: bool,
+    confirm: bool,
+) -> String {
+    let mut args = vec![MARKER, kind.as_str()];
+    if track {
+        args.push("track");
+    }
+    if confirm {
+        args.push("confirm");
+    }
+    hook_edit::powershell_command(exe, &args)
+}
+
 fn install_handler(kind: AgentKind, track: bool, confirm: bool) -> Result<()> {
     let path = hook_path(kind);
     let original_bytes = std::fs::read(&path).ok();
@@ -297,6 +331,8 @@ fn apply_handler_state(
         return Ok(without_stop);
     }
     let command = hook_command_for(executable, kind, track, confirm);
+    let command_windows = (kind == AgentKind::Codex)
+        .then(|| windows_hook_command_for(executable, kind, track, confirm));
     match kind {
         AgentKind::Cursor => hook_edit::upsert_flat_handler(
             &without_stop,
@@ -305,6 +341,15 @@ fn apply_handler_state(
             &command,
             TIMEOUT_SECS,
             true,
+        ),
+        AgentKind::Codex => hook_edit::upsert_nested_group_with_windows(
+            &without_stop,
+            "Stop",
+            MARKER,
+            &command,
+            command_windows.as_deref(),
+            TIMEOUT_SECS,
+            None,
         ),
         _ => hook_edit::upsert_nested_group(
             &without_stop,
@@ -435,13 +480,27 @@ mod tests {
             for track in [false, true] {
                 let legacy = apply_handler_state(kind, "{}", "/opt/AskHuman", track, true).unwrap();
                 let expected = hook_command_for("/opt/AskHuman", kind, track, false);
-                let stale = inspect_handler_state(kind, &legacy, &expected, track);
+                let expected_windows = (kind == AgentKind::Codex)
+                    .then(|| windows_hook_command_for("/opt/AskHuman", kind, track, false));
+                let stale = inspect_handler_state(
+                    kind,
+                    &legacy,
+                    &expected,
+                    expected_windows.as_deref(),
+                    track,
+                );
                 assert!(stale.configured);
                 assert!(stale.outdated);
 
                 let cleaned =
                     apply_handler_state(kind, &legacy, "/opt/AskHuman", track, false).unwrap();
-                let current = inspect_handler_state(kind, &cleaned, &expected, track);
+                let current = inspect_handler_state(
+                    kind,
+                    &cleaned,
+                    &expected,
+                    expected_windows.as_deref(),
+                    track,
+                );
                 assert!(!current.configured);
                 assert!(!current.outdated);
                 assert_eq!(
@@ -529,6 +588,15 @@ mod tests {
                         handler.get("command").and_then(Value::as_str),
                         Some(expected.as_str())
                     );
+                    if kind == AgentKind::Codex {
+                        let expected_windows =
+                            windows_hook_command_for("/opt/AskHuman", kind, track, confirm);
+                        assert_eq!(
+                            handler.get("commandWindows").and_then(Value::as_str),
+                            Some(expected_windows.as_str())
+                        );
+                        assert_ne!(expected_windows, expected);
+                    }
                     assert_eq!(
                         handler.get("timeout").and_then(Value::as_u64),
                         Some(TIMEOUT_SECS)

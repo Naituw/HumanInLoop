@@ -626,36 +626,7 @@ fn format_relative_en(at_ms: i64, now_ms: i64) -> String {
 
 fn format_absolute_local(at_ms: i64) -> String {
     let secs = at_ms.div_euclid(1000);
-    #[cfg(unix)]
-    {
-        let t = secs as libc::time_t;
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        if unsafe { libc::localtime_r(&t, &mut tm).is_null() } {
-            return format_absolute_utc(secs);
-        }
-        // tm_gmtoff is seconds east of UTC (POSIX).
-        let off = tm.tm_gmtoff;
-        let sign = if off >= 0 { '+' } else { '-' };
-        let abs = off.unsigned_abs();
-        let oh = abs / 3600;
-        let om = (abs % 3600) / 60;
-        format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}:{:02} {}{:02}{:02}",
-            tm.tm_year + 1900,
-            tm.tm_mon + 1,
-            tm.tm_mday,
-            tm.tm_hour,
-            tm.tm_min,
-            tm.tm_sec,
-            sign,
-            oh,
-            om
-        )
-    }
-    #[cfg(not(unix))]
-    {
-        format_absolute_utc(secs)
-    }
+    crate::local_time::absolute(secs).unwrap_or_else(|| format_absolute_utc(secs))
 }
 
 fn format_absolute_utc(secs: i64) -> String {

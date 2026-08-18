@@ -4,15 +4,22 @@
 //! - macOS：`~/Library/LaunchAgents/<id>.guihost.plist`（`RunAtLoad` + `KeepAlive`）。
 //!   `KeepAlive` 兼作宿主二进制换新的守护——宿主退出后由 launchd 用**新二进制**重启。
 //! - Linux：`~/.config/autostart/askhuman-guihost.desktop`（`X-GNOME-Autostart-enabled=true`）。
+//! - Windows：当前用户 Run registry 指向受管 wscript.exe launcher；launcher 再以 hidden
+//!   window style 启动 console-subsystem EXE，登录时不闪控制台。
 //!
 //! 全部 best-effort：写文件 + 尽力 load/unload；失败不阻塞模式切换（图标仍可由 daemon 兜底拉起）。
 
-#![cfg(unix)]
-
+#[cfg(unix)]
 use std::path::PathBuf;
 
 /// LaunchAgent / autostart 的标识（基于 bundle id 派生）。
 const LABEL: &str = "com.naituw.humaninloop.guihost";
+
+#[cfg(windows)]
+const WINDOWS_GUI_VALUE: &str = "AskHuman GUI Host";
+
+#[cfg(windows)]
+const WINDOWS_DAEMON_VALUE: &str = "AskHuman Daemon";
 
 /// 当前可执行文件路径（解析失败回退到字面名，仅用于内容生成）。
 fn current_exe() -> String {
@@ -36,6 +43,254 @@ fn is_dev_instance_context() -> bool {
         p.components()
             .any(|c| c.as_os_str() == crate::dev_instance::DEV_DIR)
     })
+}
+
+// ===== Windows: per-user Run registry values =====
+
+#[cfg(windows)]
+mod windows_run {
+    use std::io;
+    use std::ptr;
+    use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW,
+        RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ,
+    };
+
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+    struct Key(HKEY);
+
+    impl Drop for Key {
+        fn drop(&mut self) {
+            unsafe {
+                RegCloseKey(self.0);
+            }
+        }
+    }
+
+    fn wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn status_result(status: u32) -> io::Result<()> {
+        if status == ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(status as i32))
+        }
+    }
+
+    fn open(access: u32) -> io::Result<Key> {
+        let path = wide(RUN_KEY);
+        let mut key = ptr::null_mut();
+        let status =
+            unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, access, &mut key) };
+        status_result(status)?;
+        Ok(Key(key))
+    }
+
+    fn create() -> io::Result<Key> {
+        let path = wide(RUN_KEY);
+        let mut key = ptr::null_mut();
+        let status = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, path.as_ptr(), &mut key) };
+        status_result(status)?;
+        Ok(Key(key))
+    }
+
+    pub fn read(name: &str) -> io::Result<Option<String>> {
+        let key = match open(KEY_READ) {
+            Ok(key) => key,
+            Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
+                return Ok(None)
+            }
+            Err(error) => return Err(error),
+        };
+        let name = wide(name);
+        let mut kind = 0;
+        let mut bytes = 0;
+        let status = unsafe {
+            RegQueryValueExW(
+                key.0,
+                name.as_ptr(),
+                ptr::null(),
+                &mut kind,
+                ptr::null_mut(),
+                &mut bytes,
+            )
+        };
+        if status == ERROR_FILE_NOT_FOUND {
+            return Ok(None);
+        }
+        status_result(status)?;
+        if kind != REG_SZ {
+            return Ok(None);
+        }
+        let mut data = vec![0u16; (bytes as usize).div_ceil(2).max(1)];
+        let status = unsafe {
+            RegQueryValueExW(
+                key.0,
+                name.as_ptr(),
+                ptr::null(),
+                &mut kind,
+                data.as_mut_ptr().cast(),
+                &mut bytes,
+            )
+        };
+        status_result(status)?;
+        let length = data.iter().position(|ch| *ch == 0).unwrap_or(data.len());
+        Ok(Some(String::from_utf16_lossy(&data[..length])))
+    }
+
+    pub fn write(name: &str, value: &str) -> io::Result<()> {
+        let key = create()?;
+        let name = wide(name);
+        let value = wide(value);
+        let bytes = value
+            .len()
+            .checked_mul(2)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Run value is too large"))?;
+        let status = unsafe {
+            RegSetValueExW(
+                key.0,
+                name.as_ptr(),
+                0,
+                REG_SZ,
+                value.as_ptr().cast(),
+                bytes,
+            )
+        };
+        status_result(status)
+    }
+
+    pub fn remove(name: &str) -> io::Result<()> {
+        let key = match open(KEY_SET_VALUE) {
+            Ok(key) => key,
+            Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
+                return Ok(())
+            }
+            Err(error) => return Err(error),
+        };
+        let name = wide(name);
+        let status = unsafe { RegDeleteValueW(key.0, name.as_ptr()) };
+        if status == ERROR_FILE_NOT_FOUND {
+            Ok(())
+        } else {
+            status_result(status)
+        }
+    }
+}
+
+#[cfg(windows)]
+const WINDOWS_LAUNCHER_NAME: &str = "askhuman-login.vbs";
+
+#[cfg(windows)]
+fn windows_launcher_path() -> std::path::PathBuf {
+    crate::paths::config_dir().join(WINDOWS_LAUNCHER_NAME)
+}
+
+#[cfg(windows)]
+fn windows_script_host() -> std::path::PathBuf {
+    std::env::var_os("WINDIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
+        .join("System32")
+        .join("wscript.exe")
+}
+
+#[cfg(windows)]
+fn windows_launcher_contents(exe: &str) -> String {
+    let exe = exe.replace('"', "\"\"");
+    format!(
+        "Option Explicit\r\n\
+Dim mode, command, shell\r\n\
+If WScript.Arguments.Count <> 1 Then WScript.Quit 2\r\n\
+mode = LCase(WScript.Arguments(0))\r\n\
+If mode = \"gui-host\" Then\r\n\
+  command = \"\"\"{exe}\"\" --gui-host\"\r\n\
+ElseIf mode = \"daemon\" Then\r\n\
+  command = \"\"\"{exe}\"\" daemon run\"\r\n\
+Else\r\n\
+  WScript.Quit 2\r\n\
+End If\r\n\
+Set shell = CreateObject(\"WScript.Shell\")\r\n\
+shell.Run command, 0, False\r\n"
+    )
+}
+
+#[cfg(windows)]
+fn windows_launcher_bytes(exe: &str) -> Vec<u8> {
+    let mut bytes = vec![0xff, 0xfe];
+    for unit in windows_launcher_contents(exe).encode_utf16() {
+        bytes.extend_from_slice(&unit.to_le_bytes());
+    }
+    bytes
+}
+
+#[cfg(windows)]
+fn windows_launcher_is_current() -> bool {
+    std::fs::read(windows_launcher_path())
+        .is_ok_and(|installed| installed == windows_launcher_bytes(&current_exe()))
+}
+
+#[cfg(windows)]
+fn ensure_windows_launcher() -> std::io::Result<()> {
+    let path = windows_launcher_path();
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Windows login launcher has no parent directory",
+        )
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let bytes = windows_launcher_bytes(&current_exe());
+    if std::fs::read(&path).is_ok_and(|installed| installed == bytes) {
+        return Ok(());
+    }
+    let temporary = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4()));
+    std::fs::write(&temporary, bytes)?;
+    std::fs::rename(&temporary, &path)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_command(role: &str) -> String {
+    format!(
+        r#""{}" //B //NoLogo "{}" {}"#,
+        windows_script_host().display(),
+        windows_launcher_path().display(),
+        role
+    )
+}
+
+#[cfg(windows)]
+fn remove_windows_launcher_if_unused() -> std::io::Result<()> {
+    let gui_absent = windows_run::read(WINDOWS_GUI_VALUE)?.is_none();
+    let daemon_absent = windows_run::read(WINDOWS_DAEMON_VALUE)?.is_none();
+    let path = windows_launcher_path();
+    if gui_absent && daemon_absent && path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn install() -> std::io::Result<()> {
+    if is_dev_instance_context() {
+        return Ok(());
+    }
+    ensure_windows_launcher()?;
+    windows_run::write(WINDOWS_GUI_VALUE, &windows_command("gui-host"))
+}
+
+#[cfg(windows)]
+pub fn uninstall() -> std::io::Result<()> {
+    if is_dev_instance_context() {
+        return Ok(());
+    }
+    windows_run::remove(WINDOWS_GUI_VALUE)?;
+    remove_windows_launcher_if_unused()
 }
 
 // ===== macOS：LaunchAgent plist =====
@@ -245,11 +500,13 @@ Terminal=false\n"
 }
 
 /// daemon 登录项是否已安装。
+#[cfg(unix)]
 pub fn daemon_is_installed() -> bool {
     daemon_item_path().exists()
 }
 
 /// 已装模板与当前期望不一致（移动安装位置或模板升级后需刷新）。
+#[cfg(unix)]
 pub fn daemon_needs_update() -> bool {
     if !daemon_is_installed() {
         return false;
@@ -262,11 +519,13 @@ pub fn daemon_needs_update() -> bool {
 
 /// daemon 登录项是完全托管文件，逐字比较可同时发现 exe 迁移与模板语义升级
 /// （例如旧版 macOS plist 的 Background → Interactive）。
+#[cfg(unix)]
 fn daemon_template_needs_update(installed: &str, exe: &str) -> bool {
     installed != daemon_contents(exe)
 }
 
 /// 写入/刷新 daemon 登录项文件（纯文件、不 launchctl）。幂等。
+#[cfg(unix)]
 pub fn install_daemon() -> std::io::Result<()> {
     if is_dev_instance_context() {
         return Ok(()); // dev 实例不触碰全局登录项（见 is_dev_instance_context 注释）。
@@ -279,6 +538,7 @@ pub fn install_daemon() -> std::io::Result<()> {
 }
 
 /// 删除 daemon 登录项文件（**不** bootout，避免强杀正在运行的 daemon）。幂等。
+#[cfg(unix)]
 pub fn uninstall_daemon() -> std::io::Result<()> {
     if is_dev_instance_context() {
         return Ok(()); // dev 实例不触碰全局登录项（见 is_dev_instance_context 注释）。
@@ -288,6 +548,40 @@ pub fn uninstall_daemon() -> std::io::Result<()> {
         std::fs::remove_file(&path)?;
     }
     Ok(())
+}
+
+#[cfg(windows)]
+pub fn daemon_is_installed() -> bool {
+    windows_run::read(WINDOWS_DAEMON_VALUE).is_ok_and(|value| value.is_some())
+}
+
+#[cfg(windows)]
+pub fn daemon_needs_update() -> bool {
+    match windows_run::read(WINDOWS_DAEMON_VALUE) {
+        Ok(Some(installed)) => {
+            installed != windows_command("daemon") || !windows_launcher_is_current()
+        }
+        Ok(None) => false,
+        Err(_) => true,
+    }
+}
+
+#[cfg(windows)]
+pub fn install_daemon() -> std::io::Result<()> {
+    if is_dev_instance_context() {
+        return Ok(());
+    }
+    ensure_windows_launcher()?;
+    windows_run::write(WINDOWS_DAEMON_VALUE, &windows_command("daemon"))
+}
+
+#[cfg(windows)]
+pub fn uninstall_daemon() -> std::io::Result<()> {
+    if is_dev_instance_context() {
+        return Ok(());
+    }
+    windows_run::remove(WINDOWS_DAEMON_VALUE)?;
+    remove_windows_launcher_if_unused()
 }
 
 /// 让 daemon 登录项与「是否保活」一致：保活→写/刷新文件、否则→删文件。幂等，供 daemon 启动 /
@@ -307,11 +601,13 @@ pub fn sync_daemon(keep_alive: bool) -> std::io::Result<()> {
 // ===== 共用 =====
 
 /// 登录项是否已安装。
+#[cfg(unix)]
 pub fn is_installed() -> bool {
     item_path().exists()
 }
 
 /// 已安装但记录的 exe 路径与当前不一致（移动安装位置后需刷新）。
+#[cfg(unix)]
 pub fn needs_update() -> bool {
     if !is_installed() {
         return false;
@@ -348,6 +644,22 @@ fn run(cmd: &str, args: &[&str]) -> std::io::Result<()> {
         Ok(())
     } else {
         Err(std::io::Error::other(format!("{cmd} exited with {status}")))
+    }
+}
+
+#[cfg(windows)]
+pub fn is_installed() -> bool {
+    windows_run::read(WINDOWS_GUI_VALUE).is_ok_and(|value| value.is_some())
+}
+
+#[cfg(windows)]
+pub fn needs_update() -> bool {
+    match windows_run::read(WINDOWS_GUI_VALUE) {
+        Ok(Some(installed)) => {
+            installed != windows_command("gui-host") || !windows_launcher_is_current()
+        }
+        Ok(None) => false,
+        Err(_) => true,
     }
 }
 
@@ -414,6 +726,24 @@ mod tests {
         let d = daemon_contents("/home/u/.local/bin/AskHuman");
         assert!(d.contains("Exec=\"/home/u/.local/bin/AskHuman\" daemon start"));
         assert!(d.contains("X-GNOME-Autostart-enabled=true"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_login_commands_use_managed_hidden_launcher() {
+        let gui = windows_command("gui-host");
+        let daemon = windows_command("daemon");
+        assert!(gui
+            .to_ascii_lowercase()
+            .contains("wscript.exe\" //b //nologo"));
+        assert!(gui.ends_with("askhuman-login.vbs\" gui-host"));
+        assert!(daemon.ends_with("askhuman-login.vbs\" daemon"));
+
+        let script = windows_launcher_contents(r"C:\Program Files\AskHuman\AskHuman.exe");
+        assert!(script.contains(
+            "command = \"\"\"C:\\Program Files\\AskHuman\\AskHuman.exe\"\" --gui-host\""
+        ));
+        assert!(script.contains("shell.Run command, 0, False"));
     }
 
     /// Dev 实例上下文判定（防生产登录项劫持，用户实证 2026-07-25）：`ASKHUMAN_HOME` 置位

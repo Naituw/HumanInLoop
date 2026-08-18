@@ -12,7 +12,7 @@ Engineering notes for contributors. User-facing docs live in [`docs/wiki/`](./wi
 
 - `src/` — Vue 3 + Vite + TypeScript frontend. The Vite entry `index.html` lives here, and Vite's `root` is set to `src` (build output goes to the repo-root `dist/`, which Tauri embeds).
 - `src-tauri/` — Rust backend (Tauri 2). Produces the single `AskHuman` binary.
-- `scripts/` — build/install/release helpers (`install.sh`, `install-windows.ps1`, `publish.sh`, `bump-version.mjs`).
+- `scripts/` — build/install/release helpers (`install.sh`, `install-windows.cmd`, `publish.sh`, `bump-version.mjs`).
 - `packaging/npm/` — npm main package (`askhuman`) and scoped per-platform binary subpackages.
 
 ## Develop, build, test
@@ -71,11 +71,17 @@ Build and install locally:
 ./scripts/install.sh --global
 
 # Windows        → installs to %LOCALAPPDATA%\Programs\AskHuman
-./scripts/install-windows.ps1
+.\scripts\install-windows.cmd
 
 # Windows exact production profile:
-./scripts/install-windows.ps1 -Release
+.\scripts\install-windows.cmd -Release
 ```
+
+The Windows command wrapper works under the default restrictive PowerShell execution policy. The
+installer idempotently adds its install directory to the current user's `PATH` and installs a
+managed `AskHuman.cmd` launcher in the standard per-user `WindowsApps` command directory. This makes
+`AskHuman --version` available immediately even when an Agent installs from a different Windows
+session. The uninstaller removes only its managed launcher and install-directory entry.
 
 > Running the GUI popup on Linux needs system WebKitGTK (e.g. `libwebkit2gtk-4.1`). If it's missing and a session-based channel (Telegram / DingTalk / Feishu) is configured, AskHuman automatically uses that channel; if none is available it exits with code 3 to signal graceful degradation.
 
@@ -126,7 +132,7 @@ existing channel (`slack` is the newest and most complete) and mirror every hit.
 - [ ] `src-tauri/src/secrets.rs` — keychain migration/storage for the channel's secrets
   (and update the module doc comment listing managed secrets).
 - [ ] `src-tauri/src/autochannel.rs` — channel id/label, auto-activation participation.
-- [ ] `src-tauri/src/daemon/unix_impl/` — `mod.rs` `ensure_<channel>_router` (report/clear
+- [ ] `src-tauri/src/daemon/runtime/` — `mod.rs` `ensure_<channel>_router` (report/clear
   channel health on connect), plus per-channel arms in `detect.rs`, `watch.rs`,
   `select.rs`, `inbound.rs`.
 - [ ] `src-tauri/src/confirm/` — `transport.rs` / `choice_cards.rs` arms.

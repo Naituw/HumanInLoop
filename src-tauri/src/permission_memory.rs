@@ -285,15 +285,7 @@ fn file_edit_enhancement(
 }
 
 fn within_root(path: &str, root: &str) -> bool {
-    if path == root {
-        return true;
-    }
-    let trimmed = root.trim_end_matches('/');
-    if trimmed.is_empty() {
-        return path.starts_with('/');
-    }
-    path.strip_prefix(trimmed)
-        .is_some_and(|rest| rest.starts_with('/'))
+    crate::permission_rules::path_within_text(path, root)
 }
 
 // ===== MCP tools (D40/D41, §6.5.2) =====
@@ -321,15 +313,12 @@ fn mcp_enhancement(
 }
 
 pub(crate) fn default_codex_home() -> Option<PathBuf> {
-    if let Ok(home) = std::env::var("CODEX_HOME") {
-        if home.starts_with('/') {
-            return Some(PathBuf::from(home));
+    if let Some(home) = std::env::var_os("CODEX_HOME").map(PathBuf::from) {
+        if home.is_absolute() {
+            return Some(home);
         }
     }
-    std::env::var("HOME")
-        .ok()
-        .filter(|home| home.starts_with('/'))
-        .map(|home| Path::new(&home).join(".codex"))
+    dirs::home_dir().map(|home| home.join(".codex"))
 }
 
 fn mcp_enhancement_at(
@@ -725,8 +714,8 @@ fn shell_self_call_at(
     let Ok(current) = std::fs::canonicalize(current_exe) else {
         return false;
     };
-    let candidate = if program.contains('/') {
-        if program.starts_with('/') {
+    let candidate = if program.contains(['/', '\\']) {
+        if crate::permission_rules::path_is_absolute_text(program) {
             PathBuf::from(program)
         } else {
             let Some(base) = crate::permission_rules::normalize_path(".", cwd) else {
@@ -827,7 +816,7 @@ fn mcp_self_call_at(tool_name: &str, cwd: &str, codex_home: &Path, current_exe: 
         let Some(command) = server.get("command").and_then(toml_edit::Item::as_str) else {
             return false;
         };
-        if !command.starts_with('/') {
+        if !crate::permission_rules::path_is_absolute_text(command) {
             return false;
         }
         match std::fs::canonicalize(command) {
@@ -854,10 +843,7 @@ pub fn claude_self_call(input: &Value) -> bool {
 }
 
 fn claude_home() -> Option<PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .filter(|home| home.starts_with('/'))
-        .map(PathBuf::from)
+    dirs::home_dir()
 }
 
 pub(crate) fn claude_self_call_at(
@@ -874,7 +860,7 @@ pub(crate) fn claude_self_call_at(
         .and_then(Value::as_str)
         .unwrap_or("");
     let cwd = object.get("cwd").and_then(Value::as_str).unwrap_or("");
-    if !cwd.starts_with('/') {
+    if !crate::permission_rules::path_is_absolute_text(cwd) {
         return false;
     }
     match tool_name {
@@ -978,7 +964,7 @@ fn claude_mcp_self_call_at(cwd: &str, home: &Path, current_exe: &Path) -> bool {
         let Some(command) = server.get("command").and_then(Value::as_str) else {
             return false;
         };
-        if !command.starts_with('/') {
+        if !crate::permission_rules::path_is_absolute_text(command) {
             return false;
         }
         matches!(std::fs::canonicalize(command), Ok(path) if path == current)
@@ -1007,10 +993,7 @@ fn claude_mcp_self_call_at(cwd: &str, home: &Path, current_exe: &Path) -> bool {
             .into_iter()
             .flatten()
         {
-            let covers = cwd == key
-                || (key != "/"
-                    && cwd.starts_with(key.as_str())
-                    && cwd.as_bytes().get(key.len()) == Some(&b'/'));
+            let covers = within_root(cwd, key);
             if !covers {
                 continue;
             }
@@ -2280,11 +2263,10 @@ mod tests {
         std::fs::create_dir_all(&codex_home).unwrap();
         let cwd = root.to_string_lossy().to_string();
         let write_config = |command: &str, extra: &str| {
+            let command = toml_edit::Value::from(command).to_string();
             std::fs::write(
                 codex_home.join("config.toml"),
-                format!(
-                    "[mcp_servers.askhuman]\ncommand = \"{command}\"\nargs = [\"mcp\"]\n{extra}"
-                ),
+                format!("[mcp_servers.askhuman]\ncommand = {command}\nargs = [\"mcp\"]\n{extra}"),
             )
             .unwrap();
         };
@@ -2538,8 +2520,8 @@ mod tests {
         std::fs::write(
             codex_home.join("config.toml"),
             format!(
-                "[mcp_servers.askhuman]\ncommand = \"{}\"\n",
-                exe.to_string_lossy()
+                "[mcp_servers.askhuman]\ncommand = {}\n",
+                toml_edit::Value::from(exe.to_string_lossy().as_ref())
             ),
         )
         .unwrap();
@@ -2551,8 +2533,8 @@ mod tests {
         std::fs::write(
             project.join(".codex/config.toml"),
             format!(
-                "[mcp_servers.askhuman]\ncommand = \"{}\"\n",
-                impostor.to_string_lossy()
+                "[mcp_servers.askhuman]\ncommand = {}\n",
+                toml_edit::Value::from(impostor.to_string_lossy().as_ref())
             ),
         )
         .unwrap();
@@ -2792,8 +2774,8 @@ mod tests {
 
         // Mark the project trusted (raw key): project config becomes the target.
         let trusted = format!(
-            "[mcp_servers.github]\ncommand = \"user\"\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
-            root.to_string_lossy()
+            "[mcp_servers.github]\ncommand = \"user\"\n[projects.{}]\ntrust_level = \"trusted\"\n",
+            toml_edit::Value::from(root.to_string_lossy().as_ref())
         );
         std::fs::write(home.path().join("config.toml"), trusted).unwrap();
         let (memory, _) =
@@ -2909,7 +2891,7 @@ mod tests {
         else {
             panic!("expected network rule write");
         };
-        assert!(rules_path.ends_with("/rules/default.rules"));
+        assert!(Path::new(rules_path).ends_with(Path::new("rules").join("default.rules")));
         assert_eq!(host, "api.github.com");
         assert_eq!(protocol, "https");
         // Bridge session rule keeps the port dimension.
@@ -3187,7 +3169,8 @@ mod tests {
             always.native,
             Some(crate::permission_rules::NativeWrite::PrefixRule { ref prefix, ref rules_path })
                 if prefix == &["cargo".to_string(), "build".into()]
-                    && rules_path.ends_with("/rules/default.rules")
+                    && Path::new(rules_path)
+                        .ends_with(Path::new("rules").join("default.rules"))
         ));
         // The plain label carries no implementation detail.
         let always_choice = extra_choices

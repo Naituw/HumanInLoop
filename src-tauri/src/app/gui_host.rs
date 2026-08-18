@@ -8,8 +8,6 @@
 //! - 配置监听：菜单栏模式 / 语言变化 → 重建菜单 + 装/卸登录项 + 切活动策略。
 //! - 二进制换新：盘上二进制变化且无窗口时 re-exec / 交 launchd（spec D11）。
 
-#![cfg(unix)]
-
 use crate::app::tray_menu::{Node, TrayMenu};
 use crate::config::{AppConfig, DaemonLifecycleMode, MenuBarIconMode, ThemeMode};
 use crate::daemon::lifecycle::{self, Fingerprint, LockGuard};
@@ -270,6 +268,10 @@ fn tray_supported() -> bool {
     {
         std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some()
     }
+    #[cfg(windows)]
+    {
+        true
+    }
 }
 
 // ===== 入口：在 launch() 的 setup 中调用 =====
@@ -376,7 +378,67 @@ fn apply_activation_policy(app: &AppHandle, mode: MenuBarIconMode) {
 // ===== 托盘图标 / 菜单 =====
 
 fn decode_icon(bytes: &'static [u8]) -> Option<Image<'static>> {
-    Image::from_bytes(bytes).ok()
+    let image = Image::from_bytes(bytes).ok()?;
+    #[cfg(target_os = "windows")]
+    {
+        Some(compact_windows_tray_icon(image))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Some(image)
+    }
+}
+
+/// Trim transparent pixels and place the result on a square canvas with a one-pixel safety edge.
+/// Windows scales the whole source canvas into the notification area, so the macOS-oriented 4:3
+/// artwork otherwise appears visibly smaller than neighboring tray icons.
+#[cfg(any(target_os = "windows", test))]
+fn compact_windows_tray_icon(image: Image<'static>) -> Image<'static> {
+    const PADDING: u32 = 1;
+
+    let width = image.width();
+    let height = image.height();
+    let rgba = image.rgba();
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0;
+    let mut max_y = 0;
+    let mut found = false;
+
+    for y in 0..height {
+        for x in 0..width {
+            let alpha = rgba[((y * width + x) * 4 + 3) as usize];
+            if alpha == 0 {
+                continue;
+            }
+            found = true;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+
+    if !found {
+        return image;
+    }
+
+    let content_width = max_x - min_x + 1;
+    let content_height = max_y - min_y + 1;
+    let side = content_width.max(content_height) + PADDING * 2;
+    let target_x = (side - content_width) / 2;
+    let target_y = (side - content_height) / 2;
+    let mut compact = vec![0; (side * side * 4) as usize];
+
+    for row in 0..content_height {
+        let source_start = (((min_y + row) * width + min_x) * 4) as usize;
+        let source_end = source_start + (content_width * 4) as usize;
+        let target_start = (((target_y + row) * side + target_x) * 4) as usize;
+        compact[target_start..target_start + (content_width * 4) as usize]
+            .copy_from_slice(&rgba[source_start..source_end]);
+    }
+
+    Image::new_owned(compact, side, side)
 }
 
 fn icon_source(
@@ -797,8 +859,8 @@ fn build_specs(
         i18n::tr(lang, "tray.openTodos").to_string(),
         true,
     ));
-    // 「新建 Agent 任务」（spec gui-agent-task-launch G1/G12）：仅 macOS 且 Terminal.app 可用时
-    // 显示；不要求开启 agentTasks 实验功能。开启生命周期追踪时归入下方 Agent 区（作为末项，
+    // Show New Agent Task when the current platform has a supported terminal. This does not
+    // require agentTasks to be enabled. With lifecycle tracking it moves into the Agent section,
     // 用户定案 2026-07-25）；未开启（无 Agent 区）时留在窗口区兜底。
     let new_task_available = crate::integrations::agent_launch::terminal_available();
     if new_task_available && !lifecycle_on {
@@ -934,11 +996,9 @@ fn build_specs(
         !update_busy,
     ));
     if data.update_available {
-        nodes.push(Node::item(
-            "apply_update",
-            i18n::tr(lang, "tray.applyUpdate").replace("{v}", &data.update_latest),
-            !update_busy,
-        ));
+        let (id, text) =
+            available_update_action(crate::update::apply_mode(), lang, &data.update_latest);
+        nodes.push(Node::item(id, text, !update_busy));
     }
     // 盘上二进制已换新但窗口开着（自动换新被挡）→ 用户可主动重启宿主完成更新（B2）。
     if stale {
@@ -978,6 +1038,19 @@ fn build_specs(
         ));
     }
     nodes
+}
+
+fn available_update_action(
+    mode: crate::update::UpdateApplyMode,
+    lang: Lang,
+    version: &str,
+) -> (&'static str, String) {
+    let (id, key) = if mode == crate::update::UpdateApplyMode::Automatic {
+        ("apply_update", "tray.applyUpdate")
+    } else {
+        ("prepare_update", "tray.prepareManualUpdate")
+    };
+    (id, i18n::tr(lang, key).replace("{v}", version))
 }
 
 fn pending_update_text(up: bool, data: &TrayData, lang: Lang) -> String {
@@ -1179,18 +1252,21 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
     }
     // Agent 子菜单「聚焦终端」：AppleScript 可能阻塞（授权弹窗等），放后台线程。
     if let Some(session_id) = id.strip_prefix("term:") {
-        let pid = app.try_state::<HostState>().and_then(|s| {
+        let focus = app.try_state::<HostState>().and_then(|s| {
             s.data
                 .lock()
                 .unwrap()
                 .agents
                 .iter()
                 .find(|a| a.session_id == session_id)
-                .and_then(|a| a.pid)
+                .map(|a| (a.pid, a.launch_id.clone()))
         });
-        if let Some(pid) = pid {
+        if let Some((pid, launch_id)) = focus {
             std::thread::spawn(move || {
-                let _ = crate::integrations::terminal_focus::focus_agent_terminal(pid);
+                let _ = crate::integrations::terminal_focus::focus_agent_terminal(
+                    pid,
+                    launch_id.as_deref(),
+                );
             });
         }
         return;
@@ -1234,6 +1310,12 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
             let Some(state) = app.try_state::<HostState>() else {
                 return;
             };
+            if let Err(error) = crate::update::ensure_automatic_apply_allowed() {
+                *state.update_action.lock().unwrap() =
+                    UpdateActionState::ApplyFailed(compact_update_error(&error.to_string()));
+                refresh_on_main(app);
+                return;
+            }
             {
                 let mut action = state.update_action.lock().unwrap();
                 if action.busy() {
@@ -1271,6 +1353,17 @@ pub fn on_menu_event(app: &AppHandle, id: &str) {
                 }
             });
         }
+        // Settings owns the second confirmation and preserves the exact Direct/npm next step
+        // before starting the helper that will close this GUI Host.
+        "prepare_update" => open_window(
+            app,
+            WindowKind::Settings,
+            false,
+            Some("general#manual-update".to_string()),
+            None,
+            None,
+            None,
+        ),
         // B2：用户主动重启宿主完成二进制换新（窗口开着也重启——用户已知情选择）。
         "host_restart" => {
             restart_host(app);
@@ -1534,7 +1627,7 @@ fn start_ipc_listener(app: AppHandle) {
     });
 }
 
-async fn handle_host_conn(stream: tokio::net::UnixStream, app: AppHandle) {
+async fn handle_host_conn(stream: transport::Stream, app: AppHandle) {
     let (r, mut w) = stream.into_split();
     let mut reader = BufReader::new(r);
     while let Ok(Some(msg)) = ipc::read_msg::<_, HostMsg>(&mut reader).await {
@@ -1565,9 +1658,14 @@ async fn handle_host_conn(stream: tokio::net::UnixStream, app: AppHandle) {
                 let _ = ipc::write_msg(&mut w, &HostMsg::Ping).await;
             }
             HostMsg::Shutdown => {
-                let app2 = app.clone();
-                let _ = app.run_on_main_thread(move || app2.exit(0));
-                return;
+                // Confirm that the shutdown frame was consumed before the client starts checking
+                // for pipe disappearance. This removes a named-pipe close race on Windows.
+                let _ = ipc::write_msg(&mut w, &HostMsg::Ping).await;
+                // `AppHandle::exit` can wait for a Settings update-check task (HTTP timeout 30s),
+                // keeping the Windows executable locked. This is a cooperative Host-only shutdown
+                // after daemon drain: release Tauri resources, then terminate this process.
+                app.cleanup_before_exit();
+                std::process::exit(0);
             }
         }
     }
@@ -1576,16 +1674,16 @@ async fn handle_host_conn(stream: tokio::net::UnixStream, app: AppHandle) {
 // ===== daemon 状态订阅（非保活）=====
 
 fn start_status_subscription(app: AppHandle) {
-    // 事件驱动重连信号：daemon socket 出现/变化（daemon 起停）即唤醒下方循环立即重连，
+    // 事件驱动重连信号：daemon metadata 出现/变化（daemon 起停）即唤醒下方循环立即重连，
     // 取代「daemon 关着时每 2s 盲连」的忙轮询。配 30s 兜底超时防漏事件。
-    let sock_event = Arc::new(Notify::new());
-    spawn_daemon_sock_watch(sock_event.clone());
+    let state_event = Arc::new(Notify::new());
+    spawn_daemon_state_watch(state_event.clone());
     tauri::async_runtime::spawn(async move {
         loop {
-            // off 模式无托盘，不必订阅；等 socket 事件或 2s 复查模式（覆盖运行时切到 active/always）。
+            // off 模式无托盘，不必订阅；等 state 事件或 2s 复查模式（覆盖运行时切到 active/always）。
             if mode_of(&app) == MenuBarIconMode::Off {
                 tokio::select! {
-                    _ = sock_event.notified() => {}
+                    _ = state_event.notified() => {}
                     _ = tokio::time::sleep(Duration::from_secs(2)) => {}
                 }
                 continue;
@@ -1656,26 +1754,31 @@ fn start_status_subscription(app: AppHandle) {
             set_daemon_up(&app, false);
             refresh_on_main(&app);
             evaluate_exit(&app);
-            // 事件驱动重连：等 daemon socket 出现/变化即重连，30s 兜底防漏事件（取代 2s 忙轮询）。
+            // 事件驱动重连：等 daemon metadata 出现/变化即重连，30s 兜底防漏事件。
             tokio::select! {
-                _ = sock_event.notified() => {}
+                _ = state_event.notified() => {}
                 _ = tokio::time::sleep(Duration::from_secs(30)) => {}
             }
         }
     });
 }
 
-/// 监听 daemon socket（`~/.askhuman/daemon.sock`）所在目录：文件创建/变化（daemon 起停）即唤醒
-/// 状态订阅循环立即重连。用一条 `Notify` 跨「notify 同步回调线程」与「异步订阅循环」传递信号。
-fn spawn_daemon_sock_watch(event: Arc<Notify>) {
+fn daemon_state_signal_path() -> std::path::PathBuf {
+    crate::daemon::lifecycle::meta_path()
+}
+
+/// Watch the cross-platform daemon metadata file. Unlike the transport endpoint, this is a real
+/// filesystem path on both Unix and Windows, and its create/remove lifecycle mirrors daemon start
+/// and stop closely enough to wake the status subscription immediately.
+fn spawn_daemon_state_watch(event: Arc<Notify>) {
     std::thread::spawn(move || {
         use notify::{RecursiveMode, Watcher};
         use std::sync::mpsc::channel;
-        let sock = crate::ipc::transport::socket_path();
-        let Some(name) = sock.file_name().map(|n| n.to_os_string()) else {
+        let state_path = daemon_state_signal_path();
+        let Some(name) = state_path.file_name().map(|n| n.to_os_string()) else {
             return;
         };
-        let Some(dir) = sock.parent().map(|d| d.to_path_buf()) else {
+        let Some(dir) = state_path.parent().map(|d| d.to_path_buf()) else {
             return;
         };
         let _ = std::fs::create_dir_all(&dir);
@@ -1941,6 +2044,16 @@ fn restart_host(app: &AppHandle) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn daemon_status_watch_uses_real_metadata_file() {
+        let path = daemon_state_signal_path();
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("daemon.json")
+        );
+        assert!(!path.to_string_lossy().starts_with(r"\\.\pipe\"));
+    }
+
     fn item<'a>(nodes: &'a [Node], key: &str) -> (&'a str, bool) {
         nodes
             .iter()
@@ -1983,6 +2096,7 @@ mod tests {
                     focusable: true,
                     forkable: true,
                     pid: Some(42),
+                    launch_id: None,
                 }],
                 ..Default::default()
             },
@@ -2064,6 +2178,8 @@ mod tests {
                 release_notes: String::new(),
                 source_url: String::new(),
                 is_npm: false,
+                apply_mode: crate::update::UpdateApplyMode::Automatic,
+                manual_command: String::new(),
             },
         );
         assert!(data.update_available);
@@ -2108,7 +2224,9 @@ mod tests {
             ("Update found: v1.2.0", false)
         );
         assert_eq!(item(&nodes, "check_update"), ("Check for Updates", true));
-        assert!(item(&nodes, "apply_update").1);
+        let (action_id, _) =
+            available_update_action(crate::update::apply_mode(), Lang::En, "1.2.0");
+        assert!(item(&nodes, action_id).1);
     }
 
     #[test]
@@ -2132,7 +2250,28 @@ mod tests {
             ("Updating AskHuman…", false)
         );
         assert!(!item(&nodes, "check_update").1);
-        assert!(!item(&nodes, "apply_update").1);
+        let (action_id, _) =
+            available_update_action(crate::update::apply_mode(), Lang::En, "1.2.0");
+        assert!(!item(&nodes, action_id).1);
+    }
+
+    #[test]
+    fn unsigned_windows_update_action_routes_to_manual_preparation() {
+        assert_eq!(
+            available_update_action(
+                crate::update::UpdateApplyMode::ManualDirect,
+                Lang::En,
+                "1.2.0"
+            ),
+            (
+                "prepare_update",
+                "Prepare manual update to v1.2.0…".to_string()
+            )
+        );
+        assert_eq!(
+            available_update_action(crate::update::UpdateApplyMode::Automatic, Lang::En, "1.2.0").0,
+            "apply_update"
+        );
     }
 
     #[test]
@@ -2238,5 +2377,40 @@ mod tests {
         assert_eq!(icon_source(true, 0, true), icon_bytes::IDLE_ATTENTION);
         assert_eq!(icon_source(true, 1, true), icon_bytes::ACTIVE);
         assert_eq!(icon_source(true, 0, false), icon_bytes::IDLE);
+    }
+
+    #[test]
+    fn windows_tray_compaction_trims_and_centers_rectangular_artwork() {
+        let mut rgba = vec![0; 8 * 6 * 4];
+        for y in 2..4 {
+            for x in 2..6 {
+                rgba[(y * 8 + x) * 4 + 3] = 255;
+            }
+        }
+
+        let compact = compact_windows_tray_icon(Image::new_owned(rgba, 8, 6));
+        assert_eq!((compact.width(), compact.height()), (6, 6));
+
+        let alpha = |x: usize, y: usize| compact.rgba()[(y * 6 + x) * 4 + 3];
+        assert_eq!(alpha(0, 2), 0);
+        assert_eq!(alpha(1, 2), 255);
+        assert_eq!(alpha(4, 3), 255);
+        assert_eq!(alpha(5, 3), 0);
+    }
+
+    #[test]
+    fn windows_tray_compaction_enlarges_the_shipped_artwork_canvas_share() {
+        let idle = Image::from_bytes(icon_bytes::IDLE).unwrap();
+        assert_eq!((idle.width(), idle.height()), (48, 36));
+
+        let compact = compact_windows_tray_icon(idle);
+        assert_eq!((compact.width(), compact.height()), (38, 38));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn non_windows_tray_decode_preserves_the_designed_canvas() {
+        let idle = decode_icon(icon_bytes::IDLE).unwrap();
+        assert_eq!((idle.width(), idle.height()), (48, 36));
     }
 }

@@ -53,8 +53,8 @@ Interject 是「打断进行中」的纠偏语义，不适合），希望：
 - 顺序：FIFO 追加；顺序可在 GUI 待办窗口拖拽调整（第 14 轮定案，见 D9），头部条目在
   选项类展示点优先出现。
 - 存储（第 9 轮定案，实现简化）：`~/.askhuman/state/todos.json` 即**唯一数据源**，
-  所有进程直读直写；写操作（读-改-写）持 flock 串行化（与 `history.jsonl` 跨进程写锁
-  同模式；Windows 无锁 best-effort，与 history 现状一致）。**不做** daemon 内存运行态
+  所有进程直读直写；写操作（读-改-写）持跨平台文件锁串行化（Unix `flock` / Windows
+  `LockFileEx` 语义由 `fs2` 统一，与 `history.jsonl` 跨进程写锁同模式）。**不做** daemon 内存运行态
   ——todo 无热路径（whats-next 每轮一次、增删查是人操作频率），双层结构无收益。
   文件形态：`{ "projects": { "<project_key>": [ {id,text,createdAtMs,agentKind?}, … ] },
   "history": { "<project_key>": [ {id,text,createdAtMs,agentKind?,doneAtMs}, … ] } }`，
@@ -221,9 +221,9 @@ AskHuman todo rm <编号>            # 删除一条
 AskHuman todo clear                # 清空本项目（需交互确认，或 --yes 跳过）
 ```
 
-- Unix 经 daemon（连接或拉起，daemon 内存为准）；非 Unix 直接文件 + 锁。
+- macOS、Linux 与 Windows 均经 shared daemon（连接或拉起）；`todos.json` 仍是唯一数据源，所有独立进程写入由跨平台文件锁串行化。
 - 输出人类可读；后续需要时再加 `--output json`（首期不做）。
-- `todo add` 复用提问调用方识别：先读 Agent 环境变量，无法识别时 Unix 沿父进程树兜底；
+- `todo add` 复用提问调用方识别：先读 Agent 环境变量，无法识别时沿平台原生父进程树兜底；
   识别成功则把 Agent 家族写入待办来源。来源不改变 CLI 输出，人工调用保持无来源。
 - `--agent-help` 用两行简述项目待办：它用于提醒用户操作，或记录用户要求稍后执行的任务，
   不是 Agent 的内部工作计划；用户要求添加或明确延后具体任务时用 `todo add` 添加。另给出软建议：
@@ -247,7 +247,7 @@ AskHuman todo clear                # 清空本项目（需交互确认，或 --y
 - IM 普通提问卡**不加**待办区（评审定案：任务中途的提问用待办作答易答非所问，
   且多题卡歧义；IM 侧待办送达统一走 whats-next 卡）。
 
-### D8 入口三：IM `/todo`、`/todo-rm`（Unix，daemon 入站命令层）
+### D8 入口三：IM `/todo`、`/todo-rm`（跨平台 daemon 入站命令层）
 
 - `/todo`（无参）→ 复用现有跨渠道**单选卡**选一个项目；`/todo <text>` → 把文本
   暂存在 picker payload，选中项目后直接新增。旧 `/todo <n> [text]`（n＝`/status`
@@ -273,7 +273,7 @@ AskHuman todo clear                # 清空本项目（需交互确认，或 --y
   `/todo-auto` 或 GUI 设置。
 - 没有任何项目候选时回提示；不要求存在存活 Agent。与 `/status` 同门控（daemon 存活即可用）。
 
-### D9 入口四：GUI 独立待办窗口 + 托盘（Unix，GUI Host 承载）
+### D9 入口四：GUI 独立待办窗口 + 托盘（macOS/Linux/Windows GUI Host 承载）
 
 - 新窗口类型（`WindowKind::Todo`，全局唯一），入口：托盘菜单「待办…」+ 所有提问/确认弹窗
   顶栏「项目待办」+ Agent 状态窗口各 agent 卡片 + 托盘各 agent 子菜单「添加待办…」
@@ -303,11 +303,11 @@ AskHuman todo clear                # 清空本项目（需交互确认，或 --y
 
 | 能力 | macOS / Linux | Windows |
 |---|---|---|
-| `--whats-next` / MCP `whats_next` | ✅（提问经 daemon；待办直读文件） | ✅ 单进程回退 |
-| CLI `todo` 子命令 | ✅ 直接文件 + flock | ✅ 直接文件（无锁 best-effort） |
+| `--whats-next` / MCP `whats_next` | ✅（提问经 daemon；待办直读文件） | ✅（提问经 named-pipe daemon；待办直读文件） |
+| CLI `todo` 子命令 | ✅ 直接文件 + 跨进程锁 | ✅ 直接文件 + 跨进程锁 |
 | Popup 折叠待办区 | ✅ 直读文件 | ✅ 直读文件 |
-| IM `/todo`、`/todo-rm`、`/todo-auto` | ✅ | —（无 daemon） |
-| GUI 待办窗口 / 托盘入口 | ✅ | —（无 GUI Host / 托盘） |
+| IM `/todo`、`/todo-rm`、`/todo-auto` | ✅ | ✅ |
+| GUI 待办窗口 / 托盘入口 | ✅ | ✅ |
 
 ### D11 竞态与边界
 
@@ -326,7 +326,7 @@ AskHuman todo clear                # 清空本项目（需交互确认，或 --y
 
 ## 4. 单元测试要求（骨架，实现计划再展开）
 
-- 队列存储：add/rm/clear/出队幂等、persist 往返、空项目剪除、文件锁（非 Unix 路径）。
+- 队列存储：add/rm/clear/出队幂等、persist 往返、空项目剪除、Unix/Windows 文件锁。
 - whats-next 参数解析：与 `-q` 互斥，接受 `-o`/`-o!` 建议任务，覆盖 Message/`--stdin`/`-f` 组合。
 - 提交映射五分支（D2 表）纯函数全覆盖；出队 best-effort（条目已删）分支。
 - 输出契约：任务文本（含补充拼接）/ 固定结束句 / 取消 `[status]` 三种渲染；

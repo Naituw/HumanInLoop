@@ -1,4 +1,4 @@
-//! 渠道识别（detect）：settings 发起的钉钉/飞书/Slack 自动识别流程。
+//! Channel detection flows started from Settings for DingTalk, Feishu, and Slack.
 
 use super::*;
 

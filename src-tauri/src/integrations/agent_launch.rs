@@ -1,4 +1,4 @@
-//! Secure Terminal.app launch bridge for tasks created from IM.
+//! Secure Terminal launch bridge for tasks created from IM.
 //!
 //! IM data is stored in a private one-time record. AppleScript and the login shell only receive
 //! the absolute AskHuman executable plus an opaque UUID token.
@@ -275,14 +275,80 @@ pub fn all_fork_readiness() -> Vec<ForkReadiness> {
     })
 }
 
+#[cfg(target_os = "macos")]
 pub fn terminal_available() -> bool {
-    cfg!(target_os = "macos")
-        && [
-            "/System/Applications/Utilities/Terminal.app",
-            "/Applications/Utilities/Terminal.app",
-        ]
-        .into_iter()
-        .any(|path| Path::new(path).exists())
+    [
+        "/System/Applications/Utilities/Terminal.app",
+        "/Applications/Utilities/Terminal.app",
+    ]
+    .into_iter()
+    .any(|path| Path::new(path).exists())
+}
+
+#[cfg(target_os = "windows")]
+pub fn terminal_available() -> bool {
+    resolve_windows_terminal().is_some()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn terminal_available() -> bool {
+    false
+}
+
+/// Open a harmless platform terminal self-check without resolving or starting an Agent binary.
+#[cfg(target_os = "macos")]
+pub fn test_terminal() -> Result<()> {
+    let script = r#"tell application "Terminal"
+activate
+do script "printf '\\nAskHuman Terminal test succeeded.\\n'"
+end tell"#;
+    let status = Command::new("/usr/bin/osascript")
+        .args(["-e", script])
+        .status()
+        .context("failed to ask Terminal.app to open a test window")?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| anyhow!("Terminal.app rejected the test"))
+}
+
+/// Open a harmless Windows Terminal tab using only fixed arguments.
+#[cfg(target_os = "windows")]
+pub fn test_terminal() -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+
+    let terminal = resolve_windows_terminal()
+        .ok_or_else(|| anyhow!("Windows Terminal (wt.exe) is unavailable"))?;
+    let status = Command::new(terminal)
+        .args([
+            "-w",
+            "new",
+            "new-tab",
+            "--title",
+            "AskHuman Test",
+            "cmd.exe",
+            "/d",
+            "/k",
+            "echo AskHuman Terminal test succeeded.",
+        ])
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("failed to ask Windows Terminal to open a test window")?;
+    status
+        .success()
+        .then_some(())
+        .ok_or_else(|| anyhow!("Windows Terminal rejected the test"))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn test_terminal() -> Result<()> {
+    Err(anyhow!(
+        "Agent task terminal launch is unsupported on this platform"
+    ))
 }
 
 pub fn cleanup_expired_records() {
@@ -463,6 +529,40 @@ end run"#;
     Ok(())
 }
 
+/// Open a uniquely named Windows Terminal window and pass only the trusted AskHuman executable
+/// plus the opaque launch token. A fixed, application-suppressed tab title gives the focus adapter
+/// an exact target without exposing the task or relying on a mutable tab index.
+#[cfg(target_os = "windows")]
+pub fn open_terminal(record: &LaunchRecord) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+
+    let terminal = resolve_windows_terminal()
+        .ok_or_else(|| anyhow!("Windows Terminal (wt.exe) is required to launch Agent tasks"))?;
+    let (window_name, tab_title) =
+        super::terminal_focus::windows_terminal_identity(&record.id).map_err(anyhow::Error::msg)?;
+    let mut command = Command::new(terminal);
+    command
+        .args(["-w", &window_name, "new-tab", "--title", &tab_title])
+        .arg("--suppressApplicationTitle")
+        .arg("--startingDirectory")
+        .arg(&record.cwd)
+        .arg(&record.askhuman_executable)
+        .arg("__agent-launch")
+        .arg(&record.id)
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let status = command
+        .status()
+        .context("failed to ask Windows Terminal to open a window")?;
+    if !status.success() {
+        return Err(anyhow!("Windows Terminal rejected the launch request"));
+    }
+    Ok(())
+}
+
 fn terminal_helper_command(askhuman_executable: &str, launch_id: &str) -> String {
     // Terminal.app can accept the second `do script` during the short handoff from the login
     // shell to its line editor. In that race it may discard the first injected character. Keep
@@ -474,22 +574,29 @@ fn terminal_helper_command(askhuman_executable: &str, launch_id: &str) -> String
     )
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn open_terminal(_record: &LaunchRecord) -> Result<()> {
-    Err(anyhow!(
-        "IM Agent launch currently requires macOS Terminal.app"
-    ))
+    Err(anyhow!("IM Agent launch is unsupported on this platform"))
 }
 
 /// Hidden helper entry point. Returns only on validation failure; success replaces this process
 /// with the selected Agent so it inherits the terminal's real TTY.
-#[cfg(unix)]
 pub fn run_helper(args: &[String]) -> Result<()> {
     let token = args
         .first()
         .ok_or_else(|| anyhow!("missing launch token"))?;
     let record = claim_record(token)?;
     validate_claim(&record, token)?;
+    #[cfg(windows)]
+    {
+        let action = if super::terminal_focus::register_windows_terminal_window(&record.id).is_ok()
+        {
+            "window_registered"
+        } else {
+            "window_registration_failed"
+        };
+        crate::daemon::lifecycle::log_runtime_event("windows_terminal", action, None);
+    }
     std::env::set_current_dir(&record.cwd).context("failed to enter workspace")?;
     let mut command = Command::new(&record.executable);
     command.env(LAUNCH_ID_ENV, &record.id);
@@ -499,8 +606,22 @@ pub fn run_helper(args: &[String]) -> Result<()> {
         &record.launch_mode,
         &task_with_attachments(&record.task, &record.files, &record.warnings),
     ));
-    use std::os::unix::process::CommandExt;
-    Err(command.exec()).context("failed to start Agent")
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(command.exec()).context("failed to start Agent")
+    }
+    #[cfg(windows)]
+    {
+        let status = command.status().context("failed to start Agent")?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(anyhow!("Agent exited with {status}"))
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    Err(anyhow!("Agent launch is unsupported on this platform"))
 }
 
 fn write_private_record(record: &LaunchRecord) -> Result<()> {
@@ -559,18 +680,20 @@ fn validate_claim(record: &LaunchRecord, token: &str) -> Result<()> {
         }
     }
     let cwd = fs::canonicalize(&record.cwd).context("workspace is no longer available")?;
-    if cwd.to_string_lossy() != record.cwd {
+    if !crate::path_identity::equivalent(&cwd.to_string_lossy(), &record.cwd) {
         return Err(anyhow!("workspace path changed after launch was requested"));
     }
     let executable =
         fs::canonicalize(&record.executable).context("Agent executable is unavailable")?;
-    if executable.to_string_lossy() != record.executable || !is_executable(&executable) {
+    if !crate::path_identity::equivalent(&executable.to_string_lossy(), &record.executable)
+        || !is_executable(&executable)
+    {
         return Err(anyhow!(
             "Agent executable changed after launch was requested"
         ));
     }
     let current = std::env::current_exe()?;
-    if current.to_string_lossy() != record.askhuman_executable {
+    if !crate::path_identity::equivalent(&current.to_string_lossy(), &record.askhuman_executable) {
         return Err(anyhow!(
             "AskHuman executable changed after launch was requested"
         ));
@@ -652,24 +775,35 @@ fn probe_help(executable: &str, args: &[&str]) -> Option<String> {
     // `#!/usr/bin/env node` shebang, so probing the canonical script directly can fail even though
     // the login shell can launch it. Only the previously resolved executable and fixed help args
     // enter this shell; source session ids and user prompts never use this path.
-    let shell = std::env::var("SHELL")
-        .ok()
-        .filter(|value| Path::new(value).is_absolute())
-        .unwrap_or_else(|| "/bin/zsh".to_string());
-    let command = std::iter::once(executable)
-        .chain(args.iter().copied())
-        .map(shell_quote)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let mut child = Command::new(shell)
-        // Login startup restores GUI hosts' sparse PATH; remaining non-interactive avoids job
-        // control and arbitrary interactive prompt behavior inside the Terminal launch helper.
-        .args(["-lc", &command])
+    #[cfg(unix)]
+    let mut child = {
+        let shell = std::env::var("SHELL")
+            .ok()
+            .filter(|value| Path::new(value).is_absolute())
+            .unwrap_or_else(|| "/bin/zsh".to_string());
+        let command = std::iter::once(executable)
+            .chain(args.iter().copied())
+            .map(shell_quote)
+            .collect::<Vec<_>>()
+            .join(" ");
+        Command::new(shell)
+            .args(["-lc", &command])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .ok()?
+    };
+    #[cfg(windows)]
+    let mut child = Command::new(executable)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .ok()?;
+    #[cfg(not(any(unix, windows)))]
+    return None;
     let started = std::time::Instant::now();
     loop {
         match child.try_wait() {
@@ -724,50 +858,99 @@ pub fn task_with_attachments(task: &str, files: &[String], warnings: &[String]) 
 }
 
 fn resolve_login_shell_executable(name: &str) -> Option<String> {
-    let shell = std::env::var("SHELL")
-        .ok()
-        .filter(|v| Path::new(v).is_absolute())
-        .unwrap_or_else(|| "/bin/zsh".to_string());
-    let mut child = Command::new(shell)
-        .args([
-            "-lic",
-            &format!("p=$(command -v {name}) && printf '\\n__ASKHUMAN_BIN__%s\\n' \"$p\""),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let started = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
+    #[cfg(windows)]
+    {
+        resolve_windows_executable(name)
+    }
+    #[cfg(unix)]
+    {
+        let shell = std::env::var("SHELL")
+            .ok()
+            .filter(|v| Path::new(v).is_absolute())
+            .unwrap_or_else(|| "/bin/zsh".to_string());
+        let mut child = Command::new(shell)
+            .args([
+                "-lic",
+                &format!("p=$(command -v {name}) && printf '\\n__ASKHUMAN_BIN__%s\\n' \"$p\""),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let started = std::time::Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        return None;
+                    }
+                    let output = child.wait_with_output().ok()?;
+                    return output
+                        .stdout
+                        .split(|b| *b == b'\n')
+                        .filter_map(|line| std::str::from_utf8(line).ok())
+                        .map(str::trim)
+                        .filter_map(|line| line.strip_prefix("__ASKHUMAN_BIN__"))
+                        .filter(|line| Path::new(line).is_absolute())
+                        .map(PathBuf::from)
+                        .find_map(|path| fs::canonicalize(path).ok())
+                        .filter(|path| is_executable(path))
+                        .map(|path| path.to_string_lossy().to_string());
+                }
+                Ok(None) if started.elapsed() < RESOLVE_TIMEOUT => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
                     return None;
                 }
-                let output = child.wait_with_output().ok()?;
-                return output
-                    .stdout
-                    .split(|b| *b == b'\n')
-                    .filter_map(|line| std::str::from_utf8(line).ok())
-                    .map(str::trim)
-                    .filter_map(|line| line.strip_prefix("__ASKHUMAN_BIN__"))
-                    .filter(|line| Path::new(line).is_absolute())
-                    .map(PathBuf::from)
-                    .find_map(|path| fs::canonicalize(path).ok())
-                    .filter(|path| is_executable(path))
-                    .map(|path| path.to_string_lossy().to_string());
-            }
-            Ok(None) if started.elapsed() < RESOLVE_TIMEOUT => {
-                std::thread::sleep(Duration::from_millis(20))
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
             }
         }
     }
+    #[cfg(not(any(unix, windows)))]
+    None
+}
+
+#[cfg(windows)]
+pub(crate) fn resolve_windows_terminal() -> Option<String> {
+    // Microsoft Store execution aliases are zero-byte reparse points. Rust canonicalization can
+    // reject them even though CreateProcess resolves them correctly, so prefer the fixed per-user
+    // WindowsApps alias instead of treating it like a regular Agent executable.
+    let alias = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)?
+        .join("Microsoft")
+        .join("WindowsApps")
+        .join("wt.exe");
+    if fs::symlink_metadata(&alias).is_ok() {
+        return Some(alias.to_string_lossy().to_string());
+    }
+    resolve_windows_executable("wt.exe")
+}
+
+#[cfg(windows)]
+fn resolve_windows_executable(name: &str) -> Option<String> {
+    let output = Command::new("where.exe")
+        .arg(name)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        // npm installs both an extensionless POSIX shim and a `.cmd` launcher. `where.exe`
+        // returns the POSIX shim first, but CreateProcess rejects it with ERROR_BAD_EXE_FORMAT.
+        .filter(|path| is_windows_launchable(path))
+        .find_map(|path| fs::canonicalize(path).ok())
+        .filter(|path| is_windows_launchable(path))
+        .map(|path| path.to_string_lossy().to_string())
 }
 
 fn target(kind: AgentKind) -> AgentTarget {
@@ -827,7 +1010,25 @@ fn is_executable(path: &Path) -> bool {
     path.is_file() && fs::metadata(path).is_ok_and(|m| m.permissions().mode() & 0o111 != 0)
 }
 
-#[cfg(not(unix))]
+fn is_windows_launchable(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "exe" | "com" | "cmd" | "bat"
+                )
+            })
+}
+
+#[cfg(windows)]
+fn is_executable(path: &Path) -> bool {
+    is_windows_launchable(path)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
@@ -934,6 +1135,22 @@ mod tests {
             terminal_helper_command("/tmp/Ask Human", "launch-id"),
             "  '/tmp/Ask Human' __agent-launch 'launch-id'"
         );
+    }
+
+    #[test]
+    fn windows_launchable_paths_reject_posix_npm_shims() {
+        let temp = tempfile::tempdir().unwrap();
+        let posix_shim = temp.path().join("codex");
+        let command_shim = temp.path().join("codex.CMD");
+        let executable = temp.path().join("codex.exe");
+        let powershell = temp.path().join("codex.ps1");
+        for path in [&posix_shim, &command_shim, &executable, &powershell] {
+            fs::write(path, b"placeholder").unwrap();
+        }
+        assert!(!is_windows_launchable(&posix_shim));
+        assert!(is_windows_launchable(&command_shim));
+        assert!(is_windows_launchable(&executable));
+        assert!(!is_windows_launchable(&powershell));
     }
 
     /// Task boundary validation happens before any filesystem/readiness side effect

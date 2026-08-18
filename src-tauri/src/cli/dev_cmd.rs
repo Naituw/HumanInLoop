@@ -207,14 +207,37 @@ fn cmd_disable(args: &[String]) {
     std::env::set_var(dev_instance::ASKHUMAN_HOME_ENV, &home);
     std::env::set_var("ASKHUMAN_NO_KEYCHAIN", "1");
 
-    // Best-effort stop instance daemon.
-    #[cfg(unix)]
+    // Best-effort stop the daemon in this instance partition before removing its marker/data.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build();
+    if let Ok(rt) = rt {
+        rt.block_on(async {
+            if crate::client::request_stop(true).await {
+                crate::client::wait_until_down(std::time::Duration::from_secs(5)).await;
+            }
+            if crate::gui_host::shutdown_if_running().await {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while std::time::Instant::now() < deadline {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    if !crate::gui_host::shutdown_if_running().await {
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    #[cfg(windows)]
     {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build();
-        if let Ok(rt) = rt {
-            let _ = rt.block_on(crate::client::request_stop(true));
+        let remaining = terminate_instance_processes(&dev_instance::instance_bin(&root));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while remaining
+            .iter()
+            .any(|pid| crate::agents::detect::pid_alive(*pid))
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
     }
 
@@ -233,7 +256,7 @@ fn cmd_disable(args: &[String]) {
 
     if purge {
         let dev = root.join(DEV_DIR);
-        match std::fs::remove_dir_all(&dev) {
+        match remove_dev_dir(&dev) {
             Ok(()) => println!("purged {}", dev.display()),
             Err(e) => {
                 eprintln!("error: failed to purge {}: {e}", dev.display());
@@ -248,6 +271,87 @@ fn cmd_disable(args: &[String]) {
         println!("  use --purge to delete bin/home as well");
     }
     exit(0);
+}
+
+fn remove_dev_dir(path: &Path) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if cfg!(windows) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let _ = error;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn terminate_instance_processes(instance_bin: &Path) -> Vec<u32> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    };
+
+    fn normalized(path: &Path) -> String {
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        canonical
+            .to_string_lossy()
+            .trim_start_matches(r"\\?\")
+            .to_lowercase()
+    }
+
+    let expected = normalized(instance_bin);
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Vec::new();
+    }
+    let mut terminated = Vec::new();
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+    while has_entry {
+        let pid = entry.th32ProcessID;
+        if pid != 0 && pid != std::process::id() {
+            let process = unsafe {
+                OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+                    0,
+                    pid,
+                )
+            };
+            if !process.is_null() {
+                let mut buffer = vec![0u16; 32_768];
+                let mut length = buffer.len() as u32;
+                let matches = unsafe {
+                    QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut length)
+                } != 0
+                    && normalized(Path::new(&String::from_utf16_lossy(
+                        &buffer[..length as usize],
+                    ))) == expected;
+                if matches && unsafe { TerminateProcess(process, 0) } != 0 {
+                    terminated.push(pid);
+                }
+                unsafe {
+                    CloseHandle(process);
+                }
+            }
+        }
+        has_entry = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+    }
+    unsafe {
+        CloseHandle(snapshot);
+    }
+    terminated
 }
 
 fn cmd_status() {
@@ -293,26 +397,21 @@ fn cmd_status() {
                 println!("  channels   {}", ids.join(", "));
             }
 
-            #[cfg(unix)]
-            {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build();
-                if let Ok(rt) = rt {
-                    match rt.block_on(crate::client::request_status()) {
-                        Some(st) => {
-                            println!(
-                                "  daemon     running pid={} version={} requests={}",
-                                st.pid, st.version, st.active_requests
-                            );
-                        }
-                        None => println!("  daemon     not running"),
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            if let Ok(rt) = rt {
+                match rt.block_on(crate::client::request_status()) {
+                    Some(st) => {
+                        println!(
+                            "  daemon     running pid={} version={} requests={}",
+                            st.pid, st.version, st.active_requests
+                        );
                     }
+                    None => println!("  daemon     not running"),
                 }
-            }
-            #[cfg(not(unix))]
-            {
-                println!("  daemon     (n/a on this platform)");
+            } else {
+                println!("  daemon     status unavailable");
             }
             exit(0);
         }

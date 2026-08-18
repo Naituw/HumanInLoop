@@ -55,7 +55,7 @@ EOF
 ## 4. 约束与既有规则（不可破坏）
 
 - **stdout 洁净**：stdout 仍只输出现有结果区块；`--stdin` 仅影响入参。
-- **daemon 协议不变**：unix 下 CLI 读完入参才组 `TaskRequest`，stdin 读取在此之前完成；daemon / GUI Helper 契约零改动。非 unix 单进程路径同样在 CLI 读 stdin 后组 `AskRequest`。
+- **daemon 协议不变**：macOS、Linux 与 Windows 的 CLI 都在读完 stdin 后才组 `TaskRequest`；daemon / GUI Helper 契约零改动。
 - **既有入参语义不变**：`<Message>` 位置参数、`-q` / `-o` / `-f` / `--no-markdown`、`--help` / `--version` / `--settings` / `--history` / `daemon` 子命令、退出码（0/1/3）全部保持。
 - 解析逻辑保持纯函数可单测（stdin 内容以参数注入）。
 

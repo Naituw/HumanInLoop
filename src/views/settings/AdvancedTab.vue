@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// 「高级」tab：Agent 生命周期追踪 / 守护进程生命周期 / IM 按需发送 / 从 IM 创建 Agent 任务
-// （仅 macOS）/ Codex 会话授权（仅 macOS/Linux）。
+// Advanced: Agent lifecycle, daemon lifecycle, on-demand IM delivery, Agent task launch, and
+// permission grants. Only the task-launch card is limited to platforms with a supported terminal.
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { useSettingsContext } from "./context";
@@ -9,7 +9,8 @@ import PermissionRulesCard from "./PermissionRulesCard.vue";
 const { t } = useI18n();
 const ctx = useSettingsContext();
 const {
-  isMac,
+  isWindows,
+  supportsAgentTasks,
   persist,
   LIFECYCLE_KINDS,
   lifecycleStatus,
@@ -186,8 +187,8 @@ const config = computed(() => ctx.config.value!);
     </div>
   </div>
 
-  <!-- 从 IM 创建 Agent 任务（仅 macOS；紧随「按需发送」，两者都是 IM 侧的主动能力） -->
-  <div v-if="isMac" class="card">
+  <!-- IM Agent task launch is available with Terminal.app or Windows Terminal. -->
+  <div v-if="supportsAgentTasks" class="card">
     <div class="row">
       <div class="col">
         <p class="card-title">{{ t("settings.agentTasks.title") }}</p>
@@ -219,7 +220,7 @@ const config = computed(() => ctx.config.value!);
       </p>
       <hr class="divider" />
       <div class="row">
-        <span class="label">Terminal.app</span>
+        <span class="label">{{ isWindows ? "Windows Terminal" : "Terminal.app" }}</span>
         <span class="spacer"></span>
         <button class="btn" type="button" @click="testAgentTaskTerminal">
           {{ t("settings.agentTasks.testTerminal") }}

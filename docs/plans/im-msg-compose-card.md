@@ -4,21 +4,21 @@
 > `/msg <内容>` 快捷发送语义。
 >
 > 状态：已实现。实际共享模型位于 `src-tauri/src/msg_card.rs`；四渠道发送、回调、TTL 与恢复编排
-> 集中在 `daemon/unix_impl/select.rs`。
+> 集中在 `daemon/runtime/select.rs`。
 
 ## M1 命令路由与状态模型
 
-1. `daemon/unix_impl/mod.rs`
+1. `daemon/runtime/mod.rs`
    - `PickerKind` 增 `MsgCompose`；`PickerEntry.payload` 用 JSON 保存目标 session id、过期时间与恢复态。
    - 更新 picker 注释、关停定格和穷尽 match；`MsgCompose` 不走通用 `send_agent_picker`。
    - 增加 `MsgComposeRecovery` 最小恢复台账，只保存 channel / message id / session id / expires_at；
      输入卡创建成功后落盘，任何终态后删除。
-2. `daemon/unix_impl/inbound.rs`
+2. `daemon/runtime/inbound.rs`
    - `(None, None)`：唯一关注目标可发送时直接 `send_msg_compose`；否则发 `PickerKind::Msg`、
      `payload=None` 的 Agent 选择卡。
    - `(Some(n), None)`：工作中非 Grok → `send_msg_compose`；idle → 现有 `msg_echo_text`；其它错误不变。
    - `(None, Some)` / `(Some, Some)` 保持现有快捷路径。
-3. `daemon/unix_impl/select.rs`
+3. `daemon/runtime/select.rs`
    - `PickerKind::Msg` 点选时按 payload 分流：`Some(content)` 继续现有立即发送；`None` 进入 compose。
    - 飞书 / Slack 可把选择卡就地改为输入卡；钉钉 / Telegram 先定格选择卡，再发送输入载体。
    - 提供 `take_msg_compose_picker(channel, message_id)`，有效提交原子消费，保证 first-submit-wins。
@@ -41,7 +41,7 @@
 ## M3 飞书
 
 - `feishu/card.rs`：增加消息输入卡 builder；正文安全转义，form 仅含多行 input + primary Send。
-- `daemon/unix_impl/select.rs`：在通用 select 回调前按消息 id + picker kind 识别 compose submit：
+- `daemon/runtime/select.rs`：在通用 select 回调前按消息 id + picker kind 识别 compose submit：
   - 无 / 超长输入：ACK 返回仍可编辑的错误卡；
   - 有效输入：原子消费台账、投递、ACK 返回一次性终态卡；
   - 重启恢复或 TTL 到期的 picker：ACK 返回“已过期、未发送”。

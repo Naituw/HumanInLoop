@@ -68,7 +68,7 @@ fn desired(target: AgentTarget, mode: Mode, spec: EventSpec) -> bool {
 }
 
 pub fn supported() -> bool {
-    cfg!(unix)
+    true
 }
 
 pub fn status(target: AgentTarget, mode: Mode) -> RecoveryStatus {
@@ -113,9 +113,10 @@ fn status_from_text(target: AgentTarget, mode: Mode, text: &str, trust_ok: bool)
             .cloned()
             .unwrap_or_default();
         for entry in entries {
-            let (command, timeout, matcher) = if spec.flat {
+            let (command, command_windows, timeout, matcher) = if spec.flat {
                 (
                     entry.get("command").and_then(Value::as_str),
+                    None,
                     entry.get("timeout").and_then(Value::as_u64),
                     None,
                 )
@@ -129,6 +130,9 @@ fn status_from_text(target: AgentTarget, mode: Mode, text: &str, trust_ok: bool)
                         .and_then(|handler| handler.get("command"))
                         .and_then(Value::as_str),
                     handler
+                        .and_then(|handler| handler.get("commandWindows"))
+                        .and_then(Value::as_str),
+                    handler
                         .and_then(|handler| handler.get("timeout"))
                         .and_then(Value::as_u64),
                     entry.get("matcher").and_then(Value::as_str),
@@ -140,7 +144,15 @@ fn status_from_text(target: AgentTarget, mode: Mode, text: &str, trust_ok: bool)
             marker_count += 1;
             if desired(target, mode, *spec) {
                 let expected = hook_command(target, spec.runtime_event).unwrap_or_default();
+                let expected_windows = (target == AgentTarget::Codex)
+                    .then(|| windows_hook_command(target, spec.runtime_event))
+                    .transpose()
+                    .unwrap_or_default();
+                let windows_override_ok = expected_windows
+                    .as_deref()
+                    .is_none_or(|expected_windows| command_windows == Some(expected_windows));
                 if command == Some(expected.as_str())
+                    && windows_override_ok
                     && timeout == Some(TIMEOUT_SECS)
                     && matcher == spec.matcher
                 {
@@ -217,6 +229,9 @@ fn reconcile_text(target: AgentTarget, mode: Mode, text: &str) -> Result<String>
     for spec in all_specs(target) {
         if desired(target, mode, *spec) {
             let command = hook_command(target, spec.runtime_event)?;
+            let command_windows = (target == AgentTarget::Codex)
+                .then(|| windows_hook_command(target, spec.runtime_event))
+                .transpose()?;
             updated = if spec.flat {
                 hook_edit::upsert_flat_handler(
                     &updated,
@@ -227,12 +242,13 @@ fn reconcile_text(target: AgentTarget, mode: Mode, text: &str) -> Result<String>
                     false,
                 )?
             } else {
-                hook_edit::upsert_nested_group_matched(
+                hook_edit::upsert_nested_group_matched_with_windows(
                     &updated,
                     spec.event,
                     MARKER,
                     spec.matcher,
                     &command,
+                    command_windows.as_deref(),
                     TIMEOUT_SECS,
                 )?
             };
@@ -267,6 +283,20 @@ fn hook_command(target: AgentTarget, event: &str) -> Result<String> {
     Ok(format!(
         "\"{}\" {MARKER} {agent} {event}",
         executable.to_string_lossy()
+    ))
+}
+
+fn windows_hook_command(target: AgentTarget, event: &str) -> Result<String> {
+    let executable = std::env::current_exe().context("failed to resolve current executable")?;
+    let agent = match target {
+        AgentTarget::ClaudeCode => "claude",
+        AgentTarget::Codex => "codex",
+        AgentTarget::Cursor => "cursor",
+        AgentTarget::Grok => "grok",
+    };
+    Ok(hook_edit::powershell_command(
+        &executable.to_string_lossy(),
+        &[MARKER, agent, event],
     ))
 }
 
