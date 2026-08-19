@@ -212,6 +212,37 @@ describe("IntegrationTab", () => {
     expect(row.find(".btn-update").exists()).toBe(false);
   });
 
+  it("renders lifecycle tracking as the final option in an active Agent card", () => {
+    const { wrapper } = mountAgent(
+      agentDefinition("claude", true),
+      modeStatus({
+        permission: {
+          supported: true,
+          unsupportedReason: null,
+          enabled: true,
+          configured: true,
+          outdated: false,
+          needsUpdate: false,
+          knownBlockedReason: null,
+          otherHandlersDetected: false,
+        },
+        askQuestion: {
+          supported: true,
+          enabled: true,
+          installed: true,
+          outdated: false,
+        },
+      }),
+    );
+    const labels = wrapper
+      .get("#integration-claude")
+      .findAll(".agent-row .label")
+      .map((label) => label.text());
+    expect(labels[labels.length - 1]).toBe(
+      i18n.global.t("settings.integration.lifecycleTitle"),
+    );
+  });
+
   it("prompts cleanup for legacy lifecycle in None mode", async () => {
     const lifecycle = {
       enabled: false,
