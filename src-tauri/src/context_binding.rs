@@ -393,10 +393,19 @@ fn consume_token_at(token_dir: &Path, token: &str, expected_tool: &str) -> Optio
         return None;
     }
     let path = token_path_at(token_dir, token)?;
-    let claimed = path.with_extension(format!("claim-{}", uuid::Uuid::new_v4()));
-    std::fs::rename(&path, &claimed).ok()?;
-    let result = std::fs::read(&claimed)
-        .ok()
+    let claimed = path.with_extension("claim");
+    // Windows can let concurrent renames of one source all succeed. CREATE_NEW is the portable
+    // exclusive operation here, so hold the claim file until the token path has been removed.
+    let claim_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&claimed)
+        .ok()?;
+    let bytes = std::fs::read(&path).ok();
+    let _ = std::fs::remove_file(&path);
+    drop(claim_file);
+    let _ = std::fs::remove_file(&claimed);
+    let result = bytes
         .and_then(|bytes| serde_json::from_slice::<TokenRecord>(&bytes).ok())
         .filter(|record| {
             record.expires_at_ms >= crate::history::now_ms()
@@ -408,7 +417,6 @@ fn consume_token_at(token_dir: &Path, token: &str, expected_tool: &str) -> Optio
             agent_kind: record.agent_kind,
             session_id: record.session_id,
         });
-    let _ = std::fs::remove_file(claimed);
     cleanup_expired_at(token_dir);
     result
 }
@@ -429,11 +437,22 @@ fn cleanup_expired_at(token_dir: &Path) {
     };
     for entry in entries.flatten().take(256) {
         let path = entry.path();
-        let expired = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<TokenRecord>(&bytes).ok())
-            .map(|record| record.expires_at_ms < now)
-            .unwrap_or(true);
+        let extension = path.extension().and_then(|value| value.to_str());
+        let expired = if extension == Some("json") {
+            std::fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<TokenRecord>(&bytes).ok())
+                .map(|record| record.expires_at_ms < now)
+                .unwrap_or(true)
+        } else if extension.is_some_and(|value| value == "claim" || value.starts_with("claim-")) {
+            std::fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age.as_millis() > TOKEN_TTL_MS as u128)
+        } else {
+            false
+        };
         if expired {
             let _ = std::fs::remove_file(path);
         }
@@ -506,21 +525,24 @@ mod tests {
     #[test]
     fn concurrent_token_consumers_have_exactly_one_winner() {
         let dir = tempfile::tempdir().unwrap();
-        let token = create_token_at(dir.path(), "claude", "session", "ask").unwrap();
-        let token_dir = dir.path().to_path_buf();
-        let handles: Vec<_> = (0..8)
-            .map(|_| {
-                let token_dir = token_dir.clone();
-                let token = token.clone();
-                std::thread::spawn(move || consume_token_at(&token_dir, &token, "ask"))
-            })
-            .collect();
-        let winners: Vec<_> = handles
-            .into_iter()
-            .filter_map(|handle| handle.join().unwrap())
-            .collect();
-        assert_eq!(winners.len(), 1);
-        assert_eq!(winners[0].session_id, "session");
+        for round in 0..32 {
+            let token = create_token_at(dir.path(), "claude", "session", "ask").unwrap();
+            let token_dir = dir.path().to_path_buf();
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let token_dir = token_dir.clone();
+                    let token = token.clone();
+                    std::thread::spawn(move || consume_token_at(&token_dir, &token, "ask"))
+                })
+                .collect();
+            let winners: Vec<_> = handles
+                .into_iter()
+                .filter_map(|handle| handle.join().unwrap())
+                .collect();
+            assert_eq!(winners.len(), 1, "round {round}");
+            assert_eq!(winners[0].session_id, "session");
+        }
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
     #[test]
