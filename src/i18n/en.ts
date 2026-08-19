@@ -208,6 +208,7 @@ export default {
       codex: "Codex",
       cursor: "Cursor",
       grok: "Grok",
+      pi: "Pi",
       unsupported: "Not supported on this platform",
       outdated: "Needs update — toggle off then on to refresh.",
       verticalQuestionsTitle: "Show multiple questions vertically",

@@ -199,6 +199,7 @@ export default {
       codex: "Codex",
       cursor: "Cursor",
       grok: "Grok",
+      pi: "Pi",
       unsupported: "当前平台不支持",
       outdated: "需要更新——请先关闭再开启以刷新。",
       verticalQuestionsTitle: "多问题纵向同时显示",
