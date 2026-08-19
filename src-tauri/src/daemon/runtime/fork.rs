@@ -198,6 +198,18 @@ pub(super) async fn start_fork_source(
             .unwrap_or_default()
             .to_string(),
     };
+    if kind == AgentKind::Pi {
+        start_fork_input(
+            state,
+            channel_id,
+            payload,
+            crate::integrations::agent_launch::LaunchPermission::AgentDefault,
+            config,
+            lang,
+        )
+        .await;
+        return;
+    }
     match config.agent_tasks.permission_prompt {
         crate::config::AgentTaskPermission::Ask => {
             let _ = send_agent_picker(

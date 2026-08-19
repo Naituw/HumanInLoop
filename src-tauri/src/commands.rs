@@ -1804,7 +1804,7 @@ pub fn new_task_projects() -> Vec<NewTaskProject> {
     build_new_task_projects(crate::agents::workspaces::list(), todo_project_keys())
 }
 
-/// 项目候选（含四家有界冷扫描合并，与 IM `/new` 的 `workspaces::refresh()` 同源）。
+/// 项目候选（含五家有界冷扫描合并，与 IM `/new` 的 `workspaces::refresh()` 同源）。
 /// 前端首屏后后台调用，完成后无感刷新下拉。
 #[tauri::command]
 pub async fn new_task_projects_refreshed() -> Vec<NewTaskProject> {
@@ -2119,6 +2119,7 @@ pub fn collaboration_style_apply_integrations() -> Result<(), String> {
         AgentTarget::ClaudeCode,
         AgentTarget::Codex,
         AgentTarget::Grok,
+        AgentTarget::Pi,
     ] {
         let mode = agent_mode::current(target);
         if mode == Mode::None {
@@ -2506,9 +2507,16 @@ pub struct AgentModeStatus {
     stop: agent_stop::StopStatus,
     /// Claude question takeover preference (spec claude-ask-user-question D3).
     ask_question: agent_ask_question::AskQuestionStatus,
+    /// Whether automatic MCP configuration exists for this Agent.
+    mcp_supported: bool,
     /// MCP 配置文件展示路径。
     mcp_config_path: String,
     mcp_config_installed: bool,
+    /// Runtime file terminology and Pi compatibility diagnostics for the settings card.
+    runtime_artifact_kind: String,
+    agent_version: Option<String>,
+    minimum_version: Option<String>,
+    version_supported: bool,
 }
 
 #[tauri::command]
@@ -2521,6 +2529,9 @@ pub fn agent_mode_status(agent: String) -> Result<AgentModeStatus, String> {
     let permission = agent_permission::status(a);
     let recovery = agent_context_recovery::status(a, mode);
     let permission_needs_update = permission.needs_update;
+    let pi_readiness = (stop_kind == crate::agents::AgentKind::Pi)
+        .then(|| crate::integrations::agent_launch::readiness(stop_kind));
+    let mcp_supported = mcp_config::supported(a);
     Ok(AgentModeStatus {
         mode: mode.as_str().to_string(),
         needs_update: updates.rule || updates.hook || updates.mcp,
@@ -2539,8 +2550,26 @@ pub fn agent_mode_status(agent: String) -> Result<AgentModeStatus, String> {
         permission_needs_update,
         stop: agent_stop::status(stop_kind),
         ask_question: agent_ask_question::status(stop_kind),
-        mcp_config_path: mcp_config::display_path(a),
+        mcp_supported,
+        mcp_config_path: if mcp_supported {
+            mcp_config::display_path(a)
+        } else {
+            String::new()
+        },
         mcp_config_installed: mcp_config::is_installed(a),
+        runtime_artifact_kind: if stop_kind == crate::agents::AgentKind::Pi {
+            "extension"
+        } else {
+            "hook"
+        }
+        .to_string(),
+        agent_version: pi_readiness
+            .as_ref()
+            .and_then(|readiness| readiness.version.clone()),
+        minimum_version: pi_readiness.as_ref().map(|_| "0.82.0".to_string()),
+        version_supported: pi_readiness
+            .as_ref()
+            .is_none_or(|readiness| readiness.binary_ready),
     })
 }
 

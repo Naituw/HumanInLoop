@@ -244,6 +244,18 @@ fn scan_recent() -> Vec<(PathBuf, AgentKind, u64)> {
         },
     );
     scan_grok(&mut out);
+    scan_jsonl(
+        &paths::pi_sessions_dir(),
+        AgentKind::Pi,
+        &mut out,
+        |value| {
+            (value.get("type").and_then(Value::as_str) == Some("session")
+                && value.get("version").and_then(Value::as_u64) == Some(3))
+            .then(|| value.get("cwd").and_then(Value::as_str))
+            .flatten()
+            .map(PathBuf::from)
+        },
+    );
     scan_cursor(&mut out);
     out
 }

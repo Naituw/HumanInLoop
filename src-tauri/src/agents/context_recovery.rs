@@ -33,6 +33,7 @@ fn mode(kind: AgentKind) -> Mode {
         AgentKind::Codex => crate::integrations::agent_rules::AgentTarget::Codex,
         AgentKind::Cursor => crate::integrations::agent_rules::AgentTarget::Cursor,
         AgentKind::Grok => crate::integrations::agent_rules::AgentTarget::Grok,
+        AgentKind::Pi => crate::integrations::agent_rules::AgentTarget::Pi,
     })
 }
 
@@ -114,6 +115,8 @@ fn pre_tool_output_for_mode(
             );
             None
         }
+        // Pi recovery is injected by the managed extension's `before_agent_start` handler.
+        AgentKind::Pi => None,
         AgentKind::Codex => None,
     }
 }
@@ -149,7 +152,7 @@ fn askhuman_tool_name(kind: AgentKind, raw: &str) -> Option<&'static str> {
         AgentKind::Claude => "mcp__askhuman__",
         AgentKind::Cursor => "MCP:",
         AgentKind::Grok => "askhuman__",
-        AgentKind::Codex => return None,
+        AgentKind::Codex | AgentKind::Pi => return None,
     };
     let name = raw.strip_prefix(prefix)?;
     match name {

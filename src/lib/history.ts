@@ -18,6 +18,7 @@ const SOURCE_TO_KIND: Record<string, string> = {
   codex: "codex",
   cursor: "cursor",
   grok: "grok",
+  pi: "pi",
 };
 
 /**

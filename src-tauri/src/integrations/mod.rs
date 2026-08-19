@@ -14,4 +14,5 @@ pub mod hook_edit;
 pub mod login_item;
 pub mod mcp_config;
 pub mod mutation_lock;
+pub mod pi_extension;
 pub mod terminal_focus;

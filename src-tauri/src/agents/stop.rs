@@ -154,6 +154,13 @@ fn is_natural_stop(kind: AgentKind, input: &Value) -> bool {
             .and_then(Value::as_str)
             .is_some_and(|event| event.eq_ignore_ascii_case("stop")),
         AgentKind::Grok => false,
+        AgentKind::Pi => {
+            input.get("stop_reason").and_then(Value::as_str) == Some("stop")
+                && input
+                    .get("hook_event_name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|event| event.eq_ignore_ascii_case("stop"))
+        }
     }
 }
 
@@ -190,6 +197,12 @@ fn last_assistant_message(kind: AgentKind, input: &Value) -> LastAssistantMessag
             .map(str::to_string),
         AgentKind::Cursor => cursor_last_message(input),
         AgentKind::Grok => None,
+        AgentKind::Pi => input
+            .get("last_assistant_message")
+            .or_else(|| input.get("lastAssistantMessage"))
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_string),
     };
     normalize_last_assistant_message(raw.as_deref())
 }
@@ -393,6 +406,7 @@ fn continuation_output(kind: AgentKind, prompt: &str) -> Value {
             json!({ "decision": "block", "reason": prompt })
         }
         AgentKind::Grok => json!({}),
+        AgentKind::Pi => json!({ "followup_message": prompt }),
     }
 }
 
@@ -427,6 +441,14 @@ mod tests {
             &json!({"hook_event_name":"StopFailure"})
         ));
         assert!(!is_natural_stop(AgentKind::Codex, &json!({})));
+        assert!(is_natural_stop(
+            AgentKind::Pi,
+            &json!({"hook_event_name":"Stop","stop_reason":"stop"})
+        ));
+        assert!(!is_natural_stop(
+            AgentKind::Pi,
+            &json!({"hook_event_name":"Stop","stop_reason":"error"})
+        ));
     }
 
     #[test]
@@ -465,7 +487,12 @@ mod tests {
                 None
             );
         }
-        for kind in [AgentKind::Claude, AgentKind::Cursor, AgentKind::Grok] {
+        for kind in [
+            AgentKind::Claude,
+            AgentKind::Cursor,
+            AgentKind::Grok,
+            AgentKind::Pi,
+        ] {
             assert_eq!(
                 confirmation_suppression_reason(
                     kind,
@@ -589,6 +616,8 @@ mod tests {
         assert_eq!(codex["decision"], "block");
         let cursor = continuation_output(AgentKind::Cursor, "continue");
         assert_eq!(cursor["followup_message"], "continue");
+        let pi = continuation_output(AgentKind::Pi, "continue");
+        assert_eq!(pi["followup_message"], "continue");
     }
 
     #[test]
@@ -622,7 +651,7 @@ mod tests {
     #[test]
     fn confirmed_end_turn_marker_matches_any_substring_occurrence_and_is_stripped() {
         let marker = crate::prompts::USER_CONFIRMED_END_TURN_MARKER;
-        for kind in [AgentKind::Claude, AgentKind::Codex] {
+        for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Pi] {
             let confirmed = last_assistant_message(
                 kind,
                 &json!({"last_assistant_message": format!("final report\n{marker}\n")}),

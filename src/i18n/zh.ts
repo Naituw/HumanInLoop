@@ -337,6 +337,7 @@ export default {
       rulesLabel: "Rules",
       skillLabel: "Skill",
       hookLabel: "超时 Hook",
+      extensionLabel: "Pi Extension",
       mcpConfigLabel: "MCP 配置",
       reveal: "定位",
       openFile: "打开",
@@ -346,6 +347,12 @@ export default {
       openFileAction: "打开文件",
       installRule: "安装规则",
       hookShort: "检测到调用 AskHuman 时自动把超时延长到 24 小时，避免长时间等待被取消。",
+      piExtensionHint:
+        "安装一个由 AskHuman 管理的 Pi Extension，统一处理超时、生命周期追踪、压缩恢复、插话投递与结束前确认。",
+      piVersionUnsupported:
+        "当前 Pi 版本 {version} 不受支持；AskHuman 要求 Pi {minimum} 或更高版本。",
+      piVersionMissing:
+        "未找到 Pi，或无法识别其版本；AskHuman 要求 Pi {minimum} 或更高版本。",
       cursorRulesHint:
         "需项目位于用户主目录（~）之下才会全局生效；其它位置请在 Cursor 设置 → Rules 手动配置。",
       grokSkillHint:
@@ -372,6 +379,8 @@ export default {
       stopCoexist:
         "检测到其它可见的 Stop handler；它们会并发执行，并可能独立决定继续或结束 Agent。",
       permissionUnsupported: "该 Agent 不支持原生 PermissionRequest 审批闭环。",
+      piPermissionUnsupported:
+        "Pi 不提供内置权限模式，因此 AskHuman 不会附加权限覆盖参数。请通过容器、沙箱或自定义 Extension 管理安全边界。",
       permissionClaudeHint:
         "将 Claude Code 权限请求交给 AskHuman。项目、managed、插件、skill 或 agent 的其它 Hook 仍可能影响最终决定；可在当前 Claude 会话使用 /hooks 查看实际来源。",
       permissionCodexHint:
@@ -680,6 +689,7 @@ export default {
       codex: "Codex",
       cursor: "Cursor",
       grok: "Grok",
+      pi: "Pi",
     },
     field: {
       session: "会话",
@@ -836,6 +846,8 @@ export default {
     readyLifecycle: "Lifecycle",
     readyIntegration: "集成",
     permissionLabel: "权限模式",
+    piPermissionHint:
+      "Pi 没有内置权限模式。AskHuman 将按 Pi 默认行为启动；如需隔离，请使用容器、沙箱或自定义 Extension。",
     permissionAgentDefault: "Agent 默认",
     permissionAgentDefaultDesc: "不附加权限覆盖参数",
     permissionYolo: "YOLO",

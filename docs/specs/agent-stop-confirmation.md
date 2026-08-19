@@ -4,6 +4,11 @@
 >
 > 调研基线（2026-07-12）：Claude Code 2.1.205、Codex CLI 0.144.1、
 > Cursor CLI 2026.06.26-7079533、Grok CLI 0.2.93。
+>
+> **Pi 补充（2026-08-19）**：Pi >=0.82.0 通过受管 Extension 的 `agent_end` + `agent_settled`
+> 识别自然 `stop`，默认开启结束确认；继续时在同一 session 空闲且无排队消息后调用
+> `pi.sendUserMessage`。错误、取消、过期裁决和 session/generation 不匹配均 fail-open。Pi 没有 MCP
+> mode，preference 仅在 CLI mode 激活；完整设计见 `docs/plans/pi-agent-integration.md`。
 
 ## 1. 背景与目标
 
@@ -26,8 +31,9 @@
 | Codex | `Stop`，输入含 `last_assistant_message`、`stop_hook_active` | 返回 `decision: "block"` + `reason`，自动创建 continuation prompt | 无 `StopFailure`；错误/中断在 `Stop` 前返回 | 支持自然完成 |
 | Cursor | `stop`，输入含 `status`、`loop_count`，通用字段含 `transcript_path` | 返回 `followup_message`；`loop_limit: null` 可取消次数上限 | Hook 会收到 `aborted/error`，但 `followup_message` 仅在 `completed` 时消费 | 支持自然完成 |
 | Grok | `Stop` 是被动事件 | stdout 被忽略；只有 `PreToolUse` 可阻塞 | `StopFailure` 同样被动 | 首期明确不支持 |
+| Pi | Extension `agent_end` + `agent_settled` | `pi.sendUserMessage` | 只接受 `stopReason="stop"`；其它原因放行 | 支持自然完成 |
 
-因此首期只在 **Claude Code / Codex / Cursor 的自然完成**时发确认卡。
+当前在 **Claude Code / Codex / Cursor / Pi 的自然完成**时发确认卡。
 错误和用户取消不发卡、不尝试外部 `resume`。三家错误路径继续沿用现有生命周期管理：
 
 - Claude `StopFailure → turn-end`，立即置空闲；
@@ -48,7 +54,7 @@
 
 ### 3.1 开关与支持范围
 
-- Claude Code / Codex / Cursor 各自一个“结束时确认”开关，默认关闭。
+- Claude Code / Codex / Cursor 各自一个“结束时确认”开关且默认关闭；Pi 同样有独立开关，默认开启。
 - preference 在产品语义上独立于“生命周期追踪”和“权限审批”，并跨 integration mode 切换保留；
   但 active confirmation 只在 CLI/MCP mode 安装，None 下暂停并隐藏，重新集成时按原 preference 恢复。
 - Grok 显示不支持或不展示开关，不安装 Stop 确认 Hook。

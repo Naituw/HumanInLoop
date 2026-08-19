@@ -44,12 +44,14 @@ impl Mode {
 
 // MARK: - 超时 Hook 分派（Codex 无超时 Hook）
 
-/// 该 Agent 是否有「超时 Hook」概念（Codex / Grok 没有）。
+/// Whether this agent has a managed timeout runtime artifact. Pi uses an Extension rather than a
+/// native hook, but keeps this compatibility surface while the UI wire format is migrated.
 pub fn timeout_hook_supported(target: AgentTarget) -> bool {
     match target {
         AgentTarget::Cursor => cursor_hook::supported(),
         AgentTarget::ClaudeCode => claude_hook::supported(),
         AgentTarget::Codex | AgentTarget::Grok => false,
+        AgentTarget::Pi => true,
     }
 }
 
@@ -59,6 +61,7 @@ pub fn timeout_hook_is_installed(target: AgentTarget) -> bool {
         AgentTarget::Cursor => cursor_hook::is_installed(),
         AgentTarget::ClaudeCode => claude_hook::is_installed(),
         AgentTarget::Codex | AgentTarget::Grok => false,
+        AgentTarget::Pi => super::pi_extension::status().cli,
     }
 }
 
@@ -68,6 +71,10 @@ pub fn timeout_hook_needs_update(target: AgentTarget) -> bool {
         AgentTarget::Cursor => cursor_hook::needs_update(),
         AgentTarget::ClaudeCode => claude_hook::needs_update(),
         AgentTarget::Codex | AgentTarget::Grok => false,
+        AgentTarget::Pi => {
+            let status = super::pi_extension::status();
+            status.cli && status.outdated
+        }
     }
 }
 
@@ -76,6 +83,7 @@ fn timeout_hook_install(target: AgentTarget) -> Result<()> {
         AgentTarget::Cursor => cursor_hook::install().map(|_| ()),
         AgentTarget::ClaudeCode => claude_hook::install().map(|_| ()),
         AgentTarget::Codex | AgentTarget::Grok => Ok(()),
+        AgentTarget::Pi => super::pi_extension::set_cli_enabled(true),
     }
 }
 
@@ -84,6 +92,7 @@ fn timeout_hook_uninstall(target: AgentTarget) -> Result<()> {
         AgentTarget::Cursor => cursor_hook::uninstall().map(|_| ()),
         AgentTarget::ClaudeCode => claude_hook::uninstall().map(|_| ()),
         AgentTarget::Codex | AgentTarget::Grok => Ok(()),
+        AgentTarget::Pi => super::pi_extension::set_cli_enabled(false),
     }
 }
 
@@ -93,6 +102,7 @@ pub fn timeout_hook_reveal(target: AgentTarget) {
         AgentTarget::Cursor => cursor_hook::reveal(),
         AgentTarget::ClaudeCode => claude_hook::reveal(),
         AgentTarget::Codex | AgentTarget::Grok => {}
+        AgentTarget::Pi => super::pi_extension::reveal(),
     }
 }
 
@@ -102,6 +112,7 @@ pub fn timeout_hook_open(target: AgentTarget) {
         AgentTarget::Cursor => cursor_hook::open(),
         AgentTarget::ClaudeCode => claude_hook::open(),
         AgentTarget::Codex | AgentTarget::Grok => {}
+        AgentTarget::Pi => super::pi_extension::open(),
     }
 }
 
@@ -242,6 +253,9 @@ pub fn set(target: AgentTarget, mode: Mode) -> Result<()> {
             "Grok only supports None | Mcp (no CLI mode)"
         ));
     }
+    if target == AgentTarget::Pi && mode == Mode::Mcp {
+        return Err(anyhow::anyhow!("Pi only supports None | Cli (no MCP mode)"));
+    }
     let _lock = mutation_lock::IntegrationMutationLock::acquire()?;
     set_unlocked(target, mode)
 }
@@ -339,6 +353,7 @@ fn stop_kind(target: AgentTarget) -> crate::agents::AgentKind {
         AgentTarget::ClaudeCode => crate::agents::AgentKind::Claude,
         AgentTarget::Codex => crate::agents::AgentKind::Codex,
         AgentTarget::Grok => crate::agents::AgentKind::Grok,
+        AgentTarget::Pi => crate::agents::AgentKind::Pi,
     }
 }
 
@@ -376,6 +391,7 @@ mod tests {
             crate::agents::AgentKind::Codex
         );
         assert_eq!(stop_kind(AgentTarget::Grok), crate::agents::AgentKind::Grok);
+        assert_eq!(stop_kind(AgentTarget::Pi), crate::agents::AgentKind::Pi);
     }
 
     #[test]

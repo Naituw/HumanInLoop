@@ -194,6 +194,7 @@ async function openIssue(
 /** ask 模式下的用户选择（不预选，IM D19 同语义）；固定模式下忽略。 */
 const permissionChoice = ref<"agent-default" | "yolo" | null>(null);
 const effectivePermission = computed<"agent-default" | "yolo" | null>(() => {
+  if (selectedKind.value === "pi") return "agent-default";
   if (permissionPrompt.value === "agent-default") return "agent-default";
   if (permissionPrompt.value === "yolo") return "yolo";
   return permissionChoice.value;
@@ -512,7 +513,7 @@ onBeforeUnmount(() => {
           </p>
         </section>
 
-        <!-- Agent：四家全列（G5） -->
+        <!-- Agent：五家全列（G5 + Pi） -->
         <section class="nt-section">
           <span class="nt-label">{{ t("newTask.agentLabel") }}</span>
           <div v-if="readiness === null" class="nt-agent-loading">
@@ -570,9 +571,11 @@ onBeforeUnmount(() => {
         </section>
 
         <LaunchPermission
+          v-if="selectedKind !== 'pi'"
           v-model="permissionChoice"
           :permission-prompt="permissionPrompt"
         />
+        <p v-else class="nt-sublabel">{{ t("newTask.piPermissionHint") }}</p>
       </template>
     </div>
 
@@ -816,7 +819,7 @@ onBeforeUnmount(() => {
   outline: none;
   box-shadow: var(--focus-ring), var(--clickable-shadow);
 }
-/* Agent 区（G5）：四家全列；未就绪灰显 + 原因链接。 */
+/* Agent 区（G5）：五家全列；未就绪灰显 + 原因链接。 */
 .nt-agent-loading {
   display: flex;
   align-items: center;

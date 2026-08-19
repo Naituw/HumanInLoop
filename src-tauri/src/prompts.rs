@@ -236,9 +236,9 @@ pub fn stop_continue_prompt(kind: crate::agents::AgentKind, instruction: Option<
     match instruction.map(str::trim).filter(|text| !text.is_empty()) {
         Some(message) => match kind {
             // Cursor/Codex consume the text as a user message / user prompt — no meta wrapper.
-            crate::agents::AgentKind::Cursor | crate::agents::AgentKind::Codex => {
-                message.to_string()
-            }
+            crate::agents::AgentKind::Cursor
+            | crate::agents::AgentKind::Codex
+            | crate::agents::AgentKind::Pi => message.to_string(),
             // Claude (and unsupported Grok fallback): reason = why stop was blocked.
             crate::agents::AgentKind::Claude | crate::agents::AgentKind::Grok => {
                 stop_continue_wrapped_instruction(message)

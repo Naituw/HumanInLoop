@@ -15,12 +15,13 @@ import {
 import type { AgentKind, AgentTaskReadiness, AgentTaskWorkspace } from "../../lib/types";
 import type { SettingsCore } from "./context";
 
-/** 四家 Agent 官方安装文档（readiness「CLI ×」跳转；新建任务窗口复用）。 */
+/** Agent 官方安装文档（readiness「CLI ×」跳转；新建任务窗口复用）。 */
 export const AGENT_INSTALL_DOCS: Record<AgentKind, string> = {
   claude: "https://docs.anthropic.com/en/docs/claude-code/getting-started",
   codex: "https://developers.openai.com/codex/cli/",
   cursor: "https://cursor.com/docs/cli/installation",
   grok: "https://docs.x.ai/build/overview",
+  pi: "https://github.com/earendil-works/pi",
 };
 
 export function useAgentTasks(core: SettingsCore) {
@@ -114,7 +115,7 @@ export function useAgentTasks(core: SettingsCore) {
     workspaceMenuPath.value = null;
     taskSettingsMessage.value = "";
     workspacePanelOpen.value = true;
-    // 冷扫描只在真正管理工作目录时做（onMounted 不扫）：扫描要读四家 Agent 的会话元数据，
+    // 冷扫描只在真正管理工作目录时做（onMounted 不扫）：扫描要读五家 Agent 的会话元数据，
     // 打开设置页就扫既浪费也曾连环触发 macOS 文件权限弹窗。
     void refreshAgentTaskSettings(true);
   }
@@ -135,6 +136,7 @@ export function useAgentTasks(core: SettingsCore) {
       codex: "Codex",
       cursor: "Cursor",
       grok: "Grok",
+      pi: "Pi",
     };
     return workspace.agents.map((kind) => labels[kind]).join(" · ");
   }

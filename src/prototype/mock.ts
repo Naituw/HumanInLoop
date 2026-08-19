@@ -2,7 +2,7 @@
 // 数据形状对齐 spec gui-agent-console：registry 快照 + WatchFrame 的合体（原型简化版）。
 
 export type RunState = "working" | "idle" | "ended";
-export type Kind = "claude" | "codex" | "cursor" | "grok";
+export type Kind = "claude" | "codex" | "cursor" | "grok" | "pi";
 export type StepState = "running" | "done" | "failed";
 export type TodoState = "pending" | "inProgress" | "completed";
 
@@ -60,6 +60,7 @@ export const KIND_LABEL: Record<Kind, string> = {
   codex: "Codex",
   cursor: "Cursor",
   grok: "Grok",
+  pi: "Pi",
 };
 
 const now = () => Math.floor(Date.now() / 1000);

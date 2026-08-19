@@ -40,6 +40,8 @@ struct Preferences {
     codex: Option<bool>,
     #[serde(default)]
     cursor: Option<bool>,
+    #[serde(default)]
+    pi: Option<bool>,
 }
 
 pub fn supported(kind: AgentKind) -> bool {
@@ -56,6 +58,7 @@ pub fn enabled(kind: AgentKind) -> bool {
         AgentKind::Codex => preferences.codex.unwrap_or(false),
         AgentKind::Cursor => preferences.cursor.unwrap_or(false),
         AgentKind::Grok => false,
+        AgentKind::Pi => preferences.pi.unwrap_or(true),
     }
 }
 
@@ -71,6 +74,7 @@ pub fn set_enabled(kind: AgentKind, value: bool) -> Result<()> {
         AgentKind::Codex => preferences.codex = Some(value),
         AgentKind::Cursor => preferences.cursor = Some(value),
         AgentKind::Grok => unreachable!(),
+        AgentKind::Pi => preferences.pi = Some(value),
     }
     save_preferences(&preferences)?;
     if let Err(error) = reconcile_current_mode_unlocked(kind) {
@@ -101,6 +105,21 @@ pub fn status(kind: AgentKind) -> StopStatus {
             enabled: false,
             installed: false,
             outdated: false,
+            other_handlers_detected: false,
+        };
+    }
+    if kind == AgentKind::Pi {
+        let preference_enabled = enabled(kind);
+        let active = confirmation_active(
+            preference_enabled,
+            super::agent_mode::current(target_for_kind(kind)),
+        );
+        let extension = super::pi_extension::status();
+        return StopStatus {
+            supported: true,
+            enabled: preference_enabled,
+            installed: extension.stop,
+            outdated: extension.stop != active || (active && extension.outdated),
             other_handlers_detected: false,
         };
     }
@@ -183,6 +202,9 @@ pub(crate) fn reconcile_unlocked(kind: AgentKind, mode: super::agent_mode::Mode)
     if !supported(kind) {
         return Ok(());
     }
+    if kind == AgentKind::Pi {
+        return super::pi_extension::set_stop_enabled(active_in_mode(kind, mode));
+    }
     let track = super::agent_lifecycle::tracking_installed(kind);
     let confirm = active_in_mode(kind, mode);
     if track || confirm {
@@ -200,7 +222,12 @@ pub(crate) fn reconcile_current_mode_unlocked(kind: AgentKind) -> Result<()> {
 
 pub fn migrate_outdated() -> Vec<AgentKind> {
     let mut migrated = Vec::new();
-    for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Cursor] {
+    for kind in [
+        AgentKind::Claude,
+        AgentKind::Codex,
+        AgentKind::Cursor,
+        AgentKind::Pi,
+    ] {
         let state = status(kind);
         if state.outdated {
             if let Ok(_lock) = super::mutation_lock::IntegrationMutationLock::acquire() {
@@ -219,6 +246,7 @@ fn target_for_kind(kind: AgentKind) -> super::agent_rules::AgentTarget {
         AgentKind::Codex => super::agent_rules::AgentTarget::Codex,
         AgentKind::Cursor => super::agent_rules::AgentTarget::Cursor,
         AgentKind::Grok => super::agent_rules::AgentTarget::Grok,
+        AgentKind::Pi => super::agent_rules::AgentTarget::Pi,
     }
 }
 
@@ -368,6 +396,7 @@ fn hook_path(kind: AgentKind) -> std::path::PathBuf {
         AgentKind::Codex => crate::paths::codex_hooks_json(),
         AgentKind::Cursor => crate::paths::cursor_hooks_json(),
         AgentKind::Grok => crate::paths::config_dir().join("unsupported-stop-hooks.json"),
+        AgentKind::Pi => crate::paths::pi_extension_file(),
     }
 }
 
@@ -435,6 +464,7 @@ mod tests {
         assert!(supported(AgentKind::Claude));
         assert!(supported(AgentKind::Codex));
         assert!(supported(AgentKind::Cursor));
+        assert!(supported(AgentKind::Pi));
         assert!(!supported(AgentKind::Grok));
     }
 

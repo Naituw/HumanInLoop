@@ -36,7 +36,7 @@
 | C6 | 视图维度 | **移除**现有「状态 / 类型 / 项目」三维切换：固定按项目分组，顶部加「全部 / 工作中 / 空闲」过滤，会话行带家族标识 |
 | C7 | 等待回答（Waiting） | 纳入设计：边栏会话行显示 🙋 态；详情区顶部横幅「正在等待你的回答」+「去回答」按钮聚焦待答弹窗（复用托盘同款能力）。daemon 推给 GUI 的快照需补 waiting 标志（数据源 `RequestRegistry` 已有） |
 | C8 | 数据链路 | agents GUI 订阅协议新增**「焦点会话」子订阅**：窗口告知 daemon 当前选中的 session，daemon 复用 IM Watch 引擎（事件 Notify + 2s/10s tick + 签名门控）推结构化帧。**不占** IM watch 每渠道 5 个名额、**不持久化**、切换选中 / 关窗即停。刷新粒度与 IM 相同（变化驱动的最新一帧，非 token 级） |
-| C9 | 插话可用性 | 输入框仅对**工作中且非 Grok**的会话显示（与现有插话约束一致）；空闲 / 已结束显示灰色提示，macOS 与 Windows 上空闲会话可附「在此项目新建任务」快捷入口 |
+| C9 | 插话可用性 | 输入框仅对**工作中且非 Grok**的会话显示（包括 Pi Extension 会话，与现有插话约束一致）；空闲 / 已结束显示灰色提示，macOS 与 Windows 上空闲会话可附「在此项目新建任务」快捷入口 |
 | C10 | 现有入口调整 | 卡片「发消息」按钮（原弹独立 composer 窗口）改为：选中该会话 + 聚焦底部输入框；**托盘的插话入口暂保留**独立 composer 窗口，后续再议 |
 | C11 | Dev 环境 | 本功能在独立 worktree（`feat/gui-agent-console`）+ popup-only Dev Instance 开发，不挂 IM 测试渠道 |
 | C12 | 前瞻预留 | 为未来「提问收进控制台内联作答」的设想预留 5 个结构点（R1–R5，见 §5），**只选形状、不写功能代码**；弹窗集成本身未定案、不在本 spec 范围 |
@@ -44,7 +44,7 @@
 | C14 | 完整会话视图（原型定稿 2026-07-25） | 详情区默认「最近动态」，标题行右侧按钮切「完整会话」（同位置变「返回」；切换会话自动回默认）；进入即定位最新，**每页 200 条向上分页**（顶部按钮加载更早，滚动位置锚定），标题行 sticky 显示已加载/总数；渲染：用户消息＝蓝底气泡、助手文字＝Markdown、工具调用＝足迹同款紧凑行；助手文字与 AskHuman message 的显式 Mermaid fence 安全渲染，每个 body 最多 10 图，并用 IntersectionObserver 调度可见区附近内容；图表异步变高时保持底部跟随或旧内容阅读锚点。**AskHuman 为一等问答卡**（🙋 徽标＋提问＋蓝底「你」的回答；未回答显示占位）；多问题＝message 下 Q1/Q2/Qn 子块各带回答；长 message 4 行截断＋展开全文/收起。实现须把 `transcript_full::AskHumanBlock` 扩展为结构化 `{kind, message, questions[{text, answer}]}`（MCP `ask` 读 `questions` 参数；MCP `whats_next` 与 CLI `--whats-next` 标为独立 kind，由前端按界面语言显示固定问题「接下来做什么？」；两种 MCP 工具都从 Codex content block 解出与 CLI 相同的文本区块，答案按 `# Qn` 分组回填；普通 CLI 解析 `-q`），daemon 侧按游标分页 |
 | C15 | 项目 diff 状态条 + stage（原型定稿 2026-07-25） | 输入框上方一条**项目级**「未暂存变更」状态条（文件数/新增数/±行数；无变更不显示）；展开＝文件列表（M/A/D 徽标＋每文件 ±行数＋行内「暂存」），再点单文件展开 hunk 视图（红绿底色、面板内滚动 ≤300px）；**单文件暂存直接执行、「全部暂存」行内二次确认**——GUI 点按钮已是明确意图，不走跨渠道 Confirm（IM `/stage` 的 Confirm 不变量不变）；复用 `gitutil::DiffModel`，GUI Host 直调不经 daemon；需补单文件 `git add <path>`（现仅 stage_all） |
 | C16 | diff 刷新时机（性能，用户强调） | 大仓库 git 可能很慢，**不频繁调用**：两级懒加载——状态条只跑 `numstat`，hunk 在单文件展开时才跑 `git diff -- <path>`；刷新触发＝选中会话 / 展开面板 / 焦点会话帧变化且含编辑-写入步（防抖合并 ≥2s）/ 窗口重获焦点；调用互斥（上次未返回不重发）、带超时；**不做常驻轮询** |
-| C17 | Popup 反向快捷入口（2026-07-25） | 普通 ask、whats-next 与 Agent 权限确认共用的 Popup 顶栏，在 daemon 能把调用方 `(agent_kind, agent_session_id)` **精确命中活动 AgentRegistry 记录**时显示「在 Agent 窗口中查看」；按钮位于右侧动作区的**置顶右侧、待办左侧**。四家 Agent 与桌面平台统一口径，不按 pid / cwd / 家族模糊猜测。点击保持 Popup 打开，经 GUI Host 打开或聚焦全局唯一 Agent Window 并定位该 session；未追踪或无可信绑定时隐藏。左侧 Agent badge 的「聚焦终端」语义不变 |
+| C17 | Popup 反向快捷入口（2026-07-25） | 普通 ask、whats-next 与 Agent 权限确认共用的 Popup 顶栏，在 daemon 能把调用方 `(agent_kind, agent_session_id)` **精确命中活动 AgentRegistry 记录**时显示「在 Agent 窗口中查看」；按钮位于右侧动作区的**置顶右侧、待办左侧**。五家 Agent 与桌面平台统一口径，不按 pid / cwd / 家族模糊猜测。点击保持 Popup 打开，经 GUI Host 打开或聚焦全局唯一 Agent Window 并定位该 session；未追踪或无可信绑定时隐藏。左侧 Agent badge 的「聚焦终端」语义不变 |
 
 ## 3. 布局示意
 

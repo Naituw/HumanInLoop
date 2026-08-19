@@ -1,6 +1,6 @@
 # Agent 插话（Interject）：工作中主动向 agent 发消息
 
-> 状态：已实现（Claude Code / Codex / Cursor；Grok 不支持）。
+> 状态：已实现（Claude Code / Codex / Cursor / Pi；Grok 不支持）。
 > 实现计划见 `docs/plans/agent-interject.md`。
 
 > **实现期补充（2026-07）**：GUI composer、状态窗口、托盘和 IM `/msg` 均已接入；发送入口收敛为
@@ -13,6 +13,10 @@
 > **附件补充（2026-08）**：桌面 composer 与 Agent 控制台支持文件/图片附件及仅附件插话；IM `/msg`
 > 仍为纯文本。普通文件始终引用源文件绝对路径，不复制、不托管；没有源路径的剪贴板图片复用问答弹窗的
 > `temp/askhuman` 临时目录，由既有 24 小时 GC 清理。
+>
+> **Pi 补充（2026-08-19）**：受管 Pi Extension 在 `tool_call` 调用同一 `__agent-hook pi activity`
+> 轮询，daemon 的 deny 结果转换为 Pi 原生 `{block:true, reason}`。其队列、等待、附件和阅读回执语义
+> 与其它支持家族相同；完整设计见 `docs/plans/pi-agent-integration.md`。
 
 ## 1. 需求
 

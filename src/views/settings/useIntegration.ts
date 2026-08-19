@@ -55,13 +55,15 @@ export function useIntegration(core: SettingsCore) {
     title: string;
     hasTimeoutHook: boolean;
     hasCli: boolean;
+    hasMcp: boolean;
     instructionKind: "rule" | "skill";
     recommended: AgentMode;
   }[] = [
-    { id: "cursor", title: "Cursor", hasTimeoutHook: true, hasCli: true, instructionKind: "rule", recommended: "cli" },
-    { id: "claude", title: "Claude Code", hasTimeoutHook: true, hasCli: true, instructionKind: "rule", recommended: "cli" },
-    { id: "codex", title: "Codex", hasTimeoutHook: false, hasCli: true, instructionKind: "rule", recommended: "mcp" },
-    { id: "grok", title: "Grok", hasTimeoutHook: false, hasCli: false, instructionKind: "skill", recommended: "mcp" },
+    { id: "cursor", title: "Cursor", hasTimeoutHook: true, hasCli: true, hasMcp: true, instructionKind: "rule", recommended: "cli" },
+    { id: "claude", title: "Claude Code", hasTimeoutHook: true, hasCli: true, hasMcp: true, instructionKind: "rule", recommended: "cli" },
+    { id: "codex", title: "Codex", hasTimeoutHook: false, hasCli: true, hasMcp: true, instructionKind: "rule", recommended: "mcp" },
+    { id: "grok", title: "Grok", hasTimeoutHook: false, hasCli: false, hasMcp: true, instructionKind: "skill", recommended: "mcp" },
+    { id: "pi", title: "Pi", hasTimeoutHook: true, hasCli: true, hasMcp: false, instructionKind: "rule", recommended: "cli" },
   ];
 
   const emptyMode = (): AgentModeStatus => ({
@@ -100,32 +102,41 @@ export function useIntegration(core: SettingsCore) {
       installed: false,
       outdated: false,
     },
+    mcpSupported: false,
     mcpConfigPath: "",
     mcpConfigInstalled: false,
+    runtimeArtifactKind: "hook",
+    agentVersion: null,
+    minimumVersion: null,
+    versionSupported: true,
   });
   const modes = ref<Record<AgentId, AgentModeStatus>>({
     cursor: emptyMode(),
     claude: emptyMode(),
     codex: emptyMode(),
     grok: emptyMode(),
+    pi: emptyMode(),
   });
   const modeBusy = ref<Record<AgentId, boolean>>({
     cursor: false,
     claude: false,
     codex: false,
     grok: false,
+    pi: false,
   });
   const modeMessage = ref<Record<AgentId, string | null>>({
     cursor: null,
     claude: null,
     codex: null,
     grok: null,
+    pi: null,
   });
   const modeError = ref<Record<AgentId, boolean>>({
     cursor: false,
     claude: false,
     codex: false,
     grok: false,
+    pi: false,
   });
 
   async function refreshMode(agent: AgentId) {

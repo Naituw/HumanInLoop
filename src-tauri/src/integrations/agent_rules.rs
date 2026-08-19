@@ -1,10 +1,11 @@
-//! Agent 全局提示词（Rules）安装/卸载/更新/状态：Cursor / Claude Code / Codex。
+//! Agent 全局提示词（Rules）安装/卸载/更新/状态。
 //!
 //! Agent families share one prompt template. Rendering may add a target-specific scope rule before
 //! writing the owned `begin/end` block; content outside the block is always preserved. Targets:
 //! - Cursor：`~/.cursor/rules/askhuman.mdc`（`alwaysApply` frontmatter + 托管区块）。
 //! - Claude Code：`~/.claude/CLAUDE.md` 内的托管区块。
 //! - Codex：`~/.codex/AGENTS.md` 内的托管区块。
+//! - Pi：`~/.pi/agent/AGENTS.md` 内的托管区块。
 //!
 //! 「更新」用于内置提示词随版本变化后，把已安装的旧正文覆盖为最新（仅替换区块内部）。
 //! Cursor 卸载时若区块外只剩 frontmatter / 空白则删除整个文件，否则保留用户内容。
@@ -48,13 +49,14 @@ impl Variant {
 /// 注意 `Grok` 的「指令载体」不是 rules 文件，而是 `~/.grok/skills/interaction-protocol/SKILL.md`
 /// （见 [`crate::integrations::grok_skill`]）：Grok 默认模型 Composer 不读全局 `~/.grok/AGENTS.md`，
 /// 故本模块对 `Grok` 的所有指令查询 / 安装 / 卸载 / 打开一律**委托** `grok_skill`，让 `agent_mode`、
-/// 命令层、CLI 可用同一套 `AgentTarget` 统一处理四家（Grok 的 `Variant` 无意义，恒按 MCP 语义）。
+/// 命令层、CLI 可用同一套 `AgentTarget` 统一处理五家（Grok 的 `Variant` 无意义，恒按 MCP 语义）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentTarget {
     Cursor,
     ClaudeCode,
     Codex,
     Grok,
+    Pi,
 }
 
 impl AgentTarget {
@@ -65,6 +67,7 @@ impl AgentTarget {
             "claude" => Some(AgentTarget::ClaudeCode),
             "codex" => Some(AgentTarget::Codex),
             "grok" => Some(AgentTarget::Grok),
+            "pi" => Some(AgentTarget::Pi),
             _ => None,
         }
     }
@@ -81,6 +84,7 @@ impl AgentTarget {
             AgentTarget::ClaudeCode => paths::claude_md(),
             AgentTarget::Codex => paths::codex_agents_md(),
             AgentTarget::Grok => paths::grok_skill_md(),
+            AgentTarget::Pi => paths::pi_agents_md(),
         }
     }
 
@@ -95,6 +99,7 @@ impl AgentTarget {
             AgentTarget::ClaudeCode => crate::agents::AgentKind::Claude,
             AgentTarget::Codex => crate::agents::AgentKind::Codex,
             AgentTarget::Grok => crate::agents::AgentKind::Grok,
+            AgentTarget::Pi => crate::agents::AgentKind::Pi,
         }
     }
 }
@@ -291,7 +296,7 @@ pub fn classify_body(body: &str, agent: AgentTarget) -> Variant {
     }
 }
 
-/// 当前平台是否支持（四家指令文件读写均跨平台）。
+/// 当前平台是否支持（五家指令文件读写均跨平台）。
 pub fn supported(_agent: AgentTarget) -> bool {
     true
 }

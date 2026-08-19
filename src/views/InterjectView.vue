@@ -30,7 +30,7 @@ const textarea = ref<HTMLTextAreaElement | null>(null);
 const attachments = useInterjectAttachments();
 
 function kindLabel(k: string): string {
-  const known: AgentKind[] = ["claude", "codex", "cursor", "grok"];
+  const known: AgentKind[] = ["claude", "codex", "cursor", "grok", "pi"];
   return known.includes(k as AgentKind) ? t(`agents.kind.${k}`) : k;
 }
 

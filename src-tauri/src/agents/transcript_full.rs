@@ -1,4 +1,4 @@
-//! Full-session transcript parse for IM `/transcript` (best-effort, four agent families).
+//! Full-session transcript parse for IM `/transcript` (best-effort, five agent families).
 //!
 //! Separate from `activity.rs` (tail-only “what now”). Spec: im-diff-stage-transcript D17–D21.
 
@@ -608,6 +608,114 @@ fn push_full(
         AgentKind::Cursor | AgentKind::Claude => push_msg(v, out, open_tools),
         AgentKind::Codex => push_codex(v, out, open_tools),
         AgentKind::Grok => push_grok(v, out, open_tools),
+        AgentKind::Pi => push_pi(v, out, open_tools),
+    }
+}
+
+fn push_pi(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut OpenTools) {
+    match v.get("type").and_then(Value::as_str).unwrap_or("") {
+        "message" => {
+            let Some(message) = v.get("message") else {
+                return;
+            };
+            let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+            if role == "toolResult" {
+                close_tool(
+                    out,
+                    open_tools,
+                    message.get("toolCallId").and_then(Value::as_str),
+                    tool_result_text(message),
+                    message
+                        .get("isError")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                );
+                return;
+            }
+            let content = message.get("content");
+            if role == "user" {
+                if let Some(text) = value_text(content) {
+                    let (text, label) = clean_user(text.trim());
+                    if !text.is_empty() {
+                        out.push(TranscriptEvent::UserText {
+                            text: trunc(&text, MAX_TEXT_CHARS),
+                            at: event_time(v),
+                            at_label: label,
+                        });
+                    }
+                }
+                return;
+            }
+            if role != "assistant" {
+                return;
+            }
+            let Some(parts) = content.and_then(Value::as_array) else {
+                return;
+            };
+            for part in parts {
+                match part.get("type").and_then(Value::as_str).unwrap_or("") {
+                    "text" => {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            let text = text.trim();
+                            if !text.is_empty() && !is_noise_assistant(text) {
+                                out.push(TranscriptEvent::AssistantText {
+                                    text: trunc(text, MAX_TEXT_CHARS),
+                                    at: event_time(v),
+                                    at_label: None,
+                                });
+                            }
+                        }
+                    }
+                    "thinking" => {
+                        if let Some(text) = part.get("thinking").and_then(Value::as_str) {
+                            let text = text.trim();
+                            if !text.is_empty() {
+                                out.push(TranscriptEvent::Thinking {
+                                    text: trunc(text, 800),
+                                    at: event_time(v),
+                                    at_label: None,
+                                });
+                            }
+                        }
+                    }
+                    "toolCall" => {
+                        let name = part.get("name").and_then(Value::as_str).unwrap_or("tool");
+                        if super::activity::is_todo_tool(name) {
+                            continue;
+                        }
+                        let display = super::activity::classify_tool(name, part.get("arguments"));
+                        out.push(TranscriptEvent::ToolCall {
+                            name: name.to_string(),
+                            args_summary: format_tool_line(&display),
+                            result_summary: None,
+                            is_error: false,
+                            ask_human: None,
+                            at: event_time(v),
+                            at_label: None,
+                        });
+                        open_tools.insert(out.len() - 1, part.get("id").and_then(Value::as_str));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        "compaction" => {
+            if let Some(summary) = v.get("summary").and_then(Value::as_str) {
+                out.push(TranscriptEvent::Meta(format!(
+                    "Compaction: {}",
+                    trunc(summary.trim(), MAX_TEXT_CHARS)
+                )));
+            }
+        }
+        "branch_summary" => {
+            if let Some(summary) = v.get("summary").and_then(Value::as_str) {
+                out.push(TranscriptEvent::Meta(format!(
+                    "Branch summary: {}",
+                    trunc(summary.trim(), MAX_TEXT_CHARS)
+                )));
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1785,6 +1893,31 @@ mod tests {
             last.at_ms,
             (parse_iso8601_secs("2026-08-05T15:01:00.101Z").unwrap() as i64) * 1000
         );
+    }
+
+    #[test]
+    fn pi_v3_loader_keeps_messages_tools_and_session_metadata() {
+        let file = write_jsonl(&[
+            serde_json::json!({"type":"session","version":3,"id":"pi-transcript","cwd":"/tmp"}),
+            serde_json::json!({"type":"message","timestamp":"2026-08-18T12:00:00Z","message":{"role":"user","content":[{"type":"text","text":"hello pi"}]}}),
+            serde_json::json!({"type":"message","timestamp":"2026-08-18T12:00:01Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"reasoning"},{"type":"text","text":"working"},{"type":"toolCall","id":"tool-1","name":"bash","arguments":{"command":"pwd"}}]}}),
+            serde_json::json!({"type":"message","timestamp":"2026-08-18T12:00:02Z","message":{"role":"toolResult","toolCallId":"tool-1","content":[{"type":"text","text":"/tmp"}],"isError":false}}),
+            serde_json::json!({"type":"compaction","summary":"older context"}),
+            serde_json::json!({"type":"branch_summary","summary":"branch context"}),
+        ]);
+        let doc = load_path(AgentKind::Pi, file.path()).unwrap();
+        assert!(doc.events.iter().any(
+            |event| matches!(event, TranscriptEvent::UserText { text, .. } if text == "hello pi")
+        ));
+        assert!(doc.events.iter().any(
+            |event| matches!(event, TranscriptEvent::AssistantText { text, .. } if text == "working")
+        ));
+        assert!(doc.events.iter().any(
+            |event| matches!(event, TranscriptEvent::ToolCall { name, is_error: false, .. } if name == "bash")
+        ));
+        assert!(doc.events.iter().any(
+            |event| matches!(event, TranscriptEvent::Meta(text) if text.contains("older context"))
+        ));
     }
 
     #[test]

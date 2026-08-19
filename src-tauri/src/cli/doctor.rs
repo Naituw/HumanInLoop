@@ -11,7 +11,7 @@ use crate::integrations::{
     cursor_hook, mcp_config,
 };
 
-const AGENTS: [&str; 4] = ["cursor", "claude", "codex", "grok"];
+const AGENTS: [&str; 5] = ["cursor", "claude", "codex", "grok", "pi"];
 
 fn daemon_login_ready() -> bool {
     crate::integrations::login_item::daemon_is_installed()
@@ -121,12 +121,21 @@ fn render_text(cfg: &AppConfig, status: &Option<crate::ipc::StatusInfo>, lang: L
                 lang,
             ),
             AgentTarget::Codex | AgentTarget::Grok => cfgio::t(lang, "n/a", "—"),
+            AgentTarget::Pi => state_label(
+                agent_mode::timeout_hook_is_installed(target),
+                agent_mode::timeout_hook_needs_update(target),
+                lang,
+            ),
         };
-        let mcp = state_label(
-            mcp_config::is_installed(target),
-            mcp_config::needs_update(target),
-            lang,
-        );
+        let mcp = if mcp_config::supported(target) {
+            state_label(
+                mcp_config::is_installed(target),
+                mcp_config::needs_update(target),
+                lang,
+            )
+        } else {
+            cfgio::t(lang, "n/a", "—")
+        };
         let guard = if agent_subagent_guard::supported(target) {
             let status = agent_subagent_guard::status(target);
             state_label(
@@ -257,6 +266,10 @@ fn render_json(cfg: &AppConfig, status: &Option<crate::ipc::StatusInfo>) -> Stri
                 AgentTarget::Cursor => Some((cursor_hook::is_installed(), cursor_hook::needs_update())),
                 AgentTarget::ClaudeCode => Some((claude_hook::is_installed(), claude_hook::needs_update())),
                 AgentTarget::Codex | AgentTarget::Grok => None,
+                AgentTarget::Pi => Some((
+                    agent_mode::timeout_hook_is_installed(target),
+                    agent_mode::timeout_hook_needs_update(target),
+                )),
             };
             let lc = agent_lifecycle::status(kind);
             let permission = agent_permission::status(target);

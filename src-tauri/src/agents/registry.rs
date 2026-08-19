@@ -60,6 +60,9 @@ pub struct AgentRecord {
     pub title: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Validated transcript path for agents with configurable session storage (currently Pi).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
     /// Direct parent session when this record was created by AskHuman's native Fork flow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from_session_id: Option<String>,
@@ -180,6 +183,9 @@ fn merge_ended_twins(active: &mut [AgentRecord], ended: &mut VecDeque<AgentRecor
             if e.session_id == a.session_id && e.kind == a.kind {
                 a.active_elapsed_secs = a.active_elapsed_secs.saturating_add(e.active_elapsed_secs);
                 a.started_at = a.started_at.min(e.started_at);
+                if a.transcript_path.is_none() {
+                    a.transcript_path = e.transcript_path.clone();
+                }
                 false
             } else {
                 true
@@ -199,6 +205,9 @@ fn merge_ended_twins(active: &mut [AgentRecord], ended: &mut VecDeque<AgentRecor
                 m.last_activity = m.last_activity.max(e.last_activity);
                 if e.title.is_some() {
                     m.title = e.title;
+                }
+                if e.transcript_path.is_some() {
+                    m.transcript_path = e.transcript_path;
                 }
             }
         } else {
@@ -279,6 +288,17 @@ impl AgentRegistry {
             seq += 1;
         }
         inner.next_seq = seq;
+        for record in inner.active.iter().chain(inner.ended.iter()) {
+            if record.kind == AgentKind::Pi {
+                if let Some(path) = record.transcript_path.as_deref() {
+                    let _ = super::session_paths::register_pi(
+                        &record.session_id,
+                        path,
+                        record.cwd.as_deref(),
+                    );
+                }
+            }
+        }
         drop(inner);
         reg
     }
@@ -309,6 +329,32 @@ impl AgentRegistry {
     pub fn clear_pid_cache(&self, session_id: &str) {
         let mut cache = self.pid_cache.lock().unwrap();
         cache.retain(|(sid, _), _| sid != session_id);
+    }
+
+    /// Retain an already validated transcript path and invalidate the lazily cached title.
+    pub fn set_transcript_path(&self, kind: AgentKind, session_id: &str, path: String) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let record = if let Some(record) = inner
+            .active
+            .iter_mut()
+            .find(|record| record.kind == kind && record.session_id == session_id)
+        {
+            record
+        } else if let Some(record) = inner
+            .ended
+            .iter_mut()
+            .find(|record| record.kind == kind && record.session_id == session_id)
+        {
+            record
+        } else {
+            return false;
+        };
+        if record.transcript_path.as_deref() == Some(path.as_str()) {
+            return false;
+        }
+        record.transcript_path = Some(path);
+        record.title = None;
+        true
     }
 
     /// 处理一次生命周期事件（spec D5/D6/D7）。返回是否有状态变化（供广播）。
@@ -387,6 +433,7 @@ impl AgentRegistry {
                         pid,
                         title: None,
                         cwd,
+                        transcript_path: None,
                         forked_from_session_id: None,
                         launch_id: None,
                         started_at: now,
@@ -591,6 +638,7 @@ impl AgentRegistry {
                 pid,
                 title: None,
                 cwd,
+                transcript_path: None,
                 forked_from_session_id: None,
                 launch_id: None,
                 started_at: now,
@@ -1097,6 +1145,7 @@ mod tests {
             AgentKind::Codex,
             AgentKind::Cursor,
             AgentKind::Grok,
+            AgentKind::Pi,
         ]
         .into_iter()
         .enumerate()
@@ -1558,6 +1607,7 @@ mod tests {
             pid: None,
             title: None,
             cwd: None,
+            transcript_path: None,
             forked_from_session_id: None,
             launch_id: None,
             started_at: started,

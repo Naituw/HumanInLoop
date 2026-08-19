@@ -10,7 +10,7 @@
 use crate::paths;
 use serde_json::Value;
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use super::AgentKind;
@@ -19,6 +19,8 @@ use super::AgentKind;
 const MAX_TITLE_CHARS: usize = 80;
 /// 扫描 jsonl 的行数上限。
 const MAX_LINES: usize = 4000;
+const MAX_PI_HEADER_BYTES: u64 = 64 * 1024;
+const MAX_PI_SESSION_FILES: usize = 4096;
 
 /// 解析指定家族某 session 的标题。取不到返回 `None`。
 pub fn resolve_title(kind: AgentKind, session_id: &str) -> Option<String> {
@@ -30,6 +32,7 @@ pub fn resolve_title(kind: AgentKind, session_id: &str) -> Option<String> {
         AgentKind::Codex => codex_title(session_id),
         AgentKind::Claude => claude_title(session_id),
         AgentKind::Grok => grok_title(session_id),
+        AgentKind::Pi => pi_title(session_id),
     }?;
     Some(clean_title(&raw))
 }
@@ -184,6 +187,98 @@ fn grok_title(session_id: &str) -> Option<String> {
     None
 }
 
+// ── Pi ──
+
+fn pi_title(session_id: &str) -> Option<String> {
+    let path = pi_session_file(session_id)?;
+    let file = fs::File::open(&path).ok()?;
+    let reader = BufReader::new(file);
+    let mut latest_name = None;
+    let mut first_user = None;
+    for (index, line) in reader.lines().enumerate() {
+        if index >= MAX_LINES {
+            break;
+        }
+        let Ok(line) = line else { break };
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) == Some("session_info") {
+            if let Some(name) = value.get("name").and_then(Value::as_str) {
+                if !name.trim().is_empty() {
+                    latest_name = Some(name.to_string());
+                }
+            }
+        }
+        if first_user.is_none()
+            && value.get("type").and_then(Value::as_str) == Some("message")
+            && value.pointer("/message/role").and_then(Value::as_str) == Some("user")
+        {
+            if let Some(text) = value.pointer("/message/content").and_then(content_to_text) {
+                let text = text.trim();
+                if !text.is_empty() && !is_injected_block(text) {
+                    first_user = Some(text.to_string());
+                }
+            }
+        }
+    }
+    latest_name.or(first_user)
+}
+
+fn pi_session_file(session_id: &str) -> Option<PathBuf> {
+    super::session_paths::get(AgentKind::Pi, session_id).or_else(|| {
+        let mut remaining = MAX_PI_SESSION_FILES;
+        find_file_by_header(&paths::pi_sessions_dir(), session_id, 5, &mut remaining)
+    })
+}
+
+fn find_file_by_header(
+    root: &Path,
+    session_id: &str,
+    depth: usize,
+    remaining: &mut usize,
+) -> Option<PathBuf> {
+    if depth == 0 || *remaining == 0 {
+        return None;
+    }
+    for entry in fs::read_dir(root).ok()?.flatten() {
+        if *remaining == 0 {
+            return None;
+        }
+        *remaining -= 1;
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(found) = find_file_by_header(&path, session_id, depth - 1, remaining) {
+                return Some(found);
+            }
+            continue;
+        }
+        if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(file) = fs::File::open(&path) else {
+            continue;
+        };
+        let mut first = String::new();
+        if BufReader::new(file)
+            .take(MAX_PI_HEADER_BYTES)
+            .read_line(&mut first)
+            .is_err()
+        {
+            continue;
+        }
+        let Ok(header) = serde_json::from_str::<Value>(&first) else {
+            continue;
+        };
+        if header.get("type").and_then(Value::as_str) == Some("session")
+            && header.get("id").and_then(Value::as_str) == Some(session_id)
+        {
+            return Some(path);
+        }
+    }
+    None
+}
+
 /// 扫 Grok `chat_history.jsonl` 取首条真实用户输入：优先解包 `<user_query>…</user_query>` 的内层文本；
 /// 若某条用户文本本身不以 `<` 开头（Build harness 可能不加包裹）则直接取用。均跳过纯注入块。
 fn grok_first_query(path: &Path) -> Option<String> {
@@ -274,6 +369,7 @@ pub(crate) fn transcript_path(kind: AgentKind, session_id: &str) -> Option<PathB
             }
             None
         }
+        AgentKind::Pi => pi_session_file(session_id),
     }
 }
 
@@ -566,5 +662,35 @@ mod tests {
         ];
         std::fs::write(&f, lines.join("\n")).unwrap();
         assert_eq!(last_summary(&f).as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn pi_title_prefers_latest_session_name_from_custom_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pi.jsonl");
+        let lines = [
+            serde_json::json!({"type":"session","version":3,"id":"pi-title-test","cwd":dir.path()}),
+            serde_json::json!({"type":"message","message":{"role":"user","content":[{"type":"text","text":"first prompt"}]}}),
+            serde_json::json!({"type":"session_info","name":"Named Pi session"}),
+        ];
+        std::fs::write(
+            &path,
+            lines
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        super::super::session_paths::register_pi(
+            "pi-title-test",
+            &path.to_string_lossy(),
+            Some(&dir.path().to_string_lossy()),
+        )
+        .unwrap();
+        assert_eq!(
+            pi_title("pi-title-test").as_deref(),
+            Some("Named Pi session")
+        );
     }
 }

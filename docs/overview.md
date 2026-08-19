@@ -110,8 +110,8 @@ AskHuman/
       gitutil.rs             IM /diff 与 /stage 的 Git 操作
       confirm/               跨渠道双动作确认模型与传输
       export/                diff/transcript 附件渲染
-      agents/transcript_full.rs  四家 Agent 完整会话解析
-      agents/workspaces.rs       IM 新任务的最近工作目录索引与四家冷扫描
+      agents/transcript_full.rs  五家 Agent 完整会话解析
+      agents/workspaces.rs       IM 新任务的最近工作目录索引与五家冷扫描
       dingtalk/confirm.rs    钉钉双动作确认卡
       sound.rs               跨平台弹窗提示音
       commands.rs            前端调用的 Tauri command 集合
@@ -166,13 +166,14 @@ AskHuman/
         agent_permission.rs  Claude/Codex 权限审批集成
         cursor_hook.rs       Cursor 超时 Hook 管理
         claude_hook.rs       Claude Code 超时 Hook 管理
-        agent_lifecycle.rs   四家 Agent 生命周期 Hook 管理
+        agent_lifecycle.rs   五家 Agent 生命周期管理（原生 Hook + Pi Extension）
         agent_launch.rs      Agent readiness、一次性启动记录与 Terminal.app / Windows Terminal helper
         agent_rules.rs       Agent 全局 Rules 管理
         agent_subagent_guard.rs  Claude/Codex SubagentStart 提示 Hook
         agent_context_recovery.rs  集成 mode 托管的压缩恢复/会话绑定 Hook
         grok_skill.rs        Grok interaction-protocol skill 管理
         mcp_config.rs        四家 MCP server 配置管理
+        pi_extension.rs      Pi CLI/生命周期/插话/Stop 共用 Extension 管理
         agent_mode.rs        None/CLI/MCP 模式编排
         agent_stop.rs        Agent Stop 结束确认配置
         login_item.rs        macOS/Linux/Windows GUI Host 与 daemon 登录项
@@ -212,8 +213,9 @@ AskHuman/
         detect.rs            Agent 家族、会话和进程探测
         report.rs            生命周期 Hook 上报与去重
         context_recovery.rs  压缩后提示、MCP token 注入与 Grok pending 上报
-        title.rs             四家会话标题解析
+        title.rs             五家会话标题解析
         activity.rs          transcript 尾部活动解析
+        session_paths.rs     Pi 自定义 sessionDir transcript 路径校验与缓存
         cursor_vscdb.rs      Cursor IDE 会话实时源（state.vscdb；活动/标题/完整会话）
         registry.rs          Agent 状态推导、持久化与快照
         interject.rs         插话队列、等待与持久化
@@ -237,7 +239,7 @@ AskHuman/
 - 附件：`open_path`、`preview_attachments`、`close_preview`、`read_image_data_url`、`file_icon_data_url`、`show_attachment_menu`
 - 设置：`get_settings`、`save_settings`、`get_prompt`、`set_theme`、`update_theme`、`open_settings`、`popup_sound_support`、`play_popup_sound`
 - 历史：`open_history`、`history_init`、`get_history`、`get_history_projects`、`history_count`、`trim_history`、`resolve_history_session_titles`、`delete_history_entries`、`clear_all_history`
-- Cursor / Claude 超时 Hook：`cursor_hook_status` / `install` / `update` / `uninstall` / `reveal`；Claude 同名前缀命令
+- Cursor / Claude 超时 Hook 与 Pi Extension：前两者保留专用命令；统一设置入口走 `agent_mode_*` 与 `agent_hook_reveal` / `open`
 - Agent Rules：`agent_rule_status` / `install` / `update` / `uninstall` / `reveal` / `open`
 - Agent 模式与配置文件：`agent_mode_status` / `set` / `update`、`mcp_config_reveal` / `open`、`agent_hook_reveal` / `open`、`mcp_command_path`
 - 渠道测试与识别：`telegram_test`；钉钉、飞书、Slack 各自的 `*_test` / `*_detect_prepare` / `*_detect_wait`；共用 `detect_cancel`
@@ -270,9 +272,9 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 
 - `channels.autoActivation` 关闭时向所有启用 IM 投放，开启时以当前活跃槽为主；切槽会补推在途请求，watch 渠道仍会加入对应 Agent 新提问的投放并集。
 - 共享命令包括 `/new`、`/fork`、`/help`、`/here`、`/status`、`/watch`、`/unwatch`、`/msg`、`/msg-clear`、`/yolo`、`/diff`、`/stage`、`/transcript`、`/todo`、`/todo-rm` 和 `/todo-auto`；Slack 使用 `!` 作为可输入的备用前缀。
-- macOS 或 Windows 开启 `agentTasks` 后，`/new` 依次选择 workspace、已就绪 Agent 与权限，在新的 Terminal.app 或 Windows Terminal 窗口启动真实交互会话；Daemon 只负责启动前流程，之后复用 lifecycle/watch。
+- macOS 或 Windows 开启 `agentTasks` 后，`/new` 依次选择 workspace、已就绪 Agent 与权限，在新的 Terminal.app 或 Windows Terminal 窗口启动真实交互会话；Pi 没有内置权限模式，选中后跳过权限选择并固定使用 Agent 默认行为。Daemon 只负责启动前流程，之后复用 lifecycle/watch。
 - macOS 与 Windows 本地 GUI 亦可创建任务（不要求开启 `agentTasks`）：待办窗口行内按钮与托盘「新建 Agent 任务」打开统一的新建任务窗口，就绪判定与启动链路与 `/new` 相同；见 `docs/specs/gui-agent-task-launch.md`。
-- Claude Code、Codex、Grok 的 Working/Idle 原生会话可通过 IM `/fork`、Agent 控制台或托盘立即分叉；源会话继续运行，新分支共用 cwd。继承标题的子会话在控制台、托盘和 IM 选择列表中前置显示直接父序号；watch 卡不增加 Fork 按钮，Cursor CLI 不支持；详见 `docs/specs/agent-session-fork.md`。
+- Claude Code、Codex、Grok、Pi 的 Working/Idle 原生会话可通过 IM `/fork`、Agent 控制台或托盘立即分叉；源会话继续运行，新分支共用 cwd。继承标题的子会话在控制台、托盘和 IM 选择列表中前置显示直接父序号；watch 卡不增加 Fork 按钮，Cursor CLI 不支持；详见 `docs/specs/agent-session-fork.md`。
 - Agent 数字编号在 daemon 生命周期内稳定，供状态、关注、插话和 Git/会话导出共用；无参目标选择复用跨渠道单选卡模型。
 - Watch 订阅持久化并就地更新原卡；`/stage` 必须经过跨渠道 Confirm，不能直接执行暂存。
 
@@ -315,7 +317,7 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 
 > 需求 `docs/specs/agent-lifecycle-tracking.md`，计划 `docs/plans/agent-lifecycle-tracking.md`。
 
-- macOS、Linux 与 Windows 通过用户级 hooks 跟踪 Claude Code、Codex、Cursor、Grok；它与 Agent 集成 mode、IM autoActivation 相互独立。
+- macOS、Linux 与 Windows 通过用户级 hooks 跟踪 Claude Code、Codex、Cursor、Grok，并通过 `~/.pi/agent/extensions/askhuman/index.ts` 跟踪 Pi；它与 Agent 集成 mode、IM autoActivation 相互独立。
 - Daemon 的 `AgentRegistry` 以 session id 为主身份，推导工作中、空闲、已结束；pid/liveness 与超时只做兜底。
 - 生命周期状态被 `/status`、watch、插话、托盘/状态窗口和 Daemon 空闲退出共同使用；修改事件或状态模型时必须检查这些消费者。
 - Daemon 启动时幂等迁移已开启但过期的 hooks。只有工作中 Agent 或状态窗口连接阻止闲退；graceful drain 不受 Agent 存活影响。
@@ -329,7 +331,7 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 
 > 需求 `docs/specs/agent-interject.md`，计划 `docs/plans/agent-interject.md`。
 
-- 插话依赖生命周期追踪，只对工作中的 Claude Code、Codex、Cursor 开放；Grok 不支持。
+- 插话依赖生命周期追踪，对工作中的 Claude Code、Codex、Cursor、Pi 开放；Grok 不支持。Pi Extension 在 `tool_call` 等待同一 daemon 裁决，并把消息转换为原生 `{block, reason}`。
 - Daemon 按 session 维护并持久化待送达队列；GUI composer 整体覆盖，IM `/msg` 追加。
 - Agent 下一次 PreToolUse 读取并原子消费消息；composer 已打开时 hook 可等待提交或取消，热路径不做文件 IO。
 - 排队消息被实际读取后向来源 IM 发阅读回执；即时送达、撤回、覆盖或未消费的消息不回执。
@@ -363,10 +365,10 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 
 - headless/SSH 可用 `channel`、`agents`、`config`、`doctor` 完成渠道配置与 Agent 集成；各子命令提供 help 和 JSON 输出。
 - `channel set` 无 flag 走交互向导，有 flag 走脚本；密钥只从 env/file/stdin 或隐藏输入读取，不进 argv。
-- `agents mode` 维护 None/CLI/MCP 整包；permission/stop 的 preference 独立保存，但只有 CLI/MCP mode 才安装交互接管 Hook，None 隐藏对应设置并卸载其 active 能力；lifecycle 始终正交，Grok 仅 None/MCP 且不支持 stop/interject。
+- `agents mode` 维护 None/CLI/MCP 整包；permission/stop 的 preference 独立保存，但只有集成 mode 才安装交互接管产物，None 隐藏对应设置并卸载其 active 能力；lifecycle 始终正交。Grok 仅 None/MCP 且不支持 stop/interject；Pi 仅 None/CLI、不提供 MCP 或内置权限模式，最低支持版本为 0.82.0。
 - 上下文恢复 Hook 由当前 mode 独立托管，不依赖可关闭的 lifecycle tracking；CLI/MCP
   提示严格只指向用户当前选中的入口，缺失/过期并入当前 Hook 或 MCP 产物的更新状态。
-- 全局交互协议把 Sub Agent 作为唯一例外并禁止其使用 AskHuman；Claude/Codex mode 另带 `SubagentStart` 提示 Hook，Cursor/Grok 只依赖协议文本。
+- 全局交互协议把 Sub Agent 作为唯一例外并禁止其使用 AskHuman；Claude/Codex mode 另带 `SubagentStart` 提示 Hook，Cursor/Grok/Pi 只依赖协议文本。
 - `agents update [<agent>]` 按当前 mode 重新 reconcile 单家或全部托管产物；重复设置相同 mode 也会完整更新，但不改独立保存的 capability 偏好。
 - `config` 是通用键值兜底，`doctor` 汇总 Daemon、渠道和集成；两者复用同一配置与集成模块，不维护第二套逻辑。
 
@@ -376,7 +378,7 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 
 - `AskHuman mcp` 暴露 `ask`、`whats_next`、`show_last`、`todo_add`、`todo_list`、`todo_update`：`ask`/`whats_next` 每次调用 spawn 现有 CLI 流程，复用 Popup、IM、抢答、历史和 drain；`show_last` 只读恢复最近精确问答，三个 Todo 工具按当前项目直接读写 `todos.json`，其中 list/update 使用稳定 Todo 与附件 ID。
 - `ask` 入参为 message/questions/files；输出为 CLI 同款结果区块文本（原样透传，无 output schema / structuredContent）加图片 ImageContent。MCP 取消会终止子 CLI，并通过 socket EOF 取消 Daemon 请求。
-- Agent 自动集成是 None/CLI/MCP 互斥；Grok 仅 None/MCP，其 MCP 产物是 skill + config。
+- Agent 自动集成通常是 None/CLI/MCP 互斥；Grok 仅 None/MCP，其 MCP 产物是 skill + config；Pi 仅 None/CLI，其 CLI 产物是 Rules + 单个受管 Extension，自动集成 UI 不展示 MCP。
 - Codex、Grok、Claude 分别写适配自身的长超时配置；Cursor MCP 超时不可配置，推荐 CLI 模式。
 - MCP 没有通用的 Agent session 字段：Codex 使用每调用 `_meta.threadId`，Claude/Cursor
   使用 schema 隐藏的短命一次性 token，Grok 只在进程+项目分区内参数指纹候选唯一时认领；
@@ -398,10 +400,10 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 
 > 规格 `docs/specs/agent-stop-confirmation.md`。
 
-- 只处理 Claude Code、Codex、Cursor 的自然完成；Grok、错误和用户中断不能可靠 continuation，不发卡。
-- 三家独立开关默认关；询问“继续/结束”，24h 或基础设施失败 fail-open，投放沿用活跃槽 ∪ watch 渠道。
+- 处理 Claude Code、Codex、Cursor、Pi 的自然完成；Grok、错误和用户中断不能可靠 continuation，不发卡。
+- Claude Code、Codex、Cursor 的独立开关默认关，Pi 默认开；询问“继续/结束”，24h 或基础设施失败 fail-open，投放沿用活跃槽 ∪ watch 渠道。
 - Stop preference 独立保存，但只在 CLI/MCP mode 生效；None 隐藏开关并卸载 confirm 能力，重新集成时自动恢复。若 lifecycle tracking 仍开，共享 Stop handler 只保留 `track`、不弹确认卡。
-- 继续时使用各家原生 continuation，下一次自然 Stop 再询问，不做外部 resume。
+- 继续时使用各家原生 continuation；Pi Extension 在同一会话空闲且无排队消息时调用 `pi.sendUserMessage`。下一次自然 Stop 再询问，不做外部 resume。
 - Stop 确认复用普通 Ask 单选链路但不写回复历史；它与 lifecycle 共用单一 Stop handler，避免并发 Hook 提前置空闲。
 - `[user_confirmed_end_turn]` 出现在最后回复任意位置即表示用户已明确同意结束，命中后直接放行，避免再次确认。
 

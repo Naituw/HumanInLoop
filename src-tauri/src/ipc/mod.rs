@@ -465,6 +465,10 @@ pub enum ClientMsg {
         /// 工作目录（可空）。
         #[serde(default)]
         cwd: Option<String>,
+        /// Optional transcript path supplied by a runtime adapter. Pi paths are validated against
+        /// their v3 session header before the daemon retains or reads them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transcript_path: Option<String>,
         /// Optional inherited id for an IM-created terminal launch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         launch_id: Option<String>,
@@ -1177,6 +1181,7 @@ mod tests {
             pid: None,
             hint_pid: None,
             cwd: None,
+            transcript_path: None,
             launch_id: None,
             prompt_sha256: None,
             ts: 0,
@@ -1193,6 +1198,7 @@ mod tests {
             pid: None,
             hint_pid: None,
             cwd: None,
+            transcript_path: None,
             launch_id: None,
             prompt_sha256: None,
             ts: 0,

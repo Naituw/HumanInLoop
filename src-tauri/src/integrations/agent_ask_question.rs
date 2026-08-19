@@ -175,6 +175,7 @@ fn target_for_kind(kind: AgentKind) -> super::agent_rules::AgentTarget {
         AgentKind::Codex => super::agent_rules::AgentTarget::Codex,
         AgentKind::Cursor => super::agent_rules::AgentTarget::Cursor,
         AgentKind::Grok => super::agent_rules::AgentTarget::Grok,
+        AgentKind::Pi => super::agent_rules::AgentTarget::Pi,
     }
 }
 

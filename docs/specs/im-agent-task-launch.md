@@ -1,9 +1,10 @@
 # 需求：从 IM 创建可在电脑端接续的 Agent 任务
 
-> 状态：设计完成，待实现。  
+> 状态：已实现。
 > 关联计划：`docs/plans/im-agent-task-launch.md`  
 > 依赖：四渠道主动命令、通用单选卡、Agent 生命周期追踪、IM watch、daemon keepalive。  
-> 当前平台：macOS（Terminal.app）与 Windows（Windows Terminal `wt.exe`）；Agent：Claude Code / Codex / Cursor / Grok。Linux 后置。
+> 当前平台：macOS（Terminal.app）与 Windows（Windows Terminal `wt.exe`）；Agent：Claude Code / Codex / Cursor / Grok / Pi。Linux 后置。
+> Pi >=0.82.0 没有内置权限模式，选中后跳过权限卡并固定 `AgentDefault`；完整适配见 `docs/plans/pi-agent-integration.md`。
 
 ## 1. 背景与目标
 
@@ -19,7 +20,7 @@
 
 1. `/new` 不带参数即可从四种 IM 创建任务；
 2. 进入流程前先确认本机至少有一个可用 workspace 和一个可运行且已集成 AskHuman 的 Agent；
-3. 冷启动时从四家本地会话索引推导最近工作目录，之后由 lifecycle 增量维护；
+3. 冷启动时从五家本地会话索引推导最近工作目录，之后由 lifecycle 增量维护；
 4. 用户每次都能明确选择或按设置决定 Agent 默认权限与 YOLO；
 5. 任务只能从与该 flow 绑定的渠道原生输入组件提交，不劫持普通聊天消息；
 6. task 不拼入 shell；Agent 获得真实 TTY、真实 cwd 与原生 TUI；
@@ -31,7 +32,7 @@
 本轮只检查了本机 CLI `--help`、已有 hook 实测日志、本地会话文件字段、仓库代码与官方文档，
 **没有启动任何 Agent 会话，也没有发送 prompt**。
 
-### 2.1 四家 CLI 均支持交互 TUI + 初始 prompt
+### 2.1 五家 CLI 均支持交互 TUI + 初始 prompt
 
 | Agent | 交互启动 | cwd | YOLO 覆盖 | 禁止使用的后台形态 |
 |---|---|---|---|---|
@@ -39,6 +40,7 @@
 | Codex | `codex <prompt>` | 进程 cwd，也支持 `-C` | `--dangerously-bypass-approvals-and-sandbox` | `exec` |
 | Cursor | `cursor-agent <prompt>` | 进程 cwd，也支持 `--workspace` | `--yolo` | `-p` |
 | Grok | `grok <prompt>` | 进程 cwd，也支持 `--cwd` | `--always-approve` | `-p` / `--single` |
+| Pi | `pi <prompt>` | 进程 cwd | 无内置覆盖参数 | 非交互 print/RPC 形态 |
 
 实现统一先 `chdir(workspace)`，再以 argv 直接启动，不依赖四家不同的 cwd flag。Agent 默认权限模式
 不加任何 override；YOLO 只添加上表固定 flag，不接受 IM 传任意 flags。
@@ -58,6 +60,7 @@
 | Codex | `~/.codex/sessions/**/rollout-*.jsonl` | `session_meta.payload.cwd`；`started_at` / mtime |
 | Cursor | `~/.cursor/projects/<encoded>/agent-transcripts/**` | transcript mtime；encoded path 只按现存目录唯一匹配恢复 |
 | Grok | `~/.grok/sessions/*/*/summary.json` | `info.cwd`；`last_active_at` / `updated_at` |
+| Pi | `~/.pi/agent/sessions/**/*.jsonl` | v3 session header 的 `cwd`；mtime；自定义 sessionDir 由 lifecycle 增量补入 |
 
 Cursor 的 `~/.cursor/chats/*/*/meta.json` 没有 cwd，不能单独使用。当前静态样本中，Cursor
 `agent-transcripts` session id 与 chats 有较高重合；路径恢复只接受文件系统中恰好一个现存解，

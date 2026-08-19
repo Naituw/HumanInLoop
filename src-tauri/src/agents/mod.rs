@@ -1,10 +1,10 @@
 //! Agent 生命周期追踪（实验性功能）。
 //!
-//! 三家 Agent CLI（Claude Code / Codex / Cursor）通过用户级 lifecycle hook 把
+//! Claude Code / Codex / Cursor / Grok 通过用户级 lifecycle hook，Pi 通过受管 Extension，把
 //! `session-start` / `turn-start` / `turn-end` / `session-end` 事件经隐藏子命令
 //! `AskHuman __agent-hook <agent> <event>` 上报给常驻 daemon；daemon 维护一张
 //! agent 注册表（进程存活轮询 + TTL 兜底推导「工作中 / 空闲 / 已结束」），并把
-//! 全量快照推送给 `AskHuman agents status` 打开的 GUI 状态窗口。
+//! 全量快照推送给 `AskHuman agents monitor` 打开的 GUI 状态窗口。
 //!
 //! 设计与决策见 `docs/specs/agent-lifecycle-tracking.md`，调研见
 //! `demo/agent-lifecycle/FINDINGS.md`。
@@ -16,6 +16,7 @@ pub mod detect;
 pub mod interject;
 pub mod registry;
 pub mod report;
+pub mod session_paths;
 pub mod stop;
 pub mod title;
 pub mod transcript_full;
@@ -31,6 +32,7 @@ pub enum AgentKind {
     Codex,
     Cursor,
     Grok,
+    Pi,
 }
 
 impl AgentKind {
@@ -41,6 +43,7 @@ impl AgentKind {
             AgentKind::Codex => "codex",
             AgentKind::Cursor => "cursor",
             AgentKind::Grok => "grok",
+            AgentKind::Pi => "pi",
         }
     }
 
@@ -51,6 +54,7 @@ impl AgentKind {
             AgentKind::Codex => "Codex",
             AgentKind::Cursor => "Cursor",
             AgentKind::Grok => "Grok",
+            AgentKind::Pi => "Pi",
         }
     }
 
@@ -60,16 +64,18 @@ impl AgentKind {
             "codex" => Some(AgentKind::Codex),
             "cursor" => Some(AgentKind::Cursor),
             "grok" => Some(AgentKind::Grok),
+            "pi" => Some(AgentKind::Pi),
             _ => None,
         }
     }
 
-    /// 四家集合（遍历用）。
-    pub const ALL: [AgentKind; 4] = [
+    /// All supported agent families (for iteration).
+    pub const ALL: [AgentKind; 5] = [
         AgentKind::Claude,
         AgentKind::Codex,
         AgentKind::Cursor,
         AgentKind::Grok,
+        AgentKind::Pi,
     ];
 }
 

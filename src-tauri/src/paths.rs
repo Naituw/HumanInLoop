@@ -307,6 +307,31 @@ pub fn grok_sessions_dir() -> PathBuf {
     grok_dir().join("sessions")
 }
 
+/// Pi coding-agent user directory `~/.pi/agent`.
+pub fn pi_agent_dir() -> PathBuf {
+    home().join(".pi").join("agent")
+}
+
+/// Pi global instructions file `~/.pi/agent/AGENTS.md`.
+pub fn pi_agents_md() -> PathBuf {
+    pi_agent_dir().join("AGENTS.md")
+}
+
+/// AskHuman-owned Pi extension directory.
+pub fn pi_extension_dir() -> PathBuf {
+    pi_agent_dir().join("extensions").join("askhuman")
+}
+
+/// AskHuman-owned Pi extension entry point.
+pub fn pi_extension_file() -> PathBuf {
+    pi_extension_dir().join("index.ts")
+}
+
+/// Pi's default session root. Custom session directories are reported by the extension at runtime.
+pub fn pi_sessions_dir() -> PathBuf {
+    pi_agent_dir().join("sessions")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

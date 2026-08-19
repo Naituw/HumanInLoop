@@ -484,7 +484,7 @@ export interface AgentsInit {
   newTaskSupported: boolean;
 }
 
-export type AgentKind = "claude" | "codex" | "cursor" | "grok";
+export type AgentKind = "claude" | "codex" | "cursor" | "grok" | "pi";
 
 /** 生命周期 hook 安装状态（实验区开关据此渲染）。 */
 export interface LifecycleStatus {
@@ -785,6 +785,7 @@ export interface AgentTaskReadiness {
   label: string;
   command: string;
   executable: string | null;
+  version: string | null;
   binaryReady: boolean;
   lifecycleReady: boolean;
   integrationReady: boolean;
@@ -911,7 +912,7 @@ export interface ClaudeHookStatus {
   supported: boolean;
 }
 
-export type AgentId = "cursor" | "claude" | "codex" | "grok";
+export type AgentId = "cursor" | "claude" | "codex" | "grok" | "pi";
 
 export interface UpdateInfo {
   available: boolean;
@@ -967,8 +968,13 @@ export interface AgentModeStatus {
   permissionNeedsUpdate: boolean;
   stop: StopStatus;
   askQuestion: AskQuestionStatus;
+  mcpSupported: boolean;
   mcpConfigPath: string;
   mcpConfigInstalled: boolean;
+  runtimeArtifactKind: "hook" | "extension";
+  agentVersion: string | null;
+  minimumVersion: string | null;
+  versionSupported: boolean;
 }
 
 /** 接管 Claude 内置 AskUserQuestion 的开关状态（仅 Claude Code 支持）。 */

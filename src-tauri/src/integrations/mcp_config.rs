@@ -105,6 +105,7 @@ fn format_of(target: AgentTarget) -> Format {
     match target {
         AgentTarget::Codex | AgentTarget::Grok => Format::Toml,
         AgentTarget::Cursor | AgentTarget::ClaudeCode => Format::Json,
+        AgentTarget::Pi => Format::Json,
     }
 }
 
@@ -115,12 +116,13 @@ fn config_path(target: AgentTarget) -> PathBuf {
         AgentTarget::ClaudeCode => paths::claude_json(),
         AgentTarget::Codex => paths::codex_config_toml(),
         AgentTarget::Grok => paths::grok_config_toml(),
+        AgentTarget::Pi => paths::config_dir().join("unsupported-pi-mcp.json"),
     }
 }
 
 /// 当前平台是否支持（三家配置读写均跨平台）。
-pub fn supported(_target: AgentTarget) -> bool {
-    true
+pub fn supported(target: AgentTarget) -> bool {
+    target != AgentTarget::Pi
 }
 
 /// 配置展示路径（home 前缀折叠为 `~`）。
@@ -130,6 +132,9 @@ pub fn display_path(target: AgentTarget) -> String {
 
 /// 是否已写入本 server 条目。
 pub fn is_installed(target: AgentTarget) -> bool {
+    if !supported(target) {
+        return false;
+    }
     let path = config_path(target);
     match format_of(target) {
         Format::Json => read_json_value(&path)
@@ -144,6 +149,9 @@ pub fn is_installed(target: AgentTarget) -> bool {
 
 /// 已安装但内容（command 绝对路径 / args / Codex 超时）与最新模板不一致 → 需更新。
 pub fn needs_update(target: AgentTarget) -> bool {
+    if !supported(target) {
+        return false;
+    }
     if !is_installed(target) {
         return false;
     }
@@ -163,18 +171,29 @@ pub fn needs_update(target: AgentTarget) -> bool {
 
 /// 安装：写入 / 更新本 server 条目（最小化编辑，保留用户其它内容）。
 pub fn install(target: AgentTarget) -> Result<String> {
+    if !supported(target) {
+        return Err(anyhow!("MCP integration is unsupported for Pi"));
+    }
     write_entry(target)?;
     Ok(crate::i18n::tr(crate::i18n::Lang::current(), "cmd.mcpConfigInstalled").to_string())
 }
 
 /// 更新：与安装同样写入逻辑，仅反馈文案不同。
 pub fn update(target: AgentTarget) -> Result<String> {
+    if !supported(target) {
+        return Err(anyhow!("MCP integration is unsupported for Pi"));
+    }
     write_entry(target)?;
     Ok(crate::i18n::tr(crate::i18n::Lang::current(), "cmd.mcpConfigUpdated").to_string())
 }
 
 /// 卸载：移除本 server 条目（保留用户其它条目）；条目本就不存在则 no-op。
 pub fn uninstall(target: AgentTarget) -> Result<String> {
+    if !supported(target) {
+        return Ok(
+            crate::i18n::tr(crate::i18n::Lang::current(), "cmd.mcpConfigRemoved").to_string(),
+        );
+    }
     let path = config_path(target);
     if target == AgentTarget::Codex && matches!(path.try_exists(), Ok(false)) {
         clear_codex_ownership_without_config(&paths::integration_state_file())?;

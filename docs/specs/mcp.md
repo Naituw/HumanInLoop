@@ -1,6 +1,7 @@
 # 需求：MCP 模式支持（Codex / Claude Code / Cursor / Grok）
 
 > 状态：已实现，覆盖 Codex / Claude Code / Cursor / Grok。
+> Pi Agent 明确不进入 MCP 能力面：Pi 集成只提供 None/CLI，并由受管 Extension 处理超时与生命周期；见 `docs/plans/pi-agent-integration.md`。
 > 关联计划：`docs/plans/mcp.md`
 > 影响面：新增 `AskHuman mcp` 子命令（STDIO MCP server）、MCP 工具与参考提示词、四家 MCP 配置集成、设置「Agent」Tab 三态模式、`agents`/`doctor` CLI 状态、i18n 与 `rmcp`依赖。上下文恢复另追加了向后兼容的 daemon IPC 内部消息，**不改** stdout 结果区块契约、退出码语义、四个 IM 渠道和弹窗交互。
 

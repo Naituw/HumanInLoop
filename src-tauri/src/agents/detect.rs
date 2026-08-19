@@ -45,6 +45,14 @@ const SELF_MARKERS: [&str; 2] = ["askhuman", "humaninloop"];
 /// 判不出返回 `None`（调用方应按 intended 处理，避免漏报）。
 pub fn detect_running_agent_from(env: &HashMap<String, String>) -> Option<AgentKind> {
     let has = |k: &str| env.contains_key(k);
+    if env
+        .get("PI_CODING_AGENT")
+        .is_some_and(|value| value == "true")
+        || has("PI_SESSION_ID")
+        || has("PI_SESSION_FILE")
+    {
+        return Some(AgentKind::Pi);
+    }
     // Grok **必须**最先判：它在**每个** hook 子进程都注入 `CLAUDE_PROJECT_DIR`（Claude 兼容别名），
     // 并会合并触发 `~/.claude`/`~/.cursor` 的兼容 hook。凭 `GROK_HOOK_EVENT`（hook runner 恒注入）/
     // `GROK_SESSION_ID` 认出真实家族是 Grok，配合 reporter 的「running==Grok 且 intended!=Grok 跳过」
@@ -84,6 +92,7 @@ pub fn session_id_env_var(kind: AgentKind) -> &'static str {
         AgentKind::Cursor => "CURSOR_CONVERSATION_ID",
         // Grok 在每个 hook 子进程注入 `GROK_SESSION_ID`（见 grok hooks 文档）。
         AgentKind::Grok => "GROK_SESSION_ID",
+        AgentKind::Pi => "PI_SESSION_ID",
     }
 }
 
@@ -125,6 +134,13 @@ fn matches_agent(entry: &ProcEntry, kind: AgentKind) -> bool {
         }
         // Grok 可执行名为 `grok`（软链）或 `grok-macos-*`（真身），故按子串 `grok` 匹配。
         AgentKind::Grok => comm.contains("grok") || argv0_base.contains("grok"),
+        // Keep Pi matching exact: the two-letter name appears in ordinary arguments frequently.
+        AgentKind::Pi => {
+            argv0_base == "pi"
+                || argv0_base == "pi.js"
+                || command.contains("/pi-coding-agent/")
+                || command.contains("\\pi-coding-agent\\")
+        }
     }
 }
 
@@ -242,7 +258,8 @@ pub fn walk_agent_pid_from_self(kind: AgentKind) -> Option<u32> {
 /// 会话 ID），但进程树依旧能定位到 agent 本体。返回的 pid 是当次现取、真实存活的（可用作 registry
 /// 按 pid 匹配的键）；拿不到 `session_id`。
 pub fn walk_any_agent(start_pid: u32) -> Option<(AgentKind, u32)> {
-    const KINDS: [AgentKind; 4] = [
+    const KINDS: [AgentKind; 5] = [
+        AgentKind::Pi,
         AgentKind::Grok,
         AgentKind::Codex,
         AgentKind::Claude,
@@ -677,6 +694,21 @@ mod tests {
         // Cursor 兼容性会设 CLAUDE_PROJECT_DIR，但必须判成 cursor。
         let env = env_of(&[("CURSOR_AGENT", "1"), ("CLAUDE_PROJECT_DIR", "/x")]);
         assert_eq!(detect_running_agent_from(&env), Some(AgentKind::Cursor));
+    }
+
+    #[test]
+    fn detect_pi_from_native_session_environment() {
+        let env = env_of(&[
+            ("PI_CODING_AGENT", "1"),
+            ("PI_SESSION_ID", "pi-session"),
+            ("PI_SESSION_FILE", "/tmp/pi-session.jsonl"),
+            ("CLAUDE_PROJECT_DIR", "/x"),
+        ]);
+        assert_eq!(detect_running_agent_from(&env), Some(AgentKind::Pi));
+        assert_eq!(
+            session_id_from_env_map(AgentKind::Pi, &env),
+            Some("pi-session".to_string())
+        );
     }
 
     #[test]

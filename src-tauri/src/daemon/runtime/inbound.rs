@@ -906,6 +906,18 @@ pub(super) async fn continue_task_picker(
                 return;
             }
             payload.kind = kind.as_str().to_string();
+            if kind == AgentKind::Pi {
+                start_task_input(
+                    state,
+                    channel_id,
+                    payload,
+                    crate::integrations::agent_launch::LaunchPermission::AgentDefault,
+                    config,
+                    lang,
+                )
+                .await;
+                return;
+            }
             match config.agent_tasks.permission_prompt {
                 crate::config::AgentTaskPermission::Ask => {
                     let options = vec![

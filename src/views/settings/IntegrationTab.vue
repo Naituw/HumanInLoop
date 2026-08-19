@@ -273,6 +273,7 @@ const {
           }}</span>
         </button>
         <button
+          v-if="a.hasMcp"
           type="button"
           class="seg"
           :class="{ active: modes[a.id].mode === 'mcp' }"
@@ -298,6 +299,22 @@ const {
 
     <template v-if="modes[a.id].mode !== 'none'">
       <hr class="divider" />
+
+      <p
+        v-if="a.id === 'pi' && !modes[a.id].versionSupported"
+        class="result err"
+      >
+        {{
+          modes[a.id].agentVersion
+            ? t("settings.integration.piVersionUnsupported", {
+                version: modes[a.id].agentVersion,
+                minimum: modes[a.id].minimumVersion,
+              })
+            : t("settings.integration.piVersionMissing", {
+                minimum: modes[a.id].minimumVersion,
+              })
+        }}
+      </p>
 
       <!-- Rules / Skill（CLI / MCP 共有；Grok 为 skill） -->
       <div class="row agent-row">
@@ -370,7 +387,9 @@ const {
         <template v-if="a.hasTimeoutHook">
           <div class="row agent-row">
             <span class="label">{{
-              t("settings.integration.hookLabel")
+              modes[a.id].runtimeArtifactKind === "extension"
+                ? t("settings.integration.extensionLabel")
+                : t("settings.integration.hookLabel")
             }}</span>
             <span class="badge">
               <span
@@ -421,7 +440,11 @@ const {
             </div>
           </div>
           <p class="card-desc agent-hint">
-            {{ t("settings.integration.hookShort") }}
+            {{
+              modes[a.id].runtimeArtifactKind === "extension"
+                ? t("settings.integration.piExtensionHint")
+                : t("settings.integration.hookShort")
+            }}
           </p>
           <p
             v-if="!modes[a.id].timeoutHookSupported"
@@ -465,7 +488,7 @@ const {
       </template>
 
       <!-- MCP 模式：MCP 配置 -->
-      <template v-if="modes[a.id].mode === 'mcp'">
+      <template v-if="modes[a.id].mode === 'mcp' && modes[a.id].mcpSupported">
         <hr class="divider" />
         <div class="row agent-row">
           <span class="label">{{
@@ -709,7 +732,11 @@ const {
         </p>
       </template>
       <p v-else class="card-desc agent-hint">
-        {{ t("settings.integration.permissionUnsupported") }}
+        {{
+          a.id === 'pi'
+            ? t("settings.integration.piPermissionUnsupported")
+            : t("settings.integration.permissionUnsupported")
+        }}
       </p>
     </template>
 

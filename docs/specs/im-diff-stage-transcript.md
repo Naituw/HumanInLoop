@@ -40,7 +40,7 @@
 | D18 | 思考块 | 能识别则 **默认折叠**（HTML `<details>`；docx 用「思考」小节/缩写） |
 | D19 | 工具块 | 概览：工具名 + 关键参数摘要；**默认折叠**详情（入参/结果摘要） |
 | D20 | AskHuman 专项 | 识别 Bash/Shell 中的 AskHuman CLI 与 MCP `ask`，渲染独立「向人类提问」块（问题摘要 + 可解析的人类答复） |
-| D21 | agent 格式 | 四家（Claude / Cursor / Codex / Grok）**best-effort**：统一中间事件模型；不识别的段落降级展示或跳过 |
+| D21 | agent 格式 | 五家（Claude / Cursor / Codex / Grok / Pi）**best-effort**：统一中间事件模型；Pi 解析 v3 message/toolResult/compaction/branch_summary，自定义 sessionDir 使用 daemon 已验证路径；不识别的段落降级展示或跳过 |
 | D22 | 门控 | 与 `/status` 相同：依赖 daemon + 生命周期追踪；**不另设**实验开关；无 agent 时文本提示 |
 | D23 | `/help` | 动态 help 增加三条命令说明（含 `{p}` 前缀） |
 

@@ -1,11 +1,11 @@
 # 需求：从当前 Agent 会话立即分叉新会话
 
-> 状态：已实现并验收；Codex / Grok 真实活动源会话 E2E 通过（2026-08-09）。
+> 状态：已实现并验收；Codex / Grok 真实活动源会话 E2E 通过（2026-08-09）；Pi 适配已实现，真实 E2E 待本机安装 Pi 后执行。
 > 关联能力：`docs/specs/im-agent-task-launch.md`、`docs/specs/gui-agent-task-launch.md`、
 > `docs/specs/gui-agent-console.md`、`docs/specs/im-watch.md`、
 > `docs/specs/agent-lifecycle-tracking.md`。
 > 首版平台：macOS + Terminal.app。
-> 首版 Agent：Claude Code / Codex / Grok；Cursor 暂不支持。
+> 当前 Agent：Claude Code / Codex / Grok / Pi；Cursor 暂不支持。
 
 ## 1. 背景与目标
 
@@ -73,6 +73,7 @@ worktree。
 | Codex | 0.145.0 | `codex fork <sid> <prompt>` | 支持；CLI `fork` 为稳定命令，App Server 另有 `thread/fork` |
 | Cursor Agent CLI | 2026.07.23-e383d2b | 无 | 不支持；只有 resume/continue 与创建空 chat |
 | Grok | 1.0.0 | `grok --resume <sid> --fork-session <prompt>` | 支持；新 session 从会话副本继续 |
+| Pi | >=0.82.0 | `pi --fork <sid> <prompt>` | 支持；自定义 sessionDir 由已验证 transcript path 定位 |
 
 Cursor IDE 有手动 **Duplicate Chat**，但 AskHuman 的启动面是 `cursor-agent` CLI；IDE UI 自动化和私有
 数据库复制都不是稳定接口，不能据此宣称支持。首版不做 transcript 注入式“近似 Fork”。
@@ -95,7 +96,7 @@ Cursor IDE 有手动 **Duplicate Chat**，但 AskHuman 的启动面是 `cursor-a
 | D1 | 核心行为 | 源 Agent 继续运行；提交指令后立即原生 Fork，不等待 `turn-end` |
 | D2 | 复制边界 | 只复制原生已持久化会话上下文，不复制运行中进程、临时授权或未发送输入 |
 | D3 | 工作区 | 与源会话共用 cwd；不创建 worktree |
-| D4 | Agent 范围 | Claude Code / Codex / Grok；Cursor V1 不支持 |
+| D4 | Agent 范围 | Claude Code / Codex / Grok / Pi；Cursor V1 不支持 |
 | D5 | 能力判定 | 增加运行时 `forkReady` probe/cache；不能只按 AgentKind 写死 |
 | D6 | 初始源状态 | Working + Idle 可选；Ended 不进入选择列表 |
 | D7 | 选择后结束 | flow 已锁定的源会话随后 Ended，仍从其已持久化最终状态继续 Fork |

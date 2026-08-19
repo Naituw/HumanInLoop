@@ -13,7 +13,7 @@ use crate::integrations::{
 use serde_json::Value;
 use std::process::exit;
 
-const AGENTS: [&str; 4] = ["cursor", "claude", "codex", "grok"];
+const AGENTS: [&str; 5] = ["cursor", "claude", "codex", "grok", "pi"];
 
 pub fn dispatch(args: &[String], lang: Lang) {
     // 无子命令 → 打印 help（与 channel/config 一致；不再默认开状态窗口）。
@@ -173,8 +173,8 @@ fn mode_cmd(args: &[String], lang: Lang) -> Result<(), String> {
     let target = AgentTarget::parse(agent).ok_or_else(|| {
         cfgio::t(
             lang,
-            &format!("unknown agent: {agent} (expected cursor|claude|codex|grok)"),
-            &format!("未知 agent: {agent}（应为 cursor|claude|codex|grok）"),
+            &format!("unknown agent: {agent} (expected cursor|claude|codex|grok|pi)"),
+            &format!("未知 agent: {agent}（应为 cursor|claude|codex|grok|pi）"),
         )
     })?;
     let kind = AgentKind::parse(agent).unwrap();
@@ -230,8 +230,8 @@ fn parse_target(agent: &str, lang: Lang) -> Result<AgentTarget, String> {
     AgentTarget::parse(agent).ok_or_else(|| {
         cfgio::t(
             lang,
-            &format!("unknown agent: {agent} (expected cursor|claude|codex|grok)"),
-            &format!("未知 agent: {agent}（应为 cursor|claude|codex|grok）"),
+            &format!("unknown agent: {agent} (expected cursor|claude|codex|grok|pi)"),
+            &format!("未知 agent: {agent}（应为 cursor|claude|codex|grok|pi）"),
         )
     })
 }
@@ -412,6 +412,7 @@ fn cleanup_cmd(args: &[String], lang: Lang) -> Result<(), String> {
         (AgentTarget::ClaudeCode, AgentKind::Claude),
         (AgentTarget::Codex, AgentKind::Codex),
         (AgentTarget::Grok, AgentKind::Grok),
+        (AgentTarget::Pi, AgentKind::Pi),
     ] {
         if let Err(error) = agent_mode::set(target, agent_mode::Mode::None) {
             errors.push(format!("{} integration: {error}", kind.label()));
@@ -528,12 +529,20 @@ fn show(args: &[String], lang: Lang) -> Result<(), String> {
                 &upd,
             ),
             AgentTarget::Codex | AgentTarget::Grok => na.clone(),
+            AgentTarget::Pi => hook_state(
+                agent_mode::timeout_hook_is_installed(target),
+                agent_mode::timeout_hook_needs_update(target),
+                &yes,
+                &no,
+                &upd,
+            ),
         };
-        print_line(&format!(
-            "  {}: {}",
-            cfgio::t(lang, "timeout hook", "超时 hook"),
-            hook
-        ));
+        let hook_label = if target == AgentTarget::Pi {
+            cfgio::t(lang, "runtime extension", "运行时 Extension")
+        } else {
+            cfgio::t(lang, "timeout hook", "超时 hook")
+        };
+        print_line(&format!("  {}: {}", hook_label, hook));
 
         let permission = agent_permission::status(target);
         let permission_text = if !permission.supported {
@@ -570,7 +579,9 @@ fn show(args: &[String], lang: Lang) -> Result<(), String> {
         ));
 
         // MCP 配置（用户级全局）
-        let mcp = if mcp_config::is_installed(target) {
+        let mcp = if !mcp_config::supported(target) {
+            na.clone()
+        } else if mcp_config::is_installed(target) {
             format!(
                 "{yes}{}",
                 if mcp_config::needs_update(target) {
@@ -582,12 +593,20 @@ fn show(args: &[String], lang: Lang) -> Result<(), String> {
         } else {
             no.clone()
         };
-        print_line(&format!(
-            "  {}: {} — {}",
-            cfgio::t(lang, "mcp config", "MCP 配置"),
-            mcp,
-            mcp_config::display_path(target)
-        ));
+        if mcp_config::supported(target) {
+            print_line(&format!(
+                "  {}: {} — {}",
+                cfgio::t(lang, "mcp config", "MCP 配置"),
+                mcp,
+                mcp_config::display_path(target)
+            ));
+        } else {
+            print_line(&format!(
+                "  {}: {}",
+                cfgio::t(lang, "mcp config", "MCP 配置"),
+                mcp
+            ));
+        }
 
         // Lifecycle（实验性）
         let st = agent_lifecycle::status(kind);
@@ -630,33 +649,35 @@ fn hook_state(installed: bool, needs_update: bool, yes: &str, no: &str, upd: &st
 fn help(lang: Lang) -> String {
     cfgio::t(
         lang,
-        "AskHuman agents — agent status + integrations (cursor | claude | codex | grok)\n\
+        "AskHuman agents — agent status + integrations (cursor | claude | codex | grok | pi)\n\
 \n\
   agents monitor [--json|--text]     Live agent status (opens a window when a GUI is available)\n\
   agents mode <agent> [none|cli|mcp] Switch the integration mode (omit to query); auto-swaps products\n\
   agents update [<agent>]            Refresh each current mode's complete managed bundle\n\
   agents permission <claude|codex> [on|off]  Query or set permission approval\n\
-  agents stop <claude|codex|cursor> [on|off]  Query or set Stop confirmation\n\
+  agents stop <claude|codex|cursor|pi> [on|off]  Query or set Stop confirmation\n\
   agents lifecycle <agent> [on|off]  Query or set lifecycle tracking\n\
   agents cleanup                     Remove every AskHuman-managed Agent artifact\n\
   agents show [<agent>]              Manual-integration prompt + paste paths + install status\n\
 \n\
   Modes: cli = rules + timeout hook;  mcp = rules/skill + MCP server config;  none = remove.\n\
   Grok only supports none | mcp (skill + MCP config); it has no CLI mode and no timeout hook.\n\
+  Pi only supports none | cli; its runtime artifact is a managed Extension and Stop defaults on.\n\
   Legacy install/uninstall and per-artifact write flags have been removed.",
-        "AskHuman agents —— agent 状态 + 集成（cursor | claude | codex | grok）\n\
+        "AskHuman agents —— agent 状态 + 集成（cursor | claude | codex | grok | pi）\n\
 \n\
   agents monitor [--json|--text]     实时 agent 状态（有 GUI 时开窗）\n\
   agents mode <agent> [none|cli|mcp] 切换集成模式（省略则查询）；自动切换底层产物\n\
   agents update [<agent>]            更新当前模式的完整托管产物包\n\
   agents permission <claude|codex> [on|off]  查询或设置权限审批\n\
-  agents stop <claude|codex|cursor> [on|off]  查询或设置结束确认\n\
+  agents stop <claude|codex|cursor|pi> [on|off]  查询或设置结束确认\n\
   agents lifecycle <agent> [on|off]  查询或设置生命周期追踪\n\
   agents cleanup                     移除全部由 AskHuman 托管的 Agent 产物\n\
   agents show [<agent>]              手动集成提示词 + 粘贴位置 + 安装状态\n\
 \n\
   模式: cli = 规则 + 超时 hook；mcp = 规则/skill + MCP server 配置；none = 移除。\n\
   Grok 仅支持 none | mcp（skill + MCP 配置）；无 CLI 模式、无超时 hook。\n\
+  Pi 仅支持 none | cli；运行时产物为托管 Extension，Stop 默认开启。\n\
   旧 install/uninstall 与逐产物写 flags 已移除。",
     )
 }

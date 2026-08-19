@@ -567,7 +567,7 @@ export const newTaskInit = () => invoke<NewTaskInit>("new_task_init");
 export const newTaskProjects = () =>
   invoke<NewTaskProject[]>("new_task_projects");
 
-/** 项目候选（含四家有界冷扫描合并）；首屏后后台调用。 */
+/** 项目候选（含五家有界冷扫描合并）；首屏后后台调用。 */
 export const newTaskProjectsRefreshed = () =>
   invoke<NewTaskProject[]>("new_task_projects_refreshed");
 

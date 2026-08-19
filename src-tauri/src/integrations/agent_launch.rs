@@ -104,6 +104,7 @@ pub struct AgentReadiness {
     pub label: String,
     pub command: String,
     pub executable: Option<String>,
+    pub version: Option<String>,
     pub binary_ready: bool,
     pub lifecycle_ready: bool,
     pub integration_ready: bool,
@@ -119,14 +120,29 @@ pub fn readiness(kind: AgentKind) -> AgentReadiness {
     let target = target(kind);
     let mode = agent_mode::current(target);
     let integration_ready = !integration_unavailable(target, mode);
-    let binary_ready = executable.is_some();
+    let pi_version = (kind == AgentKind::Pi)
+        .then(|| executable.as_deref().and_then(detect_pi_version))
+        .flatten();
+    let version_ready = kind != AgentKind::Pi || pi_version.is_some_and(pi_version_supported);
+    let binary_ready = executable.is_some() && version_ready;
     let lifecycle_ready = lifecycle.supported && lifecycle.installed && !lifecycle.outdated;
     let mut diagnostics = Vec::new();
     if !binary_ready {
-        diagnostics.push(format!(
-            "{} CLI was not found in the login shell",
-            kind.label()
-        ));
+        if executable.is_none() {
+            diagnostics.push(format!(
+                "{} CLI was not found in the login shell",
+                kind.label()
+            ));
+        } else if kind == AgentKind::Pi {
+            diagnostics.push(match pi_version {
+                Some((major, minor, patch)) => format!(
+                    "Pi {major}.{minor}.{patch} is unsupported; AskHuman requires Pi >= 0.82.0"
+                ),
+                None => {
+                    "Pi version could not be detected; AskHuman requires Pi >= 0.82.0".to_string()
+                }
+            });
+        }
     }
     if !lifecycle_ready {
         diagnostics.push(format!(
@@ -145,6 +161,7 @@ pub fn readiness(kind: AgentKind) -> AgentReadiness {
         label: kind.label().to_string(),
         command,
         executable,
+        version: pi_version.map(|(major, minor, patch)| format!("{major}.{minor}.{patch}")),
         binary_ready,
         lifecycle_ready,
         integration_ready,
@@ -251,6 +268,9 @@ fn fork_readiness_uncached(kind: AgentKind) -> ForkReadiness {
             text.contains("SESSION_ID") && text.to_ascii_lowercase().contains("fork")
         }),
         AgentKind::Cursor => false,
+        AgentKind::Pi => {
+            probe_help(&executable, &["--help"]).is_some_and(|text| text.contains("--fork"))
+        }
     };
     ForkReadiness {
         kind,
@@ -438,6 +458,11 @@ fn create_record_internal(
     warnings: &[String],
     launch_mode: LaunchMode,
 ) -> Result<LaunchRecord> {
+    if kind == AgentKind::Pi && permission != LaunchPermission::AgentDefault {
+        return Err(anyhow!(
+            "Pi does not expose a built-in permission mode; use AgentDefault"
+        ));
+    }
     let task = task.trim();
     if task.is_empty() {
         return Err(anyhow!("task must not be empty"));
@@ -765,6 +790,9 @@ fn agent_args(
             AgentKind::Cursor => {
                 // Creation rejects this mode through `fork_readiness`; keep helper fail-closed.
             }
+            AgentKind::Pi => {
+                args.extend(["--fork".into(), source_session_id.clone(), prompt.into()]);
+            }
         },
     }
     args
@@ -959,6 +987,7 @@ fn target(kind: AgentKind) -> AgentTarget {
         AgentKind::Codex => AgentTarget::Codex,
         AgentKind::Cursor => AgentTarget::Cursor,
         AgentKind::Grok => AgentTarget::Grok,
+        AgentKind::Pi => AgentTarget::Pi,
     }
 }
 
@@ -968,6 +997,7 @@ fn command_name(kind: AgentKind) -> &'static str {
         AgentKind::Codex => "codex",
         AgentKind::Cursor => "cursor-agent",
         AgentKind::Grok => "grok",
+        AgentKind::Pi => "pi",
     }
 }
 
@@ -977,7 +1007,30 @@ fn yolo_flag(kind: AgentKind) -> &'static str {
         AgentKind::Codex => "--dangerously-bypass-approvals-and-sandbox",
         AgentKind::Cursor => "--yolo",
         AgentKind::Grok => "--always-approve",
+        AgentKind::Pi => "",
     }
+}
+
+fn detect_pi_version(executable: &str) -> Option<(u64, u64, u64)> {
+    let output = probe_help(executable, &["--version"])?;
+    parse_pi_version(&output)
+}
+
+fn parse_pi_version(output: &str) -> Option<(u64, u64, u64)> {
+    output
+        .split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+        .filter(|part| !part.is_empty())
+        .find_map(|part| {
+            let mut numbers = part.split('.').map(str::parse::<u64>);
+            let major = numbers.next()?.ok()?;
+            let minor = numbers.next()?.ok()?;
+            let patch = numbers.next().transpose().ok()?.unwrap_or(0);
+            Some((major, minor, patch))
+        })
+}
+
+fn pi_version_supported(version: (u64, u64, u64)) -> bool {
+    version >= (0, 82, 0)
 }
 
 fn record_path(token: &str) -> PathBuf {
@@ -1058,6 +1111,7 @@ mod tests {
         );
         assert_eq!(yolo_flag(AgentKind::Cursor), "--yolo");
         assert_eq!(yolo_flag(AgentKind::Grok), "--always-approve");
+        assert_eq!(yolo_flag(AgentKind::Pi), "");
     }
 
     #[test]
@@ -1103,6 +1157,21 @@ mod tests {
             prompt
         )
         .is_empty());
+        assert_eq!(
+            agent_args(AgentKind::Pi, LaunchPermission::AgentDefault, &fork, prompt),
+            vec!["--fork", "source-123", prompt]
+        );
+    }
+
+    #[test]
+    fn pi_version_gate_accepts_082_and_newer() {
+        assert_eq!(parse_pi_version("pi 0.82.0"), Some((0, 82, 0)));
+        assert_eq!(parse_pi_version("v1.3.4\n"), Some((1, 3, 4)));
+        assert_eq!(parse_pi_version("pi version 0.81"), Some((0, 81, 0)));
+        assert!(pi_version_supported((0, 82, 0)));
+        assert!(pi_version_supported((0, 83, 0)));
+        assert!(!pi_version_supported((0, 81, 99)));
+        assert_eq!(parse_pi_version("unknown"), None);
     }
 
     #[test]
@@ -1195,6 +1264,22 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("workspace"));
+    }
+
+    #[test]
+    fn pi_rejects_permission_override_before_launch_side_effects() {
+        let error = create_record(
+            LaunchSource {
+                channel: "test".into(),
+                target: String::new(),
+            },
+            Path::new("/nonexistent-askhuman-test-dir"),
+            AgentKind::Pi,
+            LaunchPermission::Yolo,
+            "task",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("built-in permission mode"));
     }
 
     #[test]

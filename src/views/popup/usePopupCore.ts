@@ -595,7 +595,7 @@ export function usePopupCore() {
   const agentLaunchId = ref<string | null>(null);
   const agentConsoleSessionId = ref("");
   const agentTerminal = ref<string | null>(null);
-  // agent badge 文案：本地化家族名（Claude Code / Codex / Cursor / Grok）；未知家族回退原始标识。
+  // agent badge 文案：本地化已知家族名；未知家族回退原始标识。
   const agentLabel = computed(() => {
     const k = agentKind.value;
     if (!k) return "";

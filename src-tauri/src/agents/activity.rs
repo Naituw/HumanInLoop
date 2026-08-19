@@ -347,6 +347,59 @@ fn push_events(kind: AgentKind, v: &Value, out: &mut Vec<Ev>) {
         AgentKind::Cursor | AgentKind::Claude => push_events_msg(v, out),
         AgentKind::Codex => push_events_codex(v, out),
         AgentKind::Grok => push_events_grok(v, out),
+        AgentKind::Pi => push_events_pi(v, out),
+    }
+}
+
+/// Pi v3 JSONL wraps every conversational message in `{ type: "message", message: ... }`.
+fn push_events_pi(v: &Value, out: &mut Vec<Ev>) {
+    if v.get("type").and_then(Value::as_str) != Some("message") {
+        return;
+    }
+    let Some(message) = v.get("message") else {
+        return;
+    };
+    let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+    if role == "toolResult" {
+        out.push(Ev::ToolResult(
+            message
+                .get("isError")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        ));
+        return;
+    }
+    let Some(content) = message.get("content") else {
+        return;
+    };
+    if role == "assistant" {
+        let Some(parts) = content.as_array() else {
+            return;
+        };
+        for part in parts {
+            match part.get("type").and_then(Value::as_str).unwrap_or("") {
+                "text" => {
+                    if let Some(text) = part.get("text").and_then(Value::as_str) {
+                        let text = text.trim();
+                        if !text.is_empty() {
+                            out.push(Ev::Text(text.to_string()));
+                        }
+                    }
+                }
+                "toolCall" => {
+                    let name = part.get("name").and_then(Value::as_str).unwrap_or("");
+                    let arguments = part.get("arguments");
+                    if is_todo_tool(name) {
+                        if let Some(event) = parse_todos(arguments) {
+                            out.push(event);
+                        }
+                    } else {
+                        out.push(Ev::Tool(classify_tool(name, arguments)));
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -1141,6 +1194,20 @@ mod tests {
         let step = a.steps.last().unwrap();
         assert_eq!(step.tool.label, ToolLabel::Read);
         assert_eq!(step.tool.object.as_deref(), Some("registry.rs"));
+    }
+
+    #[test]
+    fn pi_v3_text_and_tool_result_are_replayed() {
+        let ls = lines(&[
+            r#"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"检查文件"},{"type":"toolCall","id":"tool-1","name":"read","arguments":{"path":"/x/src/main.rs"}}]}}"#,
+            r#"{"type":"message","message":{"role":"toolResult","toolCallId":"tool-1","content":[{"type":"text","text":"ok"}],"isError":false}}"#,
+        ]);
+        let activity = analyze(AgentKind::Pi, &ls).unwrap();
+        assert_eq!(activity.text.as_deref(), Some("检查文件"));
+        let step = activity.steps.last().unwrap();
+        assert_eq!(step.tool.label, ToolLabel::Read);
+        assert_eq!(step.tool.object.as_deref(), Some("main.rs"));
+        assert_eq!(step.state, StepState::Done);
     }
 
     #[test]

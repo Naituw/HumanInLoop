@@ -1,6 +1,6 @@
 # 需求：Agent 生命周期追踪 + 状态窗口（实验性功能）
 
-> 状态：已实现（macOS/Linux/Windows），当前覆盖 Claude Code / Codex / Cursor / Grok。
+> 状态：已实现（macOS/Linux/Windows），当前覆盖 Claude Code / Codex / Cursor / Grok / Pi。
 > 关联计划：`docs/plans/agent-lifecycle-tracking.md`
 > 关联调研：`demo/agent-lifecycle/FINDINGS.md`（三家 hook 事件/env、Cursor 双触发去重、进程存活轮询为唯一不漏的结束信号、身份相关结论、各家标题来源——全部实测）
 > 影响面：daemon（新增 agent 注册表 + 存活轮询 + 持久化 + 闲退守卫 + 订阅推送）、IPC（`ipc/mod.rs` 新增消息）、CLI（`cli/mod.rs` 新增 `__agent-hook` 与 `agents` 子命令）、客户端（`client/` ask 顺带上报活动）、新 GUI 窗口（`?view=agents` + `app` 角色 + `commands`）、Hook 集成（新增三家 lifecycle hook 安装/卸载/状态 + Codex 信任哈希 Rust 实现）、配置（`config.rs` 新增 `experimental`）、设置前端（`SettingsView.vue` 实验区 + 新 Tab）、i18n。
@@ -16,6 +16,12 @@
 > ProcessIdToSessionId 和 GetProcessTimes 原生读取，不在热路径启动 PowerShell/WMI。Codex 生成
 > `commandWindows` 并按 Windows 实际命令计算 trusted hash；Claude/Cursor timeout 产物使用
 > PowerShell 5 兼容 `.ps1`。
+>
+> **Pi 补充（2026-08-19）**：Pi 不使用 JSON Hook；AskHuman 在
+> `~/.pi/agent/extensions/askhuman/index.ts` 管理一个 TypeScript Extension，将 `session_start`、
+> `agent_start`、`tool_call` / `tool_result`、`agent_settled`、`session_shutdown` 映射为同一 daemon
+> lifecycle 协议。自定义 `sessionDir` 通过 `PI_SESSION_FILE` 上报，并在 daemon 端核验 v3 header 的
+> session id/cwd 后持久化。最低支持 Pi 0.82.0；完整设计见 `docs/plans/pi-agent-integration.md`。
 
 ## 1. 背景
 
@@ -61,7 +67,7 @@ AskHuman agents status
 | D12 | TTL 兜底 | **仅当拿不到 / 无法轮询 pid 时**（如 Linux 上 Claude `CLAUDE_CODE_ENV_SCRUB` 的 PID namespace 隔离）启用：**超过 1 小时无任何活动**即判「已结束」。**任意 hook 事件**与**每次 `AskHuman` 提问调用**都重置该 session 的活动时间（一个 session 跑超过 1h 很正常，期间可能多次提问）。pid 可轮询时以轮询为准、**不**应用 TTL |
 | D13 | 排序 / 分组 | 顶层**按类型分组**（Claude / Codex / Cursor 区块）；区块内**按状态【工作中 → 空闲 → 已结束】**，同状态内按时间倒序（工作中/空闲按「最近活动」，已结束按「结束时间」） |
 | D14 | 显示范围 | **跨项目全部** agent（daemon 为 per-user，能看到所有项目） |
-| D15 | UI 入口 | 当前入口为常显的「高级」Tab；macOS、Linux 与 Windows 均显示四家追踪开关。早期 `config.experimental.enabled` 只保留配置兼容。 |
+| D15 | UI 入口 | 当前入口为常显的「高级」Tab；macOS、Linux 与 Windows 均显示五家追踪开关。早期 `config.experimental.enabled` 只保留配置兼容。 |
 | D16 | per-agent 开关语义 | 开 = 安装用户级 lifecycle hook，关 = 卸载；开关状态以**实际安装状态**为准（同既有 hook 卡的 `*_status`）。与既有 timeout hook **各自独立**（不同标记、可共存）。**隐藏**「实验性功能」开关**不**卸载 hook（仅隐藏 UI；追踪继续） |
 | D17 | 写入方式 | 沿用既有 hook 的**格式保留编辑**（`claude_hook.rs` 的 jsonc CST 风格）：**只增删本功能自己的条目**，绝不改动其它 hook 的字节 / JSON 转义。Cursor=`~/.cursor/hooks.json`、Claude=`~/.claude/settings.json`、Codex=`~/.codex/config.toml` 的 `[hooks]` + `[hooks.state]` `trusted_hash`（**Rust 实现信任哈希**，参考 `FINDINGS §6.2` + `demo/agent-lifecycle/harness/codex-trust.cjs`） |
 | D18 | daemon 闲退 / 持久化 / 重连 | 闲时退出守卫**只受**【工作中 agent 数】与【状态窗口连接】影响（**空闲 agent 不保活**）；**版本更新 graceful-drain 不受 agent 影响**（仅在途 ASK 请求 gate drain，与今一致）；状态持久化 `agents.json`，daemon 重启 / 换新后重载并 `kill-0` 复核、剔除已死；状态窗口断连**自动重连**（必要时拉起 daemon） |

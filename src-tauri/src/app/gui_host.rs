@@ -656,6 +656,7 @@ fn detect_integration_updates() -> Vec<String> {
         ("claude", AgentTarget::ClaudeCode),
         ("codex", AgentTarget::Codex),
         ("grok", AgentTarget::Grok),
+        ("pi", AgentTarget::Pi),
     ]
     .into_iter()
     .filter(|&(_, target)| crate::integrations::agent_mode::needs_update(target))
@@ -690,6 +691,7 @@ fn integration_agent_label(id: &str) -> &str {
         "claude" => "Claude Code",
         "codex" => "Codex",
         "grok" => "Grok",
+        "pi" => "Pi",
         other => other,
     }
 }

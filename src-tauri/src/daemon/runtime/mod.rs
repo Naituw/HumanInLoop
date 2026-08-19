@@ -1364,6 +1364,7 @@ async fn control_loop(
                 pid,
                 hint_pid,
                 cwd,
+                transcript_path,
                 launch_id,
                 prompt_sha256,
                 ts,
@@ -1441,6 +1442,17 @@ async fn control_loop(
                         state
                             .agents
                             .apply_event(kind, ev, &session_id, resolved_pid, cwd, ts);
+                    if kind == AgentKind::Pi {
+                        if let Some(path) = transcript_path.as_deref().and_then(|path| {
+                            crate::agents::session_paths::register_pi(
+                                &session_id,
+                                path,
+                                event_cwd.as_deref(),
+                            )
+                        }) {
+                            changed |= state.agents.set_transcript_path(kind, &session_id, path);
+                        }
+                    }
                     if let Some(launch_id) = launch_id.as_deref() {
                         changed |= state.agents.set_launch_id(&session_id, launch_id);
                     }

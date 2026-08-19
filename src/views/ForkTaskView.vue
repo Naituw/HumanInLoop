@@ -23,6 +23,7 @@ const launching = ref(false);
 const error = ref("");
 
 const effectivePermission = computed<"agent-default" | "yolo" | null>(() => {
+  if (source.value?.kind === "pi") return "agent-default";
   const value =
     permissionPrompt.value === "ask" ? permissionChoice.value : permissionPrompt.value;
   return value === "agent-default" || value === "yolo" ? value : null;
@@ -149,9 +150,11 @@ onBeforeUnmount(() => {
           </section>
 
           <LaunchPermission
+            v-if="source.kind !== 'pi'"
             v-model="permissionChoice"
             :permission-prompt="permissionPrompt"
           />
+          <p v-else class="ft-source-note">{{ t("newTask.piPermissionHint") }}</p>
 
           <section class="nt-section">
             <label class="nt-label" for="ft-task">{{ t("forkTask.instruction") }}</label>

@@ -11,25 +11,28 @@ import { supportsAgentTasks } from "../../lib/platform";
 export function useLifecycleSettings(
   refreshAgentTaskSettings: (scan?: boolean) => Promise<void>,
 ) {
-  const LIFECYCLE_KINDS: AgentKind[] = ["claude", "codex", "cursor", "grok"];
+  const LIFECYCLE_KINDS: AgentKind[] = ["claude", "codex", "cursor", "grok", "pi"];
 
   const lifecycleStatus = ref<Record<AgentKind, LifecycleStatus>>({
     claude: { installed: false, outdated: false, supported: true },
     codex: { installed: false, outdated: false, supported: true },
     cursor: { installed: false, outdated: false, supported: true },
     grok: { installed: false, outdated: false, supported: true },
+    pi: { installed: false, outdated: false, supported: true },
   });
   const lifecycleBusy = ref<Record<AgentKind, boolean>>({
     claude: false,
     codex: false,
     cursor: false,
     grok: false,
+    pi: false,
   });
   const lifecycleError = ref<Record<AgentKind, string | null>>({
     claude: null,
     codex: null,
     cursor: null,
     grok: null,
+    pi: null,
   });
 
   async function refreshLifecycle() {

@@ -48,8 +48,13 @@ function modeStatus(
       installed: false,
       outdated: false,
     },
+    mcpSupported: true,
     mcpConfigPath: "~/.cursor/mcp.json",
     mcpConfigInstalled: false,
+    runtimeArtifactKind: "hook",
+    agentVersion: null,
+    minimumVersion: null,
+    versionSupported: true,
     ...overrides,
   };
 }
@@ -60,8 +65,9 @@ function agentDefinition(id: AgentId, hasTimeoutHook: boolean) {
     title: id,
     hasTimeoutHook,
     hasCli: id !== "grok",
+    hasMcp: id !== "pi",
     instructionKind: id === "grok" ? "skill" : "rule",
-    recommended: id === "cursor" || id === "claude" ? "cli" : "mcp",
+    recommended: id === "cursor" || id === "claude" || id === "pi" ? "cli" : "mcp",
   };
 }
 
@@ -258,4 +264,41 @@ describe("IntegrationTab", () => {
       expect(context.updateArtifact).toHaveBeenCalledWith(agent, "mcp");
     },
   );
+
+  it("shows Pi as CLI-only and labels the managed runtime as an Extension", () => {
+    const { wrapper } = mountAgent(
+      agentDefinition("pi", true),
+      modeStatus({
+        mode: "cli",
+        mcpSupported: false,
+        runtimeArtifactKind: "extension",
+        agentVersion: "0.82.0",
+        minimumVersion: "0.82.0",
+      }),
+    );
+    const card = wrapper.get("#integration-pi");
+    const modeLabels = card.findAll(".seg").map((button) => button.text());
+    expect(modeLabels).toContain(i18n.global.t("settings.integration.modeCli") + i18n.global.t("settings.integration.recommendedTag"));
+    expect(modeLabels).not.toContain(i18n.global.t("settings.integration.modeMcp"));
+    rowByLabel(wrapper, "pi", "settings.integration.extensionLabel");
+    expect(card.text()).toContain(
+      i18n.global.t("settings.integration.piPermissionUnsupported"),
+    );
+  });
+
+  it("reports an unsupported Pi version in the integration card", () => {
+    const { wrapper } = mountAgent(
+      agentDefinition("pi", true),
+      modeStatus({
+        mode: "cli",
+        mcpSupported: false,
+        runtimeArtifactKind: "extension",
+        agentVersion: "0.81.9",
+        minimumVersion: "0.82.0",
+        versionSupported: false,
+      }),
+    );
+    expect(wrapper.get("#integration-pi").text()).toContain("0.81.9");
+    expect(wrapper.get("#integration-pi").text()).toContain("0.82.0");
+  });
 });

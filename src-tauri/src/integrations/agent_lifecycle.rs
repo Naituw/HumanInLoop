@@ -78,6 +78,8 @@ fn events(kind: AgentKind) -> &'static [(&'static str, &'static str)] {
             ("StopFailure", "turn-end"),
             ("SessionEnd", "session-end"),
         ],
+        // Pi emits lifecycle events from the managed TypeScript extension, not JSON hooks.
+        AgentKind::Pi => &[],
     }
 }
 
@@ -121,6 +123,7 @@ pub fn any_installed() -> bool {
         AgentKind::Codex,
         AgentKind::Cursor,
         AgentKind::Grok,
+        AgentKind::Pi,
     ]
     .iter()
     .any(|k| status(*k).installed)
@@ -132,11 +135,15 @@ pub(crate) fn tracking_installed(kind: AgentKind) -> bool {
     if !supported() {
         return false;
     }
+    if kind == AgentKind::Pi {
+        return super::pi_extension::status().lifecycle;
+    }
     let (path, shape) = match kind {
         AgentKind::Claude => (paths::claude_settings_json(), Shape::Nested),
         AgentKind::Codex => (paths::codex_hooks_json(), Shape::Nested),
         AgentKind::Cursor => (paths::cursor_hooks_json(), Shape::Flat),
         AgentKind::Grok => (paths::grok_hooks_json(), Shape::Nested),
+        AgentKind::Pi => unreachable!(),
     };
     let Some(root) = read_value(&path) else {
         return false;
@@ -167,6 +174,7 @@ pub fn migrate_outdated() -> Vec<AgentKind> {
         AgentKind::Codex,
         AgentKind::Cursor,
         AgentKind::Grok,
+        AgentKind::Pi,
     ] {
         let st = status(kind);
         if st.installed && st.outdated && install(kind).is_ok() {
@@ -230,6 +238,14 @@ pub fn status(kind: AgentKind) -> LifecycleStatus {
         AgentKind::Codex => codex_status(),
         // Grok：全局 hooks 恒受信任，纯 JSON 状态即可（无 Codex 那种信任哈希校验）。
         AgentKind::Grok => json_status(kind, &paths::grok_hooks_json(), Shape::Nested),
+        AgentKind::Pi => {
+            let extension = super::pi_extension::status();
+            LifecycleStatus {
+                installed: extension.lifecycle,
+                outdated: extension.lifecycle && extension.outdated,
+                supported: true,
+            }
+        }
     }
 }
 
@@ -247,6 +263,7 @@ pub(crate) fn install_unlocked(kind: AgentKind) -> Result<String> {
         AgentKind::Cursor => json_install(kind, &exe, &paths::cursor_hooks_json(), Shape::Flat)?,
         AgentKind::Codex => codex_install(&exe)?,
         AgentKind::Grok => json_install(kind, &exe, &paths::grok_hooks_json(), Shape::Nested)?,
+        AgentKind::Pi => super::pi_extension::set_lifecycle_enabled(true)?,
     }
     Ok(message("cmd.lifecycleInstalled"))
 }
@@ -262,6 +279,7 @@ pub(crate) fn uninstall_unlocked(kind: AgentKind) -> Result<String> {
         AgentKind::Cursor => json_uninstall(kind, &paths::cursor_hooks_json(), Shape::Flat)?,
         AgentKind::Codex => codex_uninstall()?,
         AgentKind::Grok => json_uninstall(kind, &paths::grok_hooks_json(), Shape::Nested)?,
+        AgentKind::Pi => super::pi_extension::set_lifecycle_enabled(false)?,
     }
     super::agent_stop::reconcile_current_mode_unlocked(kind)?;
     Ok(message("cmd.lifecycleRemoved"))

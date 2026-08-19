@@ -347,6 +347,7 @@ export default {
       rulesLabel: "Rules",
       skillLabel: "Skill",
       hookLabel: "Timeout hook",
+      extensionLabel: "Pi Extension",
       mcpConfigLabel: "MCP config",
       reveal: "Locate",
       openFile: "Open",
@@ -357,6 +358,12 @@ export default {
       installRule: "Install Rule",
       hookShort:
         "Auto-extends the timeout to 24h when an AskHuman call is detected, so long waits aren't cancelled.",
+      piExtensionHint:
+        "Installs one managed Pi Extension for AskHuman timeout handling, lifecycle tracking, context recovery, interject delivery, and end-of-turn confirmation.",
+      piVersionUnsupported:
+        "Pi {version} is unsupported. AskHuman requires Pi {minimum} or newer.",
+      piVersionMissing:
+        "Pi was not found or its version could not be detected. AskHuman requires Pi {minimum} or newer.",
       cursorRulesHint:
         "Applies globally only when your project lives under your home directory (~). For other locations, configure it manually in Cursor Settings → Rules.",
       grokSkillHint:
@@ -384,6 +391,8 @@ export default {
         "Other visible Stop handlers were found. They run concurrently and may independently continue or stop the Agent.",
       permissionUnsupported:
         "This agent does not support a native PermissionRequest approval flow.",
+      piPermissionUnsupported:
+        "Pi does not provide a built-in permission mode, so AskHuman adds no permission override flags. Use a container, sandbox, or custom Extension to enforce your security boundary.",
       permissionClaudeHint:
         "Routes Claude Code permission prompts to AskHuman. Other project, managed, plugin, skill, or agent hooks may still affect the final decision; use /hooks in the current Claude session to inspect active sources.",
       permissionCodexHint:
@@ -700,6 +709,7 @@ export default {
       codex: "Codex",
       cursor: "Cursor",
       grok: "Grok",
+      pi: "Pi",
     },
     field: {
       session: "Session",
@@ -861,6 +871,8 @@ export default {
     readyLifecycle: "Lifecycle",
     readyIntegration: "Integration",
     permissionLabel: "Permission mode",
+    piPermissionHint:
+      "Pi has no built-in permission mode. AskHuman will launch it with Pi defaults; use a container, sandbox, or custom Extension for isolation.",
     permissionAgentDefault: "Agent default",
     permissionAgentDefaultDesc: "Do not override Agent permissions",
     permissionYolo: "YOLO",

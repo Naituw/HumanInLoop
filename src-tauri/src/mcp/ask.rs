@@ -815,6 +815,7 @@ required.",
             crate::agents::AgentKind::Codex,
             crate::agents::AgentKind::Cursor,
             crate::agents::AgentKind::Grok,
+            crate::agents::AgentKind::Pi,
         ] {
             command.env_remove(crate::agents::detect::session_id_env_var(kind));
         }
@@ -1806,6 +1807,7 @@ mod tests {
                 crate::agents::AgentKind::Codex,
                 crate::agents::AgentKind::Cursor,
                 crate::agents::AgentKind::Grok,
+                crate::agents::AgentKind::Pi,
             ] {
                 command.env(crate::agents::detect::session_id_env_var(kind), "stale");
             }
@@ -1838,6 +1840,7 @@ mod tests {
             crate::agents::AgentKind::Codex,
             crate::agents::AgentKind::Cursor,
             crate::agents::AgentKind::Grok,
+            crate::agents::AgentKind::Pi,
         ] {
             assert!(!bound.contains(&format!(
                 "{}=stale",

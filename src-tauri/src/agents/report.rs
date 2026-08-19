@@ -50,6 +50,7 @@ pub fn run(args: &[String]) {
     // 不在 hook 侧 walk 进程树（~280ms），改发 ppid 给 daemon 缓存解析。
     let hint_pid = detect::parent_pid(std::process::id());
     let cwd = resolve_cwd(&env, stdin.as_ref());
+    let transcript_path = resolve_transcript_path(&env, stdin.as_ref());
     let launch_id = env
         .get(crate::integrations::agent_launch::LAUNCH_ID_ENV)
         .cloned();
@@ -79,6 +80,7 @@ pub fn run(args: &[String]) {
         pid: None,
         hint_pid,
         cwd,
+        transcript_path,
         launch_id,
         prompt_sha256,
         ts: 0,
@@ -121,6 +123,9 @@ pub(super) fn report_simple_event(
         pid: None,
         hint_pid,
         cwd,
+        transcript_path: std::env::var("PI_SESSION_FILE")
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
         launch_id: std::env::var(crate::integrations::agent_launch::LAUNCH_ID_ENV).ok(),
         prompt_sha256: None,
         ts: 0,
@@ -162,6 +167,10 @@ fn deny_json(
             "permission": "deny",
             "agent_message": reason.clone(),
             "user_message": reason,
+        }),
+        AgentKind::Pi => serde_json::json!({
+            "block": true,
+            "reason": reason,
         }),
         // Claude / Codex（Grok 不会走到：上游已排除）。
         _ => serde_json::json!({
@@ -314,6 +323,29 @@ pub(crate) fn resolve_cwd(env: &HashMap<String, String>, stdin: Option<&Value>) 
     std::env::current_dir()
         .ok()
         .map(|p| p.display().to_string())
+}
+
+fn resolve_transcript_path(env: &HashMap<String, String>, stdin: Option<&Value>) -> Option<String> {
+    if let Some(value) = env
+        .get("PI_SESSION_FILE")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(value.to_string());
+    }
+    let value = stdin?;
+    [
+        "transcript_path",
+        "transcriptPath",
+        "session_file",
+        "sessionFile",
+    ]
+    .into_iter()
+    .find_map(|key| value.get(key).and_then(Value::as_str))
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .map(str::to_string)
 }
 
 /// Read JSON delivered to a hook over stdin.
@@ -667,5 +699,15 @@ mod tests {
             v.get("hookSpecificOutput").is_none(),
             "不应混入 Claude 字段"
         );
+    }
+
+    #[test]
+    fn deny_json_pi_extension_shape() {
+        let value = deny_json(AgentKind::Pi, "change direction", &[]);
+        assert_eq!(value["block"], true);
+        let reason = value["reason"].as_str().unwrap();
+        assert!(reason.starts_with("[USER INTERJECTION]"));
+        assert!(reason.contains("change direction"));
+        assert!(value.get("hookSpecificOutput").is_none());
     }
 }
