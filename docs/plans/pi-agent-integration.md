@@ -1,6 +1,6 @@
 # Pi Agent 一等集成实施计划
 
-> 状态：实现完成；macOS / Windows 真机验证通过，Linux 等待 `main` CI
+> 状态：实现完成；macOS / Windows 真机 E2E 与 Linux 原生 CI 均通过
 >
 > 调研基线：2026-08-18
 >
@@ -559,8 +559,9 @@ Windows 11 真机回归结果：
   条目与临时会话/配置，原 `C:\dev\AskHuman` 保持不变。
 
 Linux 平台由现有 `.github/workflows/build.yml` 的 Ubuntu 22.04 job 执行 frontend build/test、
-`cargo fmt --check`、Clippy、Rust tests 与 release build；本次改动推入 `main` 后以该 job 作为 Linux
-原生平台 gate。CI 通过后，本节状态更新为最终完成。
+`cargo fmt --check`、Clippy、Rust tests 与 release build。提交 `1b1e74d` 的
+[CI run 32203538710](https://github.com/Naituw/AskHuman/actions/runs/32203538710) 已全部通过；同一运行中的
+cargo audit、macOS arm64/x64 与 Windows MSVC jobs 也全部成功，因此三平台构建 gate 已收口。
 
 ## 10. 风险与缓解
 
