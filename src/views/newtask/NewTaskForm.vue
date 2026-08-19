@@ -172,7 +172,7 @@ function selectAgent(item: AgentTaskReadiness): void {
   selectedKind.value = item.kind;
 }
 
-/** 未就绪原因跳转（G5）：binary→官方文档；lifecycle/integration→设置对应 tab + 锚点高亮。 */
+/** Missing readiness links: binary opens vendor docs; integration capabilities open the Agent card. */
 async function openIssue(
   kind: AgentKind,
   issue: "binary" | "lifecycle" | "integration"
@@ -181,7 +181,7 @@ async function openIssue(
     if (issue === "binary") {
       await openPath(AGENT_INSTALL_DOCS[kind]);
     } else if (issue === "lifecycle") {
-      await openSettings(`advanced#lifecycle-${kind}`);
+      await openSettings(`integration#lifecycle-${kind}`);
     } else {
       await openSettings(`integration#integration-${kind}`);
     }

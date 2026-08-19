@@ -69,7 +69,7 @@
 | D6 | 超时 | MCP 模式**不需要超时 Hook**，但需按各家机制配置工具超时（否则长等待被取消）：**Codex** 写 `tool_timeout_sec=86400`(秒)+`startup_timeout_sec=30`；**Grok** 另写 `tool_timeouts = { ask = 86400 }`；**Claude Code(CLI)** 在 `mcpServers.askhuman` 写 `timeout=86400000`(**毫秒**,24h)；**Cursor** 工具/elicitation 超时 ~60s **硬编码不可配置**，不写 timeout（Cursor 推荐 CLI 模式） |
 | D7 | MCP 配置落点 | **用户级全局**（与现有 Rules/Hook 一致）：Codex `~/.codex/config.toml`、Grok `~/.grok/config.toml`、Claude `~/.claude.json`（top-level `mcpServers`）、Cursor `~/.cursor/mcp.json` |
 | D8 | 模式切换 | **一键切换**：切到另一模式时自动卸载旧模式全部产物，再安装新模式。选「未集成」= 卸载当前模式全部产物 |
-| D9 | turn 生命周期 | 保持**正交**：turn 追踪仍只靠现有实验性 lifecycle hook，可与 MCP 模式并行独立开启，互不影响（MCP 拿不到 turn 周期） |
+| D9 | turn 生命周期 | MCP 仍拿不到 turn 周期，因此 active MCP 自动集成继续安装原生 lifecycle Hook。Lifecycle 是 mode 拥有的可选 capability：首次集成默认开、用户可显式关闭；切到 None 时卸载实际产物但保留偏好。 |
 | D10 | 双版本提示词 | 新增 `prompts::mcp_reference()`：把「用 Shell 调 AskHuman、设 24h 超时、先跑 --agent-help」改为「调用 MCP 工具 `ask`」；其余交互纪律（必须提问、推荐选项、附件、结束前回执等）保留。手动集成卡支持 CLI/MCP 切换显示 |
 | D11 | 自动重连 | MCP server **不持 ask 子流程的 daemon 长连接**：每次 `ask`/`whats_next` 都新起子进程→新走 `ensure_running`/排空等待/提交。daemon 更新后 MCP server 继续存活，后续调用自动连到新 daemon |
 | D12 | 平台范围 | **macOS / Linux / Windows**。统一用 spawn 子进程：三平台子进程都是「瘦客户端→shared daemon」；传输差异留在 Unix socket / Windows named pipe adapter。MCP server 自身不直接弹窗，避免 STDIO 主循环与 Tauri 主线程冲突。 |
@@ -202,7 +202,8 @@ argv 映射：`message`→首个位置参数（或经 `-q` 拆分）；每个 qu
 - **不改对外契约**：stdout 洁净、结果区块、退出码、配置容错全部不变。MCP ask 路径继续经由「spawn 现有 CLI 子进程」复用；新 IPC 变体仅承载内部会话绑定。
 - **互斥安装的幂等与最小化编辑**：所有配置写入只触碰自有托管条目，保留用户其它内容；解析失败中止、不整文件覆盖（沿用 `cursor_hook`/`claude_hook`/`agent_rules` 的纯函数 + 单测做法）。
 - **CLI 模式行为完全不变**：现有 Rule/Hook 安装/更新/卸载逻辑保留，仅在 UI 与 `agents` 命令层并入「模式」抽象。
-- **lifecycle hook 正交**：实验性 turn 追踪独立于 CLI/MCP 模式选择，不被互斥逻辑波及。
+- **lifecycle capability**：turn 追踪仍由原生 Hook 承载并可在 active mode 内单独关闭；mode 切换必须
+  reconcile 其持久偏好，None 不得留下实际 lifecycle 产物。
 - **跨平台**：Windows 子进程经安全 named pipe 连接 shared daemon；MCP server 不直接持有 Tauri 主线程。
 
 ## 9. 验收标准
@@ -212,7 +213,8 @@ argv 映射：`message`→首个位置参数（或经 `-q` 拆分）；每个 qu
 3. `ask` 覆盖核心能力：多问题、`options`/`recommended`、`files` 均按 CLI 语义生效；`message`/`question` 按 Markdown 渲染，本地 Popup 的显式 Mermaid fence 渐进渲染且四个 IM 渠道保持源码；取消时输出顶层 `status` 引导。
 4. 人类回复图片：模型侧收到 `ImageContent`（可见图像），非图片文件以路径出现在文本中。
 5. daemon 因版本更新 drain/重启：已运行的 MCP server 不退出，下一次 `ask` 自动连到新 daemon（撞排空时等待后成功）。
-6. 设置「Agent」Tab：三态模式互斥；一键切换自动卸旧装新；选「未集成」清除全部产物；产物过期显示「更新」。
+6. 设置「Agent」Tab：三态模式互斥；一键切换自动卸旧装新；首次自动集成默认开启 lifecycle；
+   选「未集成」清除全部实际产物但保留 capability 偏好；产物过期显示「更新」。
 7. 手动集成：CLI/MCP 提示词可切换；MCP 版显示三家配置实例。
 8. `agents mode/update/show` 与 `doctor` 正确反映 MCP 状态；旧逐产物 `--mcp` 写接口不再执行；headless 可用。
 9. 三家 MCP 配置写入为最小化编辑：保留用户其它条目/注释；重复安装幂等；卸载只移除自有条目；解析失败不破坏文件（单测覆盖）。

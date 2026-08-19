@@ -1,15 +1,20 @@
-# 需求：Agent 生命周期追踪 + 状态窗口（实验性功能）
+# Agent 生命周期追踪 + 状态窗口
 
 > 状态：已实现（macOS/Linux/Windows），当前覆盖 Claude Code / Codex / Cursor / Grok / Pi。
 > 关联计划：`docs/plans/agent-lifecycle-tracking.md`
 > 关联调研：`demo/agent-lifecycle/FINDINGS.md`（三家 hook 事件/env、Cursor 双触发去重、进程存活轮询为唯一不漏的结束信号、身份相关结论、各家标题来源——全部实测）
-> 影响面：daemon（新增 agent 注册表 + 存活轮询 + 持久化 + 闲退守卫 + 订阅推送）、IPC（`ipc/mod.rs` 新增消息）、CLI（`cli/mod.rs` 新增 `__agent-hook` 与 `agents` 子命令）、客户端（`client/` ask 顺带上报活动）、新 GUI 窗口（`?view=agents` + `app` 角色 + `commands`）、Hook 集成（新增三家 lifecycle hook 安装/卸载/状态 + Codex 信任哈希 Rust 实现）、配置（`config.rs` 新增 `experimental`）、设置前端（`SettingsView.vue` 实验区 + 新 Tab）、i18n。
+> 影响面：daemon（agent 注册表 + 存活轮询 + 持久化 + 闲退守卫 + 订阅推送）、IPC、CLI
+>（`__agent-hook`、`agents monitor`、集成 capability 命令）、客户端 ask 活动上报、Agent 状态窗口、
+>五家 lifecycle Hook / Pi Extension、Agent 自动集成卡、readiness、i18n。
 > **不改**：stdout 洁净契约、退出码语义（0/1/3）、既有 timeout hook 行为、IM 渠道与弹窗逻辑、graceful-drain 既有判据。daemon 协议仅增量演进、向后兼容。
 
-> **当前实现补充（2026-07）**：设置入口已移到常显的「高级」Tab，不再受实验开关门控；状态窗口命令为
-> `AskHuman agents monitor` 并由统一 GUI Host 承载。生命周期状态现被 IM `/status`、watch、插话、托盘和
-> daemon 闲退共同消费；Grok 的兼容 Hook 双触发由 `agents/report.rs` 去重。后文保留最初三家方案的决策过程，
-> D25–D27 与 §8 是 Codex shared app-server 的现行补充。
+> **当前实现补充（2026-08-19）**：生命周期追踪已归入「设置 → Agents」的五张自动集成卡，
+> 不再是高级页中的独立实验功能。首次启用 CLI/MCP 自动集成默认开启 lifecycle；用户可在卡内显式
+> 关闭，偏好跨模式切换保留；选择「未集成」则移除实际 lifecycle 产物。旧 active 集成缺失产物、
+> 显式偏好与磁盘漂移、以及 None 下的旧孤立产物都显示“需更新”，由用户点击后收敛，不因状态查询
+> 自动写盘。状态窗口命令为 `AskHuman agents monitor` 并由统一 GUI Host 承载。生命周期状态被 IM
+> `/status`、watch、插话、托盘和 daemon 闲退共同消费；Grok 的兼容 Hook 双触发由
+> `agents/report.rs` 去重。后文保留最初三家方案的决策过程，D25–D29 与 §8 是现行补充。
 >
 > **Windows 对齐补充（2026-08）**：Hook 通过安全 named pipe 上报；进程父链、命令行、启动时间、
 > session 与可执行路径使用 Toolhelp、QueryFullProcessImageName、NtQueryInformationProcess、
@@ -27,21 +32,25 @@
 
 上一阶段在 `demo/agent-lifecycle/` 实测了 Claude Code / Codex / Cursor 三家 CLI 的生命周期信号，结论已写入 `FINDINGS.md`。本需求把这些结论落到产品里，但**单独成一个可独立测试的功能**，**不含** IM 渠道的「激活 / 反激活」逻辑（那是后续的「IM 渠道激活」需求 `docs/plans/im-channel-activation.md`，将构建在本功能之上）。
 
-本功能交付两件事：
+本功能最初交付两件事；入口与开关语义现已由 D15/D16 更新：
 
-1. **设置里一个隐藏的「实验性功能」区**：默认不显示，需先在「通用」Tab 底部打开一个隐蔽开关才出现。展开后是一个「实验」Tab，内含 **Claude Code / Codex / Cursor 三个「生命周期追踪」开关**，开/关即**安装 / 卸载**对应 agent 的**用户级** lifecycle hook。
-2. **`AskHuman agents status` 打开一个动态更新的 GUI 窗口**：按 agent 类型分组，展示当前**工作中 / 空闲**以及**最近结束**的 agent，每个含「类型 / 标题 / sessionID / 项目(cwd) / 启动时间 / 最近活动时间 / 状态 / pid」。窗口实时刷新。
+1. 为支持的自动集成管理 per-Agent lifecycle capability；
+2. **`AskHuman agents monitor` 打开一个动态更新的 GUI 窗口**：按 agent 类型分组，展示当前
+   **工作中 / 空闲**以及**最近结束**的 agent，每个含「类型 / 标题 / sessionID / 项目(cwd) /
+   启动时间 / 最近活动时间 / 状态 / pid」。窗口实时刷新。
 
 ## 2. 目标（用法）
 
 ```bash
 # 打开 agent 状态窗口（动态更新；daemon 不在则自动拉起）
-AskHuman agents status
+AskHuman agents monitor
 ```
 
-- 在「设置 → 通用」底部打开「实验性功能」→ 出现「实验」Tab → 分别为 Claude Code / Codex / Cursor 打开「生命周期追踪」→ 本应用把用户级 lifecycle hook 写入各家配置。
-- 之后任意启动 / 使用这些 agent，`agents status` 窗口即按类型分组实时显示其状态。
-- 关闭某家开关即移除其 lifecycle hook（不影响既有 timeout hook、不影响其它无关 hook）。
+- 在「设置 → Agents」为目标 Agent 选择 CLI/MCP 自动集成；首次集成默认安装 lifecycle，之后可在
+  同一张卡内关闭或重新开启。
+- 之后任意启动 / 使用这些 agent，`agents monitor` 窗口即按类型分组实时显示其状态。
+- 关闭 lifecycle 开关只移除本 capability；选择「未集成」会移除该自动集成拥有的 lifecycle 产物。
+  两种操作都保留用户其它无关 Hook。
 
 ## 3. 术语
 
@@ -67,11 +76,11 @@ AskHuman agents status
 | D12 | TTL 兜底 | **仅当拿不到 / 无法轮询 pid 时**（如 Linux 上 Claude `CLAUDE_CODE_ENV_SCRUB` 的 PID namespace 隔离）启用：**超过 1 小时无任何活动**即判「已结束」。**任意 hook 事件**与**每次 `AskHuman` 提问调用**都重置该 session 的活动时间（一个 session 跑超过 1h 很正常，期间可能多次提问）。pid 可轮询时以轮询为准、**不**应用 TTL |
 | D13 | 排序 / 分组 | 顶层**按类型分组**（Claude / Codex / Cursor 区块）；区块内**按状态【工作中 → 空闲 → 已结束】**，同状态内按时间倒序（工作中/空闲按「最近活动」，已结束按「结束时间」） |
 | D14 | 显示范围 | **跨项目全部** agent（daemon 为 per-user，能看到所有项目） |
-| D15 | UI 入口 | 当前入口为常显的「高级」Tab；macOS、Linux 与 Windows 均显示五家追踪开关。早期 `config.experimental.enabled` 只保留配置兼容。 |
-| D16 | per-agent 开关语义 | 开 = 安装用户级 lifecycle hook，关 = 卸载；开关状态以**实际安装状态**为准（同既有 hook 卡的 `*_status`）。与既有 timeout hook **各自独立**（不同标记、可共存）。**隐藏**「实验性功能」开关**不**卸载 hook（仅隐藏 UI；追踪继续） |
-| D17 | 写入方式 | 沿用既有 hook 的**格式保留编辑**（`claude_hook.rs` 的 jsonc CST 风格）：**只增删本功能自己的条目**，绝不改动其它 hook 的字节 / JSON 转义。Cursor=`~/.cursor/hooks.json`、Claude=`~/.claude/settings.json`、Codex=`~/.codex/config.toml` 的 `[hooks]` + `[hooks.state]` `trusted_hash`（**Rust 实现信任哈希**，参考 `FINDINGS §6.2` + `demo/agent-lifecycle/harness/codex-trust.cjs`） |
+| D15 | UI 入口 | 当前入口为常显的「Agents」Tab；macOS、Linux 与 Windows 均在各自动集成卡内显示 lifecycle capability。高级页不再有独立 lifecycle 卡。早期 `config.experimental.enabled` 只保留配置兼容。 |
+| D16 | per-agent 开关语义 | 开关表示 active 自动集成内的持久化偏好，而非直接等同磁盘状态。首次集成且无历史偏好时默认开；显式关闭跨 CLI/MCP/None 切换与更新保留。`mode=None` 时实际产物必须不存在，但偏好保留供以后重新集成。旧漂移只读检测并显示更新，不在 status/设置加载时写盘。生命周期与 timeout runtime 是不同 capability；Stop 事件与结束确认共用至多一个 AskHuman handler。 |
+| D17 | 写入方式 | 沿用既有 hook 的**格式保留编辑**：**只增删本功能自己的条目**，绝不改动其它 Hook 的字节 / JSON 转义。Cursor=`~/.cursor/hooks.json`、Claude=`~/.claude/settings.json`、Codex=`~/.codex/hooks.json` + `~/.codex/hooks/trusted.json` 信任哈希；Grok=`~/.grok/hooks/hooks.json`；Pi 使用受管 TypeScript Extension。 |
 | D18 | daemon 闲退 / 持久化 / 重连 | 闲时退出守卫**只受**【工作中 agent 数】与【状态窗口连接】影响（**空闲 agent 不保活**）；**版本更新 graceful-drain 不受 agent 影响**（仅在途 ASK 请求 gate drain，与今一致）；状态持久化 `agents.json`，daemon 重启 / 换新后重载并 `kill-0` 复核、剔除已死；状态窗口断连**自动重连**（必要时拉起 daemon） |
-| D19 | CLI 形态 | `AskHuman agents <sub>`，本期仅 `status`（打开 GUI 窗口）。`agents` 设计为**可扩展子命令组**，预留未来子命令。**不**做纯文本 `list`，CLI **不**做 enable/disable（开关只在设置里） |
+| D19 | CLI 形态 | `AskHuman agents monitor [--text|--json]` 提供窗口或快照；`agents lifecycle <agent> [on|off]` 是 active 自动集成内的 headless capability 开关。None 下 `on` 拒绝并提示先启用自动集成，`off` 可幂等记录偏好并清理旧残留。`agents mode/update/show/cleanup` 与设置页复用同一状态编排。 |
 | D20 | IPC 增量 | 新增 `ClientMsg::AgentEvent` / `ClientMsg::AgentsSubscribe`、`ServerMsg::AgentsState`（快照推送）；`TaskRequest` 增**可选** agent 身份字段（type/session_id/pid）。serde 默认 + 同二进制两端，向后兼容 |
 | D21 | ask 调用＝活动信号 | agent 通过 `AskHuman` 提问时，CLI **顺带 best-effort**（不阻塞作答主链路）上报 agent 身份给 daemon → 刷新该 session「最近活动」+ 重置 TTL。**仅刷新已存在的追踪 session，不新建**（尊重「未装 hook = 不追踪」） |
 | D22 | 去重细则 | **仅当从 env 明确识别出「不同的」running agent 时**才跳过（`exit 0` 不上报）；env 无法判定 → 按 intended 处理（不跳过），避免漏报。识别顺序 `CURSOR_*`→cursor、`CODEX_*`→codex、`CLAUDECODE`→claude；**`CLAUDE_PROJECT_DIR` 不可作判据**（Cursor 也设它） |
@@ -87,7 +96,7 @@ AskHuman agents status
 
 - 不做 IM 渠道的 attach / detach / 激活门控（后续需求）。
 - 不做 Windows RDS 多交互会话 broker；正式 Windows 范围是单个交互式桌面会话。
-- 不做 CLI 端的 enable/disable 与纯文本状态输出。
+- 不提供脱离自动集成的 lifecycle 安装；手动提示词/MCP 示例也不创建 AskHuman lifecycle 产物。
 - 不追踪 Pre/PostToolUse 等工具级事件（噪音大、对状态判定无必要）。
 - 不在本功能里改既有 timeout hook / 弹窗 / IM 渠道行为。
 

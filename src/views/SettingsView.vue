@@ -97,12 +97,10 @@ onMounted(async () => {
   });
   await ctx.initIntegration();
   await ctx.initGeneral();
-  // Lifecycle tracking is a stable cross-platform capability under Advanced.
-  await ctx.refreshLifecycle();
   // 只读已持久化的工作目录索引；冷扫描延迟到打开「管理工作目录」面板时。
   if (supportsAgentTasks) await refreshAgentTaskSettings(false);
   await ctx.initAbout();
-  // 初始 URL 带锚点（?tab=advanced#lifecycle-claude）：tab 段已在 parseInitialTab 生效，
+  // Initial URLs can include an element anchor (for example integration#lifecycle-claude).
   // 此处等各 tab 数据就绪后再滚动定位 + 高亮。
   const rawTab = new URLSearchParams(window.location.search).get("tab");
   if (rawTab?.includes("#")) gotoTabTarget(rawTab);

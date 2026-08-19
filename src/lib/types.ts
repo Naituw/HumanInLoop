@@ -486,11 +486,15 @@ export interface AgentsInit {
 
 export type AgentKind = "claude" | "codex" | "cursor" | "grok" | "pi";
 
-/** 生命周期 hook 安装状态（实验区开关据此渲染）。 */
+/** Lifecycle preference and artifact state inside an Agent integration. */
 export interface LifecycleStatus {
+  enabled: boolean;
+  preferenceConfigured: boolean;
   installed: boolean;
   outdated: boolean;
   supported: boolean;
+  needsUpdate: boolean;
+  cleanupRequired: boolean;
 }
 
 export type AgentRunState = "working" | "idle" | "ended";
@@ -967,6 +971,7 @@ export interface AgentModeStatus {
   permission: PermissionStatus;
   permissionNeedsUpdate: boolean;
   stop: StopStatus;
+  lifecycle: LifecycleStatus;
   askQuestion: AskQuestionStatus;
   mcpSupported: boolean;
   mcpConfigPath: string;

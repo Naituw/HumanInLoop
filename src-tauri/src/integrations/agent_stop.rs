@@ -1,7 +1,7 @@
 //! Per-agent Stop confirmation capability. The product preference is preserved independently,
-//! but confirmation is active only while the agent integration mode is CLI or MCP. Lifecycle
-//! tracking remains independent, and both capabilities share exactly one AskHuman-owned Stop
-//! handler on disk.
+//! but confirmation is active only while the agent integration mode is CLI or MCP. Lifecycle is
+//! an optional capability inside that same integration, and both capabilities share exactly one
+//! AskHuman-owned Stop handler on disk.
 
 use std::path::Path;
 
@@ -469,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn integration_mode_gates_confirmation_but_not_tracking() {
+    fn shared_handler_flags_can_be_reconciled_independently() {
         for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Cursor] {
             for mode in [
                 super::super::agent_mode::Mode::None,
@@ -505,7 +505,7 @@ mod tests {
     }
 
     #[test]
-    fn none_mode_detects_and_cleans_legacy_confirm_handlers() {
+    fn disabled_confirmation_preserves_tracking_during_ordered_reconciliation() {
         for kind in [AgentKind::Claude, AgentKind::Codex, AgentKind::Cursor] {
             for track in [false, true] {
                 let legacy = apply_handler_state(kind, "{}", "/opt/AskHuman", track, true).unwrap();

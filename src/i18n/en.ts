@@ -201,16 +201,6 @@ export default {
       enableHint: "Show advanced, unstable features. Off by default.",
       emptyTitle: "No experimental features yet",
       emptyDesc: "There are no features under experimentation right now. Future experimental features will show up here.",
-      lifecycleTitle: "Agent lifecycle tracking",
-      lifecycleDesc:
-        "Install user-level hooks for each agent to detect whether it is working, idle, or ended. The Agent status window, menu bar agent status, and IM /status, /watch, /msg, /diff, /stage, /transcript depend on this capability. When enabled, the daemon can also start and stay alive more accurately based on agent activity.",
-      claude: "Claude Code",
-      codex: "Codex",
-      cursor: "Cursor",
-      grok: "Grok",
-      pi: "Pi",
-      unsupported: "Not supported on this platform",
-      outdated: "Needs update — toggle off then on to refresh.",
       verticalQuestionsTitle: "Show multiple questions vertically",
       verticalQuestionsDesc:
         "When several questions are asked, list them all vertically at once (active question highlighted, switch by scroll/hover, keyboard navigation). When off, falls back to the classic one-question-at-a-time view with previous/next.",
@@ -341,6 +331,8 @@ export default {
         "Edit the English paragraph below to replace how often the agent asks and when it may change the plan. Channel rules (must use AskHuman, whats-next, etc.) stay fixed.",
       collabSaveCustom: "Save custom text and update integrations",
       manualTitle: "Manual integration",
+      manualLifecycleHint:
+        "Manual prompts and MCP examples do not install lifecycle tracking. Agent status, interject, and task launch require Automatic integration with tracking enabled below.",
       autoTitle: "Automatic integration",
       promptTitle: "Reference prompt",
       copy: "Copy",
@@ -373,6 +365,11 @@ export default {
       notInstalled: "Not installed",
       configured: "Configured",
       notConfigured: "Not configured",
+      lifecycleTitle: "Lifecycle tracking",
+      lifecycleHint:
+        "Enabled by default for a new automatic integration. It powers Agent status, interject, Watch, and task launch; AskHuman questions still work when it is off.",
+      lifecycleCleanupHint:
+        "Legacy standalone lifecycle tracking was found. This Agent is not integrated; updating will remove the leftover configuration.",
       install: "Install",
       update: "Update",
       updateAll: "Update all",
@@ -476,7 +473,7 @@ export default {
       autoActivationDesc:
         "When on, questions are no longer broadcast to every IM channel; the local popup always receives them. To receive on an IM channel, send /here (or /这里) in that channel while an agent is working; subsequent questions and any pending ones will be routed there.",
       autoActivationLifecycleHint:
-        "Tip: also enable Lifecycle tracking above for more accurate working/idle agent state detection.",
+        "Automatic Agent integration enables lifecycle tracking by default. Turning it off in an Agent card reduces working/idle detection and on-demand delivery accuracy.",
       /** Channels tab · tip card below Local popup (shown only when on-demand delivery is off). */
       autoActivationChannelsHintTitle: "Recommended: On-demand IM delivery",
       autoActivationChannelsHint:
@@ -684,7 +681,7 @@ export default {
     loading: "Loading…",
     empty: "No agents tracked yet",
     emptyHint:
-      "Only agents with lifecycle tracking enabled will appear here once they start.",
+      "Only integrated agents with lifecycle tracking enabled appear here once they start.",
     untitled: "(untitled)",
     unknownProject: "Unknown project",
     focusTerminal: "Focus terminal",

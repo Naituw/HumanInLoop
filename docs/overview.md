@@ -244,7 +244,8 @@ AskHuman/
 - Agent 模式与配置文件：`agent_mode_status` / `set` / `update`、`mcp_config_reveal` / `open`、`agent_hook_reveal` / `open`、`mcp_command_path`
 - 渠道测试与识别：`telegram_test`；钉钉、飞书、Slack 各自的 `*_test` / `*_detect_prepare` / `*_detect_wait`；共用 `detect_cancel`
 - 版本自更新：`get_app_version`、`update_check`、`update_get_notes`、`update_apply`、`update_dismiss`、`popup_update_state`、`restart_settings`
-- Agent 生命周期：`agents_init`、`agent_lifecycle_status` / `install` / `uninstall`、`agent_force_idle`
+- Agent 生命周期：`agents_init`、`agent_force_idle`；自动集成卡内的 capability 通过
+  `agent_mode_status` 聚合，并由 `agent_lifecycle_status` / `install` / `uninstall` 查询或切换
 - Agent 控制台（spec gui-agent-console）：`agents_focus`（焦点会话，daemon 推 `agent-detail` 帧）、`focus_request`（去回答）、`interject_append` / `interject_peek`（输入框追加与待送达气泡）、`console_transcript`（完整会话分页）、`console_diff_stat` / `console_diff_file` / `console_stage`（项目 diff 状态条与暂存）
 - 新建 Agent 任务（GUI）：`open_new_task`、`new_task_init`、`new_task_projects`(+`_refreshed`)、`project_key_of`、`new_task_launch`
 
@@ -313,15 +314,21 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 - 更新状态持久化到 `~/.askhuman/update.json`，Daemon 后台检查并推送给 Popup/GUI Host。
 - release notes 默认由 Conventional Commits + git-cliff 生成，可用 `docs/release-notes/v<version>.md` 覆盖。
 
-## 高级功能：Agent 生命周期追踪 + 状态窗口（macOS / Linux / Windows）
+## Agent 自动集成能力：生命周期追踪 + 状态窗口（macOS / Linux / Windows）
 
 > 需求 `docs/specs/agent-lifecycle-tracking.md`，计划 `docs/plans/agent-lifecycle-tracking.md`。
 
-- macOS、Linux 与 Windows 通过用户级 hooks 跟踪 Claude Code、Codex、Cursor、Grok，并通过 `~/.pi/agent/extensions/askhuman/index.ts` 跟踪 Pi；它与 Agent 集成 mode、IM autoActivation 相互独立。
+- macOS、Linux 与 Windows 通过用户级 hooks 跟踪 Claude Code、Codex、Cursor、Grok，并通过
+  `~/.pi/agent/extensions/askhuman/index.ts` 跟踪 Pi。Lifecycle 是 CLI/MCP 自动集成拥有的可选
+  capability：首次集成默认开，显式偏好跨模式切换保留，None 必须移除实际产物；它与 IM
+  autoActivation 相互独立。
 - Daemon 的 `AgentRegistry` 以 session id 为主身份，推导工作中、空闲、已结束；pid/liveness 与超时只做兜底。
 - 生命周期状态被 `/status`、watch、插话、托盘/状态窗口和 Daemon 空闲退出共同使用；修改事件或状态模型时必须检查这些消费者。
-- Daemon 启动时幂等迁移已开启但过期的 hooks。只有工作中 Agent 或状态窗口连接阻止闲退；graceful drain 不受 Agent 存活影响。
-- 入口为设置「高级」Tab、`AskHuman agents monitor` 和 `agents/registry.rs`；状态窗口由 GUI Host 承载并订阅 Daemon 快照。
+- 生命周期缺失、过期、显式关闭漂移与 None 旧孤立产物都进入 Agent 卡的更新状态，不由 lifecycle
+  自身在 daemon 启动时后台迁移。只有工作中 Agent 或状态窗口连接阻止闲退；graceful drain 不受
+  Agent 存活影响。
+- 入口为设置「Agents」Tab 各自动集成卡、`AskHuman agents lifecycle`、`AskHuman agents monitor`
+  和 `agents/registry.rs`；状态窗口由 GUI Host 承载并订阅 Daemon 快照。
 - 状态窗口已改版为双栏「Agent 控制台」（spec `docs/specs/gui-agent-console.md`）：边栏项目分组会话
   + 详情区 Watch 帧（agents 订阅上的焦点会话子订阅复用 IM Watch 引擎推帧）+ 完整会话分页 +
   项目 diff 状态条 + 插话输入 + 内嵌新建任务 + 原生 Fork 入口；快照对 GUI 额外注入
@@ -365,7 +372,10 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 
 - headless/SSH 可用 `channel`、`agents`、`config`、`doctor` 完成渠道配置与 Agent 集成；各子命令提供 help 和 JSON 输出。
 - `channel set` 无 flag 走交互向导，有 flag 走脚本；密钥只从 env/file/stdin 或隐藏输入读取，不进 argv。
-- `agents mode` 维护 None/CLI/MCP 整包；permission/stop 的 preference 独立保存，但只有集成 mode 才安装交互接管产物，None 隐藏对应设置并卸载其 active 能力；lifecycle 始终正交。Grok 仅 None/MCP 且不支持 stop/interject；Pi 仅 None/CLI、不提供 MCP 或内置权限模式，最低支持版本为 0.82.0。
+- `agents mode` 维护 None/CLI/MCP 整包；permission/stop 的 preference 独立保存，但只有集成 mode
+  才安装交互接管产物，None 隐藏对应设置并卸载其 active 能力。Lifecycle 也是 mode 拥有的可选
+  capability：默认开、可显式关闭、None 卸载而保留偏好。Grok 仅 None/MCP 且不支持 stop/interject；
+  Pi 仅 None/CLI、不提供 MCP 或内置权限模式，最低支持版本为 0.82.0。
 - 上下文恢复 Hook 由当前 mode 独立托管，不依赖可关闭的 lifecycle tracking；CLI/MCP
   提示严格只指向用户当前选中的入口，缺失/过期并入当前 Hook 或 MCP 产物的更新状态。
 - 全局交互协议把 Sub Agent 作为唯一例外并禁止其使用 AskHuman；Claude/Codex mode 另带 `SubagentStart` 提示 Hook，Cursor/Grok/Pi 只依赖协议文本。
@@ -402,7 +412,8 @@ Popup 的窗口、附件、来源标题与交互实现地图见 `docs/overview-p
 
 - 处理 Claude Code、Codex、Cursor、Pi 的自然完成；Grok、错误和用户中断不能可靠 continuation，不发卡。
 - Claude Code、Codex、Cursor 的独立开关默认关，Pi 默认开；询问“继续/结束”，24h 或基础设施失败 fail-open，投放沿用活跃槽 ∪ watch 渠道。
-- Stop preference 独立保存，但只在 CLI/MCP mode 生效；None 隐藏开关并卸载 confirm 能力，重新集成时自动恢复。若 lifecycle tracking 仍开，共享 Stop handler 只保留 `track`、不弹确认卡。
+- Stop preference 独立保存，但只在 CLI/MCP mode 生效；None 隐藏开关并删除共享 handler，重新集成时
+  自动恢复。Active mode 内若只开 lifecycle，共享 Stop handler 只带 `track`、不弹确认卡。
 - 继续时使用各家原生 continuation；Pi Extension 在同一会话空闲且无排队消息时调用 `pi.sendUserMessage`。下一次自然 Stop 再询问，不做外部 resume。
 - Stop 确认复用普通 Ask 单选链路但不写回复历史；它与 lifecycle 共用单一 Stop handler，避免并发 Hook 提前置空闲。
 - `[user_confirmed_end_turn]` 出现在最后回复任意位置即表示用户已明确同意结束，命中后直接放行，避免再次确认。

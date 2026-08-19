@@ -125,7 +125,8 @@ pub fn readiness(kind: AgentKind) -> AgentReadiness {
         .flatten();
     let version_ready = kind != AgentKind::Pi || pi_version.is_some_and(pi_version_supported);
     let binary_ready = executable.is_some() && version_ready;
-    let lifecycle_ready = lifecycle.supported && lifecycle.installed && !lifecycle.outdated;
+    let lifecycle_ready =
+        lifecycle.supported && lifecycle.enabled && lifecycle.installed && !lifecycle.outdated;
     let mut diagnostics = Vec::new();
     if !binary_ready {
         if executable.is_none() {

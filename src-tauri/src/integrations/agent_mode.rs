@@ -6,12 +6,14 @@
 //! - **Mcp** 模式绑定：MCP 版 Rule + Guard + MCP 配置（用户级全局）。
 //! - 一键切换（[`set`]）：先卸掉「非目标模式」的全部产物，再装目标模式产物；天然幂等。
 //!
-//! 注意：实验性 lifecycle hook（turn 追踪）**不属于**任何模式，保持独立开关、与本编排正交（spec D9）。
+//! Lifecycle tracking is an optional capability owned by an active automatic integration. New
+//! integrations adopt the default-on preference; explicit opt-out survives mode updates. None
+//! mode always removes the on-disk lifecycle artifact.
 
 use crate::integrations::agent_rules::{self, AgentTarget, Variant};
 use crate::integrations::{
-    agent_ask_question, agent_context_recovery, agent_permission, agent_stop, agent_subagent_guard,
-    claude_hook, cursor_hook, mcp_config, mutation_lock,
+    agent_ask_question, agent_context_recovery, agent_lifecycle, agent_permission, agent_stop,
+    agent_subagent_guard, claude_hook, cursor_hook, mcp_config, mutation_lock,
 };
 use anyhow::Result;
 
@@ -126,16 +128,20 @@ pub fn timeout_hook_open(target: AgentTarget) {
 pub fn current(target: AgentTarget) -> Mode {
     let mcp = mcp_config::is_installed(target);
     let hook = timeout_hook_is_installed(target);
-    match (mcp, hook) {
-        (true, false) => return Mode::Mcp,
-        (false, true) => return Mode::Cli,
-        // 产物全无（如 Codex 的 CLI 模式：无超时 Hook 产物）或都有（用户手改）→ 以 Rule 变体兜底。
-        _ => {}
-    }
-    match agent_rules::installed_variant(target) {
-        Some(Variant::Mcp) => Mode::Mcp,
-        Some(Variant::Cli) => Mode::Cli,
-        None => Mode::None,
+    current_from_artifacts(mcp, hook, agent_rules::installed_variant(target))
+}
+
+fn current_from_artifacts(mcp: bool, runtime: bool, rule: Option<Variant>) -> Mode {
+    match (mcp, runtime) {
+        (true, false) => Mode::Mcp,
+        (false, true) => Mode::Cli,
+        // Runtime artifacts are absent (for example Codex CLI) or conflict after a manual edit;
+        // fall back to the managed Rule variant. Lifecycle is intentionally not an input.
+        _ => match rule {
+            Some(Variant::Mcp) => Mode::Mcp,
+            Some(Variant::Cli) => Mode::Cli,
+            None => Mode::None,
+        },
     }
 }
 
@@ -183,7 +189,7 @@ struct ArtifactState {
 /// 逐产物计算当前模式下的过期 / 缺失情况。None 模式仅报告需要清理的残留 Permission Hook。
 pub fn artifact_updates(target: AgentTarget) -> ArtifactUpdates {
     let mode = current(target);
-    artifact_updates_for(
+    let updates = artifact_updates_for(
         mode,
         ArtifactState {
             rule_installed: agent_rules::is_installed(target),
@@ -201,7 +207,19 @@ pub fn artifact_updates(target: AgentTarget) -> ArtifactUpdates {
             mcp_installed: mcp_config::is_installed(target),
             mcp_outdated: mcp_config::needs_update(target),
         },
+    );
+    merge_lifecycle_update(
+        updates,
+        agent_lifecycle::status_for_mode(kind_for_target(target), mode).needs_update,
     )
+}
+
+fn merge_lifecycle_update(
+    mut updates: ArtifactUpdates,
+    lifecycle_needs_update: bool,
+) -> ArtifactUpdates {
+    updates.hook |= lifecycle_needs_update;
+    updates
 }
 
 fn artifact_updates_for(mode: Mode, state: ArtifactState) -> ArtifactUpdates {
@@ -272,9 +290,10 @@ fn set_unlocked(target: AgentTarget, mode: Mode) -> Result<()> {
                 timeout_hook_install(target)?;
             }
             agent_context_recovery::reconcile_unlocked(target, mode)?;
+            agent_lifecycle::reconcile_unlocked(kind_for_target(target), mode, true)?;
             agent_permission::reconcile_unlocked(target, mode)?;
-            agent_stop::reconcile_unlocked(stop_kind(target), mode)?;
-            agent_ask_question::reconcile_unlocked(stop_kind(target), mode)?;
+            agent_stop::reconcile_unlocked(kind_for_target(target), mode)?;
+            agent_ask_question::reconcile_unlocked(kind_for_target(target), mode)?;
             Ok(())
         }
         Mode::Mcp => {
@@ -286,9 +305,10 @@ fn set_unlocked(target: AgentTarget, mode: Mode) -> Result<()> {
             agent_subagent_guard::reconcile_unlocked(target, mode)?;
             mcp_config::install(target)?;
             agent_context_recovery::reconcile_unlocked(target, mode)?;
+            agent_lifecycle::reconcile_unlocked(kind_for_target(target), mode, true)?;
             agent_permission::reconcile_unlocked(target, mode)?;
-            agent_stop::reconcile_unlocked(stop_kind(target), mode)?;
-            agent_ask_question::reconcile_unlocked(stop_kind(target), mode)?;
+            agent_stop::reconcile_unlocked(kind_for_target(target), mode)?;
+            agent_ask_question::reconcile_unlocked(kind_for_target(target), mode)?;
             Ok(())
         }
     }
@@ -318,10 +338,12 @@ pub fn update_artifact(target: AgentTarget, artifact: Artifact) -> Result<()> {
                 timeout_hook_install(target)?;
             }
             agent_context_recovery::reconcile_unlocked(target, mode)?;
+            agent_lifecycle::reconcile_unlocked(kind_for_target(target), mode, true)?;
             agent_permission::reconcile_unlocked(target, mode)
         }
         (Mode::Mcp, Artifact::Hook) | (Mode::None, Artifact::Hook) => {
             agent_context_recovery::reconcile_unlocked(target, mode)?;
+            agent_lifecycle::reconcile_unlocked(kind_for_target(target), mode, true)?;
             agent_permission::reconcile_unlocked(target, mode)
         }
         (Mode::Mcp, Artifact::Mcp) => {
@@ -341,13 +363,14 @@ fn uninstall_all_unlocked(target: AgentTarget) -> Result<()> {
         timeout_hook_uninstall(target)?;
     }
     mcp_config::uninstall(target)?;
+    agent_lifecycle::reconcile_unlocked(kind_for_target(target), Mode::None, false)?;
     agent_permission::reconcile_unlocked(target, Mode::None)?;
-    agent_stop::reconcile_unlocked(stop_kind(target), Mode::None)?;
-    agent_ask_question::reconcile_unlocked(stop_kind(target), Mode::None)?;
+    agent_stop::reconcile_unlocked(kind_for_target(target), Mode::None)?;
+    agent_ask_question::reconcile_unlocked(kind_for_target(target), Mode::None)?;
     Ok(())
 }
 
-fn stop_kind(target: AgentTarget) -> crate::agents::AgentKind {
+pub(crate) fn kind_for_target(target: AgentTarget) -> crate::agents::AgentKind {
     match target {
         AgentTarget::Cursor => crate::agents::AgentKind::Cursor,
         AgentTarget::ClaudeCode => crate::agents::AgentKind::Claude,
@@ -370,6 +393,17 @@ mod tests {
     }
 
     #[test]
+    fn mode_detection_uses_only_core_integration_artifacts() {
+        assert_eq!(current_from_artifacts(true, false, None), Mode::Mcp);
+        assert_eq!(current_from_artifacts(false, true, None), Mode::Cli);
+        assert_eq!(
+            current_from_artifacts(false, false, Some(Variant::Cli)),
+            Mode::Cli
+        );
+        assert_eq!(current_from_artifacts(false, false, None), Mode::None);
+    }
+
+    #[test]
     fn codex_has_no_timeout_hook() {
         assert!(!timeout_hook_supported(AgentTarget::Codex));
         assert!(!timeout_hook_is_installed(AgentTarget::Codex));
@@ -377,21 +411,27 @@ mod tests {
     }
 
     #[test]
-    fn stop_kind_covers_every_agent_target() {
+    fn kind_for_target_covers_every_agent_target() {
         assert_eq!(
-            stop_kind(AgentTarget::Cursor),
+            kind_for_target(AgentTarget::Cursor),
             crate::agents::AgentKind::Cursor
         );
         assert_eq!(
-            stop_kind(AgentTarget::ClaudeCode),
+            kind_for_target(AgentTarget::ClaudeCode),
             crate::agents::AgentKind::Claude
         );
         assert_eq!(
-            stop_kind(AgentTarget::Codex),
+            kind_for_target(AgentTarget::Codex),
             crate::agents::AgentKind::Codex
         );
-        assert_eq!(stop_kind(AgentTarget::Grok), crate::agents::AgentKind::Grok);
-        assert_eq!(stop_kind(AgentTarget::Pi), crate::agents::AgentKind::Pi);
+        assert_eq!(
+            kind_for_target(AgentTarget::Grok),
+            crate::agents::AgentKind::Grok
+        );
+        assert_eq!(
+            kind_for_target(AgentTarget::Pi),
+            crate::agents::AgentKind::Pi
+        );
     }
 
     #[test]
@@ -531,5 +571,19 @@ mod tests {
         ] {
             assert!(artifact_updates_for(Mode::Mcp, state).mcp);
         }
+    }
+
+    #[test]
+    fn lifecycle_drift_is_classified_as_a_hook_update() {
+        let base = ArtifactUpdates {
+            rule: true,
+            hook: false,
+            mcp: false,
+        };
+        assert_eq!(merge_lifecycle_update(base, false), base);
+        assert_eq!(
+            merge_lifecycle_update(base, true),
+            ArtifactUpdates { hook: true, ..base }
+        );
     }
 }

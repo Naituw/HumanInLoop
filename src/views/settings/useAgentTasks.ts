@@ -1,4 +1,4 @@
-// 「从 IM 创建 Agent 任务」（实验 tab）域：开启确认弹层、就绪度、工作目录管理面板。
+// Agent task settings: enable confirmation, readiness, and working-directory management.
 import { nextTick, onBeforeUnmount, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
@@ -170,8 +170,10 @@ export function useAgentTasks(core: SettingsCore) {
       await openPath(AGENT_INSTALL_DOCS[kind]);
       return;
     }
-    activeTab.value = issue === "lifecycle" ? "advanced" : "integration";
-    await gotoSettingsTarget(`${issue}-${kind}`);
+    activeTab.value = "integration";
+    await gotoSettingsTarget(
+      issue === "lifecycle" ? `lifecycle-${kind}` : `integration-${kind}`,
+    );
   }
 
   onBeforeUnmount(() => {

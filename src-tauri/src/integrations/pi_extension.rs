@@ -1,9 +1,9 @@
 //! AskHuman-owned Pi extension.
 //!
 //! Pi intentionally has no native hook configuration. One generated global extension carries the
-//! independently configurable CLI runtime, lifecycle/interjection, and Stop capabilities. The
-//! embedded configuration is also the durable preference for lifecycle tracking, so switching the
-//! integration mode can preserve tracking without touching any user-owned Pi extension.
+//! CLI runtime, lifecycle/interjection, and Stop capabilities. The lifecycle preference lives in
+//! AskHuman's shared per-agent preference file; the embedded flags describe only the extension's
+//! current on-disk capability set.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};

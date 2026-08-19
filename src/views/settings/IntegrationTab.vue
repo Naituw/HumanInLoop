@@ -22,6 +22,7 @@ const {
   modeError,
   setMode,
   togglePermission,
+  toggleLifecycle,
   toggleStop,
   toggleAskQuestion,
   permissionBlockedText,
@@ -125,6 +126,7 @@ const {
   <div class="integration-manual">
   <!-- 手动集成：参考提示词（CLI / MCP 双版本 + MCP 配置示例） -->
   <p class="section-title">{{ t("settings.integration.manualTitle") }}</p>
+  <p class="section-intro">{{ t("settings.integration.manualLifecycleHint") }}</p>
   <div class="card">
     <div class="row">
       <p class="card-title">{{ t("settings.integration.promptTitle") }}</p>
@@ -297,6 +299,24 @@ const {
       </div>
     </div>
 
+    <div
+      v-if="modes[a.id].mode === 'none' && modes[a.id].lifecycle.cleanupRequired"
+      :id="`lifecycle-${a.id}`"
+      class="result err lifecycle-cleanup row"
+      :class="{ 'settings-target-highlight': settingsTargetHighlight === `lifecycle-${a.id}` }"
+    >
+      <span>{{ t("settings.integration.lifecycleCleanupHint") }}</span>
+      <span class="spacer"></span>
+      <button
+        class="btn btn-update"
+        type="button"
+        :disabled="modeBusy[a.id]"
+        @click="updateArtifact(a.id, 'hook')"
+      >
+        {{ t("settings.integration.update") }}
+      </button>
+    </div>
+
     <template v-if="modes[a.id].mode !== 'none'">
       <hr class="divider" />
 
@@ -315,6 +335,55 @@ const {
               })
         }}
       </p>
+
+      <div
+        :id="`lifecycle-${a.id}`"
+        class="row agent-row readiness-target-row"
+        :class="{ 'settings-target-highlight': settingsTargetHighlight === `lifecycle-${a.id}` }"
+      >
+        <span class="label">{{ t("settings.integration.lifecycleTitle") }}</span>
+        <span class="badge">
+          <span
+            class="dot"
+            :class="modes[a.id].lifecycle.installed ? 'on' : 'off'"
+          ></span>
+          {{
+            modes[a.id].lifecycle.installed
+              ? t("settings.integration.configured")
+              : t("settings.integration.notConfigured")
+          }}
+        </span>
+        <span class="spacer"></span>
+        <button
+          v-if="modes[a.id].lifecycle.needsUpdate"
+          class="btn btn-update"
+          type="button"
+          :disabled="modeBusy[a.id]"
+          @click="updateArtifact(a.id, 'hook')"
+        >
+          <span class="dot-update"></span
+          >{{ t("settings.integration.update") }}
+        </button>
+        <label class="switch">
+          <input
+            type="checkbox"
+            :checked="modes[a.id].lifecycle.enabled"
+            :disabled="modeBusy[a.id] || !modes[a.id].lifecycle.supported"
+            @change="
+              toggleLifecycle(
+                a.id,
+                ($event.target as HTMLInputElement).checked
+              )
+            "
+          />
+          <span class="track"></span>
+        </label>
+      </div>
+      <p class="card-desc agent-hint">
+        {{ t("settings.integration.lifecycleHint") }}
+      </p>
+
+      <hr class="divider" />
 
       <!-- Rules / Skill（CLI / MCP 共有；Grok 为 skill） -->
       <div class="row agent-row">
@@ -404,7 +473,7 @@ const {
             </span>
             <span class="spacer"></span>
             <button
-              v-if="modes[a.id].hookNeedsUpdate"
+              v-if="modes[a.id].hookNeedsUpdate && !modes[a.id].lifecycle.needsUpdate"
               class="btn btn-update"
               type="button"
               :disabled="modeBusy[a.id]"
@@ -471,7 +540,7 @@ const {
             </span>
             <span class="spacer"></span>
             <button
-              v-if="modes[a.id].hookNeedsUpdate"
+              v-if="modes[a.id].hookNeedsUpdate && !modes[a.id].lifecycle.needsUpdate"
               class="btn btn-update"
               type="button"
               :disabled="modeBusy[a.id]"

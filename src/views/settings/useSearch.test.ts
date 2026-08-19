@@ -8,6 +8,7 @@ import { useSettingsSearch } from "./useSearch";
 
 describe("useSettingsSearch", () => {
   it("indexes the Pi integration card", async () => {
+    i18n.global.locale.value = "en";
     let search!: ReturnType<typeof useSettingsSearch>;
     const harness = defineComponent({
       setup() {
@@ -27,6 +28,14 @@ describe("useSettingsSearch", () => {
       tab: "integration",
       title: "Pi",
       extra: ["Agent"],
+    });
+
+    search.searchQuery.value = "lifecycle tracking";
+    await nextTick();
+    expect(search.searchResults.value).toContainEqual({
+      tab: "integration",
+      title: "Lifecycle tracking",
+      extra: expect.any(Array),
     });
     wrapper.unmount();
   });

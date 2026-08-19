@@ -118,6 +118,12 @@ pub fn stop_preferences_file() -> PathBuf {
     config_dir().join("stop-preferences.json")
 }
 
+/// Per-agent lifecycle tracking preference. Tracking is available only while the corresponding
+/// automatic Agent integration is active, but the explicit preference survives mode changes.
+pub fn lifecycle_preferences_file() -> PathBuf {
+    config_dir().join("lifecycle-preferences.json")
+}
+
 /// Claude 提问接管的开关（spec claude-ask-user-question D3），与 permission / stop 偏好同级。
 pub fn ask_question_preferences_file() -> PathBuf {
     config_dir().join("ask-question-preferences.json")

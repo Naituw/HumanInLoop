@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// Advanced: Agent lifecycle, daemon lifecycle, on-demand IM delivery, Agent task launch, and
-// permission grants. Only the task-launch card is limited to platforms with a supported terminal.
+// Advanced: daemon lifecycle, on-demand IM delivery, Agent task launch, and permission grants.
+// Only the task-launch card is limited to platforms with a supported terminal.
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { useSettingsContext } from "./context";
@@ -12,14 +12,6 @@ const {
   isWindows,
   supportsAgentTasks,
   persist,
-  LIFECYCLE_KINDS,
-  lifecycleStatus,
-  lifecycleBusy,
-  lifecycleError,
-  toggleLifecycle,
-  updateLifecycle,
-  lifecycleLabel,
-  settingsTargetHighlight,
   changeDaemonLifecycle,
   toggleAgentTasks,
   testAgentTaskTerminal,
@@ -36,72 +28,6 @@ const config = computed(() => ctx.config.value!);
 </script>
 
 <template>
-  <div class="card">
-    <p class="card-title">{{ t("settings.experimental.lifecycleTitle") }}</p>
-    <p class="card-desc">{{ t("settings.experimental.lifecycleDesc") }}</p>
-    <hr class="divider" />
-    <template v-for="(kind, i) in LIFECYCLE_KINDS" :key="kind">
-      <hr v-if="i > 0" class="divider" />
-      <div
-        :id="`lifecycle-${kind}`"
-        class="row readiness-target-row"
-        :class="{ 'settings-target-highlight': settingsTargetHighlight === `lifecycle-${kind}` }"
-      >
-        <div class="col">
-          <span class="label">{{ lifecycleLabel(kind) }}</span>
-          <p
-            v-if="!lifecycleStatus[kind].supported"
-            class="card-desc"
-          >
-            {{ t("settings.experimental.unsupported") }}
-          </p>
-          <p
-            v-else-if="lifecycleStatus[kind].outdated"
-            class="card-desc warn"
-          >
-            {{ t("settings.experimental.outdated") }}
-          </p>
-          <p
-            v-else-if="lifecycleError[kind]"
-            class="card-desc err"
-          >
-            {{ lifecycleError[kind] }}
-          </p>
-        </div>
-        <span class="spacer"></span>
-        <button
-          v-if="
-            lifecycleStatus[kind].installed &&
-            lifecycleStatus[kind].outdated
-          "
-          class="btn btn-update"
-          type="button"
-          :disabled="lifecycleBusy[kind]"
-          @click="updateLifecycle(kind)"
-        >
-          <span class="dot-update"></span
-          >{{ t("settings.integration.update") }}
-        </button>
-        <label class="switch">
-          <input
-            type="checkbox"
-            :checked="lifecycleStatus[kind].installed"
-            :disabled="
-              !lifecycleStatus[kind].supported || lifecycleBusy[kind]
-            "
-            @change="
-              toggleLifecycle(
-                kind,
-                ($event.target as HTMLInputElement).checked
-              )
-            "
-          />
-          <span class="track"></span>
-        </label>
-      </div>
-    </template>
-  </div>
-
   <!-- 守护进程生命周期（默认按活动启动/空闲退出；保活=常驻+开机自启） -->
   <div class="card">
     <p class="card-title">

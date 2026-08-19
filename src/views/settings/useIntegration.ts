@@ -10,6 +10,8 @@ import {
   agentPermissionSet,
   agentAskQuestionSet,
   agentStopSet,
+  agentLifecycleInstall,
+  agentLifecycleUninstall,
   agentRuleReveal,
   agentRuleOpen,
   mcpConfigReveal,
@@ -27,10 +29,13 @@ import type {
   AgentModeStatus,
   CollaborationStyle,
 } from "../../lib/types";
-import { isMac, isWindows } from "../../lib/platform";
+import { isMac, isWindows, supportsAgentTasks } from "../../lib/platform";
 import type { SettingsCore } from "./context";
 
-export function useIntegration(core: SettingsCore) {
+export function useIntegration(
+  core: SettingsCore,
+  refreshAgentTaskSettings: (scan?: boolean) => Promise<void>,
+) {
   const { t } = useI18n();
   const { config, persist } = core;
 
@@ -89,6 +94,15 @@ export function useIntegration(core: SettingsCore) {
       otherHandlersDetected: false,
     },
     permissionNeedsUpdate: false,
+    lifecycle: {
+      enabled: false,
+      preferenceConfigured: false,
+      installed: false,
+      outdated: false,
+      supported: true,
+      needsUpdate: false,
+      cleanupRequired: false,
+    },
     stop: {
       supported: false,
       enabled: false,
@@ -157,6 +171,25 @@ export function useIntegration(core: SettingsCore) {
     } finally {
       modeBusy.value[agent] = false;
       await refreshMode(agent);
+      if (supportsAgentTasks) await refreshAgentTaskSettings(false);
+    }
+  }
+
+  async function toggleLifecycle(agent: AgentId, enabled: boolean) {
+    if (modeBusy.value[agent]) return;
+    modeBusy.value[agent] = true;
+    modeMessage.value[agent] = null;
+    try {
+      if (enabled) await agentLifecycleInstall(agent);
+      else await agentLifecycleUninstall(agent);
+      modeError.value[agent] = false;
+    } catch (e) {
+      modeMessage.value[agent] = String(e);
+      modeError.value[agent] = true;
+    } finally {
+      modeBusy.value[agent] = false;
+      await refreshMode(agent);
+      if (supportsAgentTasks) await refreshAgentTaskSettings(false);
     }
   }
 
@@ -229,6 +262,9 @@ export function useIntegration(core: SettingsCore) {
     } finally {
       modeBusy.value[agent] = false;
       await refreshMode(agent);
+      if (artifact === "hook" && supportsAgentTasks) {
+        await refreshAgentTaskSettings(false);
+      }
     }
   }
 
@@ -266,6 +302,7 @@ export function useIntegration(core: SettingsCore) {
       }
     } finally {
       updateAllBusy.value = false;
+      if (supportsAgentTasks) await refreshAgentTaskSettings(false);
     }
   }
 
@@ -435,6 +472,7 @@ tool_timeout_sec = 86400`,
     refreshMode,
     setMode,
     togglePermission,
+    toggleLifecycle,
     toggleStop,
     toggleAskQuestion,
     permissionBlockedText,

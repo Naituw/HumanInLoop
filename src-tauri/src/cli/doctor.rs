@@ -167,7 +167,11 @@ fn render_text(cfg: &AppConfig, status: &Option<crate::ipc::StatusInfo>, lang: L
         let lifecycle = if !lc.supported {
             cfgio::t(lang, "n/a", "—")
         } else {
-            state_label(lc.installed, lc.outdated, lang)
+            format!(
+                "{}:{}",
+                if lc.enabled { "on" } else { "off" },
+                state_label(lc.installed, lc.needs_update, lang)
+            )
         };
         out.push_str(&format!(
             "  {:<8} {}={} {}={} {}={} {}={} {}={} {}={} {}={}\n",
@@ -289,7 +293,14 @@ fn render_json(cfg: &AppConfig, status: &Option<crate::ipc::StatusInfo>) -> Stri
                 },
                 "mcp": { "installed": mcp_config::is_installed(target), "needsUpdate": mcp_config::needs_update(target) },
                 "permission": permission,
-                "lifecycle": { "installed": lc.installed, "needsUpdate": lc.outdated, "supported": lc.supported },
+                "lifecycle": {
+                    "enabled": lc.enabled,
+                    "preferenceConfigured": lc.preference_configured,
+                    "installed": lc.installed,
+                    "needsUpdate": lc.needs_update,
+                    "cleanupRequired": lc.cleanup_required,
+                    "supported": lc.supported
+                },
             })
         })
         .collect();

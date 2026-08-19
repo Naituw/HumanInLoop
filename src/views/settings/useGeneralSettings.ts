@@ -1,7 +1,6 @@
 // 「通用」tab 相关状态与动作：外观 / 弹窗行为 / 菜单栏 / 历史 / 语音 / 窗口材质。
 // （daemonLifecycle 虽展示在「高级」tab，但同属 general 配置段，也放这里。）
 import { computed, onBeforeUnmount, ref } from "vue";
-import { useI18n } from "vue-i18n";
 import { applyLanguage } from "../../i18n";
 import {
   applyWindowEffect,
@@ -35,7 +34,6 @@ import type {
 import type { SettingsCore } from "./context";
 
 export function useGeneralSettings(core: SettingsCore) {
-  const { t } = useI18n();
   const { config, activeTab, persist } = core;
 
   async function changeTheme(theme: ThemeMode) {
@@ -231,10 +229,6 @@ export function useGeneralSettings(core: SettingsCore) {
     await persist();
   }
 
-  function lifecycleLabel(kind: string): string {
-    return t(`settings.experimental.${kind}`);
-  }
-
   // 通用域初始化：历史条数、弹窗声音支持、Liquid Glass 支持探测。
   async function initGeneral() {
     historyTotal.value = await historyCount();
@@ -278,7 +272,6 @@ export function useGeneralSettings(core: SettingsCore) {
     effectiveWindowEffect,
     changeWindowEffect,
     toggleExperimental,
-    lifecycleLabel,
     initGeneral,
   };
 }

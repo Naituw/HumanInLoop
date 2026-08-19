@@ -386,9 +386,14 @@ fn lifecycle_cmd(args: &[String], lang: Lang) -> Result<(), String> {
     }
     let status = agent_lifecycle::status(kind);
     print_line(&format!(
-        "[{agent}] {}{}",
-        if status.installed { "on" } else { "off" },
-        if status.outdated {
+        "[{agent}] {}; {}{}",
+        if status.enabled { "on" } else { "off" },
+        if status.installed {
+            cfgio::t(lang, "configured", "已配置")
+        } else {
+            cfgio::t(lang, "not configured", "未配置")
+        },
+        if status.needs_update {
             cfgio::t(lang, " (needs update)", "（需更新）")
         } else {
             String::new()
@@ -417,9 +422,6 @@ fn cleanup_cmd(args: &[String], lang: Lang) -> Result<(), String> {
         if let Err(error) = agent_mode::set(target, agent_mode::Mode::None) {
             errors.push(format!("{} integration: {error}", kind.label()));
         }
-        if let Err(error) = agent_lifecycle::uninstall(kind) {
-            errors.push(format!("{} lifecycle: {error}", kind.label()));
-        }
     }
     if errors.is_empty() {
         print_line(&cfgio::t(
@@ -436,8 +438,8 @@ fn cleanup_cmd(args: &[String], lang: Lang) -> Result<(), String> {
 fn legacy_write_error(command: &str, lang: Lang) -> String {
     cfgio::t(
         lang,
-        &format!("agents {command} was removed; use `agents mode <agent> <cli|mcp|none>`, `agents update [agent]`, or the independent permission/lifecycle commands"),
-        &format!("agents {command} 已移除；请改用 `agents mode <agent> <cli|mcp|none>`、`agents update [agent]` 或独立的 permission/lifecycle 命令"),
+        &format!("agents {command} was removed; use `agents mode <agent> <cli|mcp|none>`, `agents update [agent]`, or an integration capability command"),
+        &format!("agents {command} 已移除；请改用 `agents mode <agent> <cli|mcp|none>`、`agents update [agent]` 或集成内 capability 命令"),
     )
 }
 
@@ -608,29 +610,25 @@ fn show(args: &[String], lang: Lang) -> Result<(), String> {
             ));
         }
 
-        // Lifecycle（实验性）
+        // Lifecycle capability owned by the active automatic integration.
         let st = agent_lifecycle::status(kind);
         let lc = if !st.supported {
             na.clone()
-        } else if st.installed {
+        } else {
             format!(
-                "{yes}{}",
-                if st.outdated {
+                "{}; {}{}",
+                if st.enabled { "on" } else { "off" },
+                if st.installed { &yes } else { &no },
+                if st.needs_update {
                     upd.clone()
                 } else {
                     String::new()
                 }
             )
-        } else {
-            no.clone()
         };
         print_line(&format!(
             "  {}: {}",
-            cfgio::t(
-                lang,
-                "lifecycle hook (experimental)",
-                "生命周期 hook（实验性）"
-            ),
+            cfgio::t(lang, "lifecycle tracking", "生命周期追踪"),
             lc
         ));
         print_line("");
@@ -656,11 +654,11 @@ fn help(lang: Lang) -> String {
   agents update [<agent>]            Refresh each current mode's complete managed bundle\n\
   agents permission <claude|codex> [on|off]  Query or set permission approval\n\
   agents stop <claude|codex|cursor|pi> [on|off]  Query or set Stop confirmation\n\
-  agents lifecycle <agent> [on|off]  Query or set lifecycle tracking\n\
+  agents lifecycle <agent> [on|off]  Query or set lifecycle tracking inside an active integration\n\
   agents cleanup                     Remove every AskHuman-managed Agent artifact\n\
   agents show [<agent>]              Manual-integration prompt + paste paths + install status\n\
 \n\
-  Modes: cli = rules + timeout hook;  mcp = rules/skill + MCP server config;  none = remove.\n\
+  Modes: cli = rules + runtime + default-on lifecycle; mcp = rules/skill + MCP + default-on lifecycle; none = remove.\n\
   Grok only supports none | mcp (skill + MCP config); it has no CLI mode and no timeout hook.\n\
   Pi only supports none | cli; its runtime artifact is a managed Extension and Stop defaults on.\n\
   Legacy install/uninstall and per-artifact write flags have been removed.",
@@ -671,11 +669,11 @@ fn help(lang: Lang) -> String {
   agents update [<agent>]            更新当前模式的完整托管产物包\n\
   agents permission <claude|codex> [on|off]  查询或设置权限审批\n\
   agents stop <claude|codex|cursor|pi> [on|off]  查询或设置结束确认\n\
-  agents lifecycle <agent> [on|off]  查询或设置生命周期追踪\n\
+  agents lifecycle <agent> [on|off]  查询或设置已启用集成内的生命周期追踪\n\
   agents cleanup                     移除全部由 AskHuman 托管的 Agent 产物\n\
   agents show [<agent>]              手动集成提示词 + 粘贴位置 + 安装状态\n\
 \n\
-  模式: cli = 规则 + 超时 hook；mcp = 规则/skill + MCP server 配置；none = 移除。\n\
+  模式: cli = 规则 + runtime + 默认开启的生命周期；mcp = 规则/skill + MCP + 默认开启的生命周期；none = 移除。\n\
   Grok 仅支持 none | mcp（skill + MCP 配置）；无 CLI 模式、无超时 hook。\n\
   Pi 仅支持 none | cli；运行时产物为托管 Extension，Stop 默认开启。\n\
   旧 install/uninstall 与逐产物写 flags 已移除。",

@@ -192,16 +192,6 @@ export default {
       enableHint: "显示尚不稳定的高级功能，默认关闭。",
       emptyTitle: "暂时没有实验功能",
       emptyDesc: "当前没有正在试验中的功能。未来的实验性功能会出现在这里。",
-      lifecycleTitle: "Agent 生命周期追踪",
-      lifecycleDesc:
-        "为各 Agent 安装用户级 Hook，用于识别 Agent 的运行状态（工作中、空闲或已结束）。Agent 状态窗口与菜单栏状态、IM /status、/watch、/msg、/diff、/stage、/transcript 等能力依赖该功能。开启后，守护进程也能更准确地根据 Agent 活动启动与保活。",
-      claude: "Claude Code",
-      codex: "Codex",
-      cursor: "Cursor",
-      grok: "Grok",
-      pi: "Pi",
-      unsupported: "当前平台不支持",
-      outdated: "需要更新——请先关闭再开启以刷新。",
       verticalQuestionsTitle: "多问题纵向同时显示",
       verticalQuestionsDesc:
         "提出多个问题时，纵向平铺同时显示所有问题（当前题高亮、滚动/悬停切换、快捷键导航）。关闭时为旧版「一次显示一个问题、上一步/下一步切换」。",
@@ -331,6 +321,8 @@ export default {
         "编辑下方英文段落以替换「问多勤 / 何时改方案」的约定。通道纪律（必须经 AskHuman、whats-next 等）不受影响。",
       collabSaveCustom: "保存自定义并更新集成",
       manualTitle: "手动集成",
+      manualLifecycleHint:
+        "手动提示词和 MCP 示例不会安装生命周期追踪；Agent 状态、插话与任务启动需要使用下方自动集成并开启追踪。",
       autoTitle: "自动集成",
       promptTitle: "参考提示词",
       copy: "复制",
@@ -362,6 +354,11 @@ export default {
       notInstalled: "未安装",
       configured: "已配置",
       notConfigured: "未配置",
+      lifecycleTitle: "生命周期追踪",
+      lifecycleHint:
+        "自动集成首次启用时默认开启，用于 Agent 状态、插话、Watch 与任务启动；关闭后 AskHuman 提问仍可使用。",
+      lifecycleCleanupHint:
+        "检测到旧版独立生命周期追踪。当前 Agent 未集成，更新后将移除这项遗留配置。",
       install: "安装",
       update: "更新",
       updateAll: "全部更新",
@@ -464,7 +461,7 @@ export default {
       autoActivationDesc:
         "开启后不再向所有 IM 渠道群发提问；本地弹窗始终会收到。需要某个 IM 渠道接收时，在 agent 工作期间于该渠道发送 /here（或 /这里），之后的提问与当前待答都会改走该渠道。",
       autoActivationLifecycleHint:
-        "建议同时开启上方的「生命周期追踪」，以提高 agent 工作/空闲状态识别的准确性。",
+        "Agent 自动集成会默认开启生命周期追踪；若在 Agent 卡中关闭，工作/空闲状态识别与按需发送会受到影响。",
       /** 渠道 Tab · 本地弹窗下方 tip 卡（仅未开启按需发送时显示）。 */
       autoActivationChannelsHintTitle: "建议开启「IM 渠道按需发送」",
       autoActivationChannelsHint:
@@ -664,7 +661,7 @@ export default {
     title: "Agent 状态",
     loading: "加载中…",
     empty: "暂无被追踪的 Agent",
-    emptyHint: "只有开启生命周期追踪的 Agent 启动后才会在此显示。",
+    emptyHint: "只有已集成且开启生命周期追踪的 Agent 启动后才会在此显示。",
     untitled: "（未命名）",
     unknownProject: "未知项目",
     focusTerminal: "聚焦终端",

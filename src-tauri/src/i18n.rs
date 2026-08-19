@@ -428,11 +428,11 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         // /status 单行占位（标题 / 项目缺失时）。
         "autoChannel.noTitle" => pick(lang, "(untitled)", "（未命名）"),
         "autoChannel.noProject" => pick(lang, "unknown project", "未知项目"),
-        // /status 空状态（无工作中/空闲 agent）：附「需开启生命周期追踪」提示。
+        // /status empty state points to lifecycle inside the Agent integration card.
         "autoChannel.statusEmpty" => pick(
             lang,
-            "No working or idle agents right now.\n(Agent status relies on Lifecycle Tracking; if it is off, enable tracking for the relevant agent under Settings → Advanced.)",
-            "当前没有工作中或空闲的 agent。\n（agent 状态依赖「生命周期追踪」；如未开启，请在 设置 → 高级 中开启对应 Agent 的追踪。）",
+            "No working or idle agents right now.\n(Agent status relies on Lifecycle Tracking; check the relevant Agent card under Settings → Agents.)",
+            "当前没有工作中或空闲的 agent。\n（Agent 状态依赖生命周期追踪；请在 设置 → Agents 的对应 Agent 卡中检查。）",
         ),
         // /status <编号> 详情：未找到该编号。`{p}` 为渠道命令前缀（Slack 用 `!`，其余 `/`）。
         "autoChannel.statusDetailNotFound" => pick(

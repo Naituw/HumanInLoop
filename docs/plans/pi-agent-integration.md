@@ -7,6 +7,10 @@
 > Pi 版本基线：`>= 0.82.0`
 >
 > 目标平台：macOS、Linux、Windows
+>
+> **生命周期所有权补充（2026-08-19）**：本计划最初允许 `未集成 + lifecycle Extension`；该产品
+> 语义已由 `docs/plans/agent-lifecycle-integration-binding.md` 替代。现行行为是 lifecycle 归 CLI
+> 自动集成所有、首次默认开、可显式关闭；未集成时删除 Extension 中的 lifecycle 能力并保留偏好。
 
 ## 1. 背景与目标
 
@@ -107,7 +111,8 @@ Pi 会话是版本 3 JSONL：
 Pi 只有两种可选模式：
 
 - **CLI**：安装规则和运行时 Extension，AskHuman 通过 CLI 阻塞等待；
-- **未集成**：移除 AskHuman 管理的 Pi 规则；Extension 是否保留取决于生命周期开关。
+- **未集成**：移除 AskHuman 管理的 Pi 规则与全部 active runtime capability；lifecycle/Stop 偏好
+  保留供以后重新集成。
 
 Rust 后端和 CLI 都必须拒绝 `pi + mcp`，不能只靠前端隐藏选项。
 
@@ -117,7 +122,7 @@ Pi 卡片与其他核心 Agent 一起展示，至少包含：
 
 - Pi 是否安装、版本和最低版本诊断；
 - `CLI / 未集成` 模式；
-- 生命周期开关；
+- lifecycle capability 开关（首次 CLI 集成默认开启，显式关闭跨模式切换保留）；
 - Stop 开关，首次出现时默认开启；
 - 当前规则与 Extension 是否最新；
 - 重新安装/更新、卸载和诊断入口。
@@ -126,13 +131,12 @@ Pi 不显示 MCP 配置，也不显示会让用户误以为可控制 Pi 内置�
 
 ### 4.3 模式与产物真值表
 
-Stop 是 CLI 交互的一部分；用户切换到“未集成”时保留偏好，但不运行 Stop。生命周期是独立能力，
-所以未集成模式下仍可按生命周期开关保留轻量 Extension。
+Stop 与 lifecycle 都是 CLI 自动集成内的 capability；用户切换到“未集成”时保留两项偏好，但不运行
+任何对应能力。Pi 的合并 Extension 只承载当前 active capability，全部关闭时删除文件。
 
 | 模式 | 生命周期 | Stop 偏好 | 规则 | Extension 模块 |
 | --- | --- | --- | --- | --- |
-| 未集成 | 关 | 任意 | 无 | 无 |
-| 未集成 | 开 | 任意 | 无 | 生命周期 + 插话 |
+| 未集成 | 任意偏好 | 任意 | 无 | 无 |
 | CLI | 关 | 关 | 有 | timeout + 上下文恢复 |
 | CLI | 关 | 开 | 有 | timeout + 上下文恢复 + Stop |
 | CLI | 开 | 关 | 有 | timeout + 上下文恢复 + 生命周期 + 插话 |

@@ -1141,7 +1141,7 @@ pub fn history_init(state: State<AppState>) -> HistoryInit {
     }
 }
 
-/// Agent 状态窗口初始化负载（实验性功能 spec D13）：主题 + 语言（前端据此渲染样式与文案）。
+/// Agent status window initialization payload (lifecycle tracking spec D13).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentsInit {
@@ -2502,9 +2502,10 @@ pub struct AgentModeStatus {
     /// PermissionRequest capability state; kept separate from the timeout hook.
     permission: agent_permission::PermissionStatus,
     permission_needs_update: bool,
-    /// Stop confirmation preference; activation is integration-mode gated while lifecycle tracking
-    /// remains independent.
+    /// Stop confirmation preference; activation is integration-mode gated.
     stop: agent_stop::StopStatus,
+    /// Lifecycle tracking preference and actual artifact state inside this integration.
+    lifecycle: agent_lifecycle::LifecycleStatus,
     /// Claude question takeover preference (spec claude-ask-user-question D3).
     ask_question: agent_ask_question::AskQuestionStatus,
     /// Whether automatic MCP configuration exists for this Agent.
@@ -2526,6 +2527,7 @@ pub fn agent_mode_status(agent: String) -> Result<AgentModeStatus, String> {
         crate::agents::AgentKind::parse(&agent).ok_or_else(|| "unknown agent".to_string())?;
     let updates = agent_mode::artifact_updates(a);
     let mode = agent_mode::current(a);
+    let lifecycle = agent_lifecycle::status_for_mode(stop_kind, mode);
     let permission = agent_permission::status(a);
     let recovery = agent_context_recovery::status(a, mode);
     let permission_needs_update = permission.needs_update;
@@ -2549,6 +2551,7 @@ pub fn agent_mode_status(agent: String) -> Result<AgentModeStatus, String> {
         permission,
         permission_needs_update,
         stop: agent_stop::status(stop_kind),
+        lifecycle,
         ask_question: agent_ask_question::status(stop_kind),
         mcp_supported,
         mcp_config_path: if mcp_supported {
@@ -2675,7 +2678,7 @@ pub fn agent_hook_open(agent: String) -> Result<(), String> {
     Ok(())
 }
 
-// ===== Agent 生命周期追踪 hook（实验性功能） =====
+// ===== Agent lifecycle tracking hooks =====
 
 use crate::agents::AgentKind;
 use crate::integrations::agent_lifecycle;
@@ -2697,6 +2700,7 @@ pub fn agent_lifecycle_install(app: AppHandle, agent: String) -> Result<String, 
     let k = parse_agent_kind(&agent)?;
     let msg = agent_lifecycle::install(k).map_err(|e| e.to_string())?;
     refresh_host_tray(&app);
+    crate::app::gui_host::refresh_integration_updates(&app);
     Ok(msg)
 }
 
@@ -2705,6 +2709,7 @@ pub fn agent_lifecycle_uninstall(app: AppHandle, agent: String) -> Result<String
     let k = parse_agent_kind(&agent)?;
     let msg = agent_lifecycle::uninstall(k).map_err(|e| e.to_string())?;
     refresh_host_tray(&app);
+    crate::app::gui_host::refresh_integration_updates(&app);
     Ok(msg)
 }
 

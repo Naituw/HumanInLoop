@@ -207,7 +207,7 @@ struct ServerState {
     config: Mutex<AppConfig>,
     /// 版本自更新快照（后台检查 / 指纹监听维护，握手与广播据此告知弹窗）。
     update: Mutex<UpdateSnapshot>,
-    /// Agent 生命周期注册表（实验性功能，spec D3）。
+    /// Agent lifecycle registry (lifecycle tracking spec D3).
     agents: Arc<AgentRegistry>,
     /// Agent 插话队列（spec agent-interject）：内存常驻，变更时落盘 `interject.json`。
     interject: crate::agents::interject::InterjectStore,
@@ -814,17 +814,9 @@ async fn serve(_lock: LockGuard) -> i32 {
     // Ensure the user hooks directory exists and includes a sample script.
     crate::hooks::ensure_sample();
 
-    // 自动迁移：已开启生命周期追踪的家族若 hook 过期（升级新增了事件 / 命令路径变化），
-    // 启动时幂等重装一次，让已安装用户无需手动关开开关即可拿到新 hook（仅刷新已安装的家族）。
+    // Stop and question-takeover compatibility migrations remain automatic. Lifecycle drift is
+    // surfaced through the Agent integration update flow; it has no separate startup migration.
     {
-        let migrated = crate::integrations::agent_lifecycle::migrate_outdated();
-        if !migrated.is_empty() {
-            let names: Vec<&str> = migrated.iter().map(|k| k.as_str()).collect();
-            log(&format!(
-                "migrated outdated lifecycle hooks: {}",
-                names.join(", ")
-            ));
-        }
         let migrated = crate::integrations::agent_stop::migrate_outdated();
         if !migrated.is_empty() {
             let names: Vec<&str> = migrated.iter().map(|kind| kind.as_str()).collect();

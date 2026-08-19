@@ -176,11 +176,12 @@ Cursor 若按其文档语义改用 `agent_message` 也不断；代价是 Cursor 
    增加「PreToolUse 条目 `timeout == 86400`」（Claude/Cursor/Codex 三家；Grok 不动）。
    Codex 另有信任哈希校验：期望哈希按 hooks.json 实际 timeout 计算，旧安装（无 timeout、
    哈希按 600 算）自动判不匹配 → `outdated: true`。
-2. **自动迁移**：daemon 启动即调 `migrate_outdated()`——对「已安装且 outdated」的家族幂等重装
-   （重写条目补 timeout、重算并写 Codex 信任哈希）。用户升级二进制后 daemon 重启
-   （自更新 graceful drain / 登录自启 / 按需拉起）即自动完成，**无需任何手动操作**。
-3. **手动兜底**：设置页实验区该家族显示「需更新」徽标 + 更新按钮；CLI `agents update <agent>
-   --lifecycle` 与 `doctor`（`needsUpdate: true`）同口径。
+2. **现行迁移（2026-08-19）**：lifecycle 已归入自动集成。Daemon 启动不再单独调用
+   `agent_lifecycle::migrate_outdated()`；旧产物继续判 `outdated`，由「Agents」Tab 对应卡片、托盘更新
+   提示和 `doctor` 显示“需更新”，用户点击 Hook/全部更新后幂等重装。缺失 lifecycle 与 None 旧孤立
+   产物使用同一显式更新入口，不在状态查询或 daemon 启动时写盘。
+3. **CLI 兜底**：`agents update <agent>` 更新当前自动集成整包；`agents lifecycle <agent> on|off`
+   切换 active 集成内偏好；`doctor` 的 `needsUpdate: true` 与设置页同口径。
 4. 重装只触碰本功能标记（`__agent-hook`）条目，用户其它 hook 与文件格式保留（既有 CST/toml_edit 编辑）。
 
 ### D6 不做 Stop hook 兜底（用户定案）
@@ -253,3 +254,5 @@ map 按 session 与条目下标对齐保存附件数组；旧文件缺少该字�
   自动迁移 + 设置页/CLI 手动兜底）；deny 包装文案三轮定形——`[USER INTERJECTION]` 前缀 + 说明拦截
   只为送信非禁用工具；末句不点名 AskHuman（选最短版 "as instructed"）；正文取精简版；
   消息块用 XML tag（`<user_message>`）。
+- （2026-08-19）生命周期归入自动集成后，旧 `migrate_outdated()` 后台路径由 Agent 卡显式更新取代；
+  过期判定与重装内容不变，迁移时机改为用户点击更新。

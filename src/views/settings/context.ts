@@ -13,7 +13,6 @@ import { useGeneralSettings } from "./useGeneralSettings";
 import { useAboutUpdates } from "./useAboutUpdates";
 import { useIntegration } from "./useIntegration";
 import { useAgentTasks } from "./useAgentTasks";
-import { useLifecycleSettings } from "./useLifecycleSettings";
 import { useChannels } from "./useChannels";
 import { useSettingsSearch } from "./useSearch";
 import { isMac, isWindows, supportsAgentTasks } from "../../lib/platform";
@@ -148,9 +147,8 @@ export function createSettingsContext() {
   const core = createCore();
   const general = useGeneralSettings(core);
   const updates = useAboutUpdates();
-  const integration = useIntegration(core);
   const tasks = useAgentTasks(core);
-  const lifecycle = useLifecycleSettings(tasks.refreshAgentTaskSettings);
+  const integration = useIntegration(core, tasks.refreshAgentTaskSettings);
   const channels = useChannels(core);
   const search = useSettingsSearch({
     config: core.config,
@@ -166,7 +164,6 @@ export function createSettingsContext() {
     ...updates,
     ...integration,
     ...tasks,
-    ...lifecycle,
     ...channels,
     ...search,
   };

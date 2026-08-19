@@ -55,8 +55,9 @@
 ### 3.1 开关与支持范围
 
 - Claude Code / Codex / Cursor 各自一个“结束时确认”开关且默认关闭；Pi 同样有独立开关，默认开启。
-- preference 在产品语义上独立于“生命周期追踪”和“权限审批”，并跨 integration mode 切换保留；
-  但 active confirmation 只在 CLI/MCP mode 安装，None 下暂停并隐藏，重新集成时按原 preference 恢复。
+- Stop preference 在产品语义上独立于 lifecycle preference 和权限审批，并跨 integration mode 切换
+  保留；但 active confirmation 只在 CLI/MCP mode 安装，None 下暂停并隐藏，重新集成时按原
+  preference 恢复。Lifecycle 自身是自动集成拥有的可选 capability，不允许脱离 active mode 安装。
 - Grok 显示不支持或不展示开关，不安装 Stop 确认 Hook。
 - 仅自然完成触发；错误、API failure、用户主动取消不发卡。
 - Codex 的内部 thread 不触发结束确认。新版 Hook 输入优先按
@@ -158,11 +159,11 @@ transcript 路径。Hook 始终以 Agent 可接受的成功码退出。
 
 ### 5.1 单一 AskHuman Stop handler
 
-虽然“结束时确认”和“生命周期追踪”是两个独立开关，但同一家 Agent 的磁盘配置里，
+虽然 active 自动集成里的“结束时确认”和“生命周期追踪”是两个独立偏好，但同一家 Agent 的磁盘配置里，
 AskHuman **只能拥有一个 Stop handler**。原因是三家都会并发启动同一事件的多条匹配 Hook；若一条先上报
 `turn-end`、另一条再等待确认，注册表会提前变空闲并产生竞态。
 
-共享 reconcile 的四种状态：
+active mode 下共享 reconcile 的四种状态：
 
 | 生命周期追踪 | 结束时确认 | AskHuman Stop handler 行为 |
 |---|---|---|
@@ -171,9 +172,10 @@ AskHuman **只能拥有一个 Stop handler**。原因是三家都会并发启动
 | 关 | 开 | 等待确认；不写生命周期注册表 |
 | 开 | 开 | 等待确认；结束/fail-open 后上报 `turn-end`，继续时保持 working |
 
-integration mode 在上述矩阵之外再门控 `结束时确认`：None 把 confirm 视为关，但不改持久化
-preference；CLI/MCP 才按 preference 取值。故 None + lifecycle 开时共享 handler 必须降为
-`track`-only，None + lifecycle 关时完整删除；从 None 返回 CLI/MCP 时自动恢复 `confirm`。
+integration mode 在上述矩阵之外同时门控两个 capability：None 必须删除实际 lifecycle 与 Stop
+handler，但保留 lifecycle/Stop 两项 preference；CLI/MCP 才按两项 preference 重新生成无 handler、
+`track`、`confirm` 或 `track + confirm`。因此现行产品不存在 None + track-only 状态；若检测到旧版
+孤立 lifecycle，则在 Agent 卡显示待清理更新，由用户点击后删除。
 
 启停任一开关都必须在现有 `IntegrationMutationLock` 内重算目标状态：
 
@@ -246,8 +248,8 @@ watch 并集、渠道扰动、取消及现有卡片终态，不新增 Stop 专�
 ### 6.2 安装器与配置保留
 
 - 生命周期 × 结束确认四种组合的 install/uninstall/update 全矩阵及任意切换顺序。
-- None/CLI/MCP × lifecycle × Stop preference 全矩阵：None 清除 `confirm` 但保留 preference，
-  tracking 开时仅保留 `track`，重新集成时恢复 `confirm`。
+- None/CLI/MCP × lifecycle × Stop preference 全矩阵：None 删除整个 AskHuman Stop handler 但保留
+  两项 preference；重新集成时恢复 active mode 对应的 `track` / `confirm` 组合。
 - 同一 Agent 任一状态下 AskHuman 自己最多一条 Stop handler。
 - 保留同事件其它用户 handler、注释、JSONC/TOML 格式与无关字段。
 - Claude Nested、Cursor Flat、Codex hooks.json + trust hash 的 status/outdated/reconcile。

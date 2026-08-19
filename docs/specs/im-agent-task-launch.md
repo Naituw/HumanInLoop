@@ -167,8 +167,9 @@ Telegram 在最后一步先发任务来源选择卡。选择「输入新任务�
 
 1. `agentTasks.enabled`；keepalive + daemon login item 状态；
 2. macOS GUI session 与 Terminal.app，或 Windows 单交互桌面会话与 `wt.exe`；
-3. workspace index：过滤不存在路径；为空或扫描过期时执行一次有界四家冷扫描；
-4. 四家 Agent：固定命令在用户 login shell 中解析为 executable；lifecycle installed/current；
+3. workspace index：过滤不存在路径；为空或扫描过期时执行一次有界五家冷扫描；
+4. 五家 Agent：固定命令在用户 login shell 中解析为 executable；lifecycle enabled 且
+   installed/current；
    `agent_mode` 为 CLI/MCP、Rule/skill 已安装，且 CLI timeout Hook / MCP config 通道产物已安装并 current。
    Rule/skill 正文与 Subagent Guard 过期只显示集成更新提示，不阻止选择 Agent。
 
@@ -176,7 +177,7 @@ Telegram 在最后一步先发任务来源选择卡。选择「输入新任务�
 
 - workspace 与 ready Agent 均非空：进入选择；部分 Agent 不可用时只列 ready，并在卡片尾部给短原因；
 - workspace = 0：停止，提示先运行一次 Agent 或在电脑设置手动添加目录；
-- ready Agent = 0：停止，按四家列 binary missing / lifecycle off/outdated / integration off/outdated；
+- ready Agent = 0：停止，按五家列 binary missing / lifecycle off/outdated / integration off/outdated；
 - Terminal / keepalive 不可用：停止并给设置修复入口；
 - 不通过启动 Agent 来测试认证；首次启动若需要登录，登录界面留在 Terminal 中。
 
@@ -341,7 +342,7 @@ workspace 动态状态放 `agent-workspaces.json`，launch record 放短时私�
 - 权限选择方式三态；YOLO 持久选项有醒目风险提示；
 - Terminal 可用状态 +「测试 Terminal」；
 - workspace 主卡片只显示已保存数量与「管理工作目录」入口；入口打开独立面板，左上角为「完成」、右上角为 `+`，`+` 调用 macOS 系统目录选择器；列表每行使用统一 `…` 菜单执行 pin / hide / forget；
-- 四家 Agent readiness：binary、lifecycle、CLI/MCP integration、可选/不可选原因；PermissionRequest
+- 五家 Agent readiness：binary、lifecycle、CLI/MCP integration、可选/不可选原因；PermissionRequest
   只作辅助信息；
 - 总体 readiness 摘要。
 
@@ -386,7 +387,7 @@ workspace 动态状态放 `agent-workspaces.json`，launch record 放短时私�
 1. `/new` 只接受无参；带文本回用法，不创建 flow。
 2. `/new` 在任何卡片前完成 readiness；无 workspace / 无 ready Agent 均返回分项诊断。
 3. Agent 只有 binary executable + lifecycle installed/current + integration CLI/MCP current 同时成立才进入选项。
-4. 冷扫描从四家既有 session 得到最近 cwd；不读取 prompt/transcript 正文；格式损坏不崩溃。
+4. 冷扫描从五家既有 session 得到最近 cwd；不读取 prompt/transcript 正文；格式损坏不崩溃。
 5. 四渠道完成 workspace → Agent → 权限（ask 模式）→ 原生 task input；普通消息不被 task flow 消费。
    飞书/钉钉/Slack 有 TODO 时同卡显示单选与输入，无 TODO 时不显示选项。
 6. permissionPrompt 三态正确跳转；任务卡显示最终策略；四家 YOLO argv 映射准确。
@@ -436,3 +437,5 @@ workspace 动态状态放 `agent-workspaces.json`，launch record 放短时私�
   二次确认卡。
 - **2026-07-25**：设置入口从「实验」Tab 转正到「高级」Tab，紧随「IM 渠道按需发送」；不再受
   `experimental.enabled` 隐蔽开关控制，配置键与开关状态不变。readiness 的进入刷新随之改挂「高级」。
+- **2026-08-19**：Lifecycle readiness 链接改到「Agents」Tab 对应 Agent 卡内的 lifecycle 行；
+  readiness 继续分别显示 CLI / Lifecycle / Integration，显式关闭 lifecycle 会使该 Agent 不可选。

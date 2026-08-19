@@ -35,6 +35,15 @@ function modeStatus(
       otherHandlersDetected: false,
     },
     permissionNeedsUpdate: false,
+    lifecycle: {
+      enabled: true,
+      preferenceConfigured: true,
+      installed: true,
+      outdated: false,
+      supported: true,
+      needsUpdate: false,
+      cleanupRequired: false,
+    },
     stop: {
       supported: true,
       enabled: true,
@@ -92,6 +101,7 @@ function settingsContext(
     modeError: ref({ [agent.id]: false }),
     setMode: vi.fn(),
     togglePermission: vi.fn(),
+    toggleLifecycle: vi.fn(),
     toggleStop: vi.fn(),
     toggleAskQuestion: vi.fn(),
     permissionBlockedText: vi.fn(() => ""),
@@ -145,6 +155,103 @@ describe("IntegrationTab", () => {
     expect(row).toBeDefined();
     return row!;
   }
+
+  it("shows default-on lifecycle drift inside an active Agent card", async () => {
+    const lifecycle = {
+      enabled: true,
+      preferenceConfigured: false,
+      installed: false,
+      outdated: false,
+      supported: true,
+      needsUpdate: true,
+      cleanupRequired: false,
+    };
+    const { wrapper, context } = mountAgent(
+      agentDefinition("claude", true),
+      modeStatus({ lifecycle }),
+    );
+    const row = rowByLabel(
+      wrapper,
+      "claude",
+      "settings.integration.lifecycleTitle",
+    );
+    expect(row.get("input").element.checked).toBe(true);
+    expect(row.find(".badge").text()).toBe(
+      i18n.global.t("settings.integration.notConfigured"),
+    );
+    await row.get(".btn-update").trigger("click");
+    expect(context.updateArtifact).toHaveBeenCalledWith("claude", "hook");
+    const runtimeRow = rowByLabel(
+      wrapper,
+      "claude",
+      "settings.integration.hookLabel",
+    );
+    expect(runtimeRow.find(".btn-update").exists()).toBe(false);
+  });
+
+  it("respects an explicit lifecycle opt-out without showing an update", () => {
+    const lifecycle = {
+      enabled: false,
+      preferenceConfigured: true,
+      installed: false,
+      outdated: false,
+      supported: true,
+      needsUpdate: false,
+      cleanupRequired: false,
+    };
+    const { wrapper } = mountAgent(
+      agentDefinition("codex", false),
+      modeStatus({ lifecycle }),
+    );
+    const row = rowByLabel(
+      wrapper,
+      "codex",
+      "settings.integration.lifecycleTitle",
+    );
+    expect(row.get("input").element.checked).toBe(false);
+    expect(row.find(".btn-update").exists()).toBe(false);
+  });
+
+  it("prompts cleanup for legacy lifecycle in None mode", async () => {
+    const lifecycle = {
+      enabled: false,
+      preferenceConfigured: false,
+      installed: true,
+      outdated: false,
+      supported: true,
+      needsUpdate: true,
+      cleanupRequired: true,
+    };
+    const { wrapper, context } = mountAgent(
+      agentDefinition("cursor", true),
+      modeStatus({ mode: "none", lifecycle }),
+    );
+    const card = wrapper.get("#integration-cursor");
+    expect(card.text()).toContain(
+      i18n.global.t("settings.integration.lifecycleCleanupHint"),
+    );
+    await card.get(".lifecycle-cleanup .btn-update").trigger("click");
+    expect(context.updateArtifact).toHaveBeenCalledWith("cursor", "hook");
+  });
+
+  it("hides lifecycle controls for a clean None mode", () => {
+    const { wrapper } = mountAgent(
+      agentDefinition("grok", false),
+      modeStatus({
+        mode: "none",
+        lifecycle: {
+          enabled: false,
+          preferenceConfigured: true,
+          installed: false,
+          outdated: false,
+          supported: true,
+          needsUpdate: false,
+          cleanupRequired: false,
+        },
+      }),
+    );
+    expect(wrapper.find("#lifecycle-grok").exists()).toBe(false);
+  });
 
   it.each(["cursor", "claude"] as const)(
     "shows the installed %s CLI timeout hook without requiring a recovery hook",

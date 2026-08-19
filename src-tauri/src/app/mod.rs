@@ -58,7 +58,7 @@ enum View {
     },
     /// 独立项目待办窗口（`AskHuman --todos`）；预选项目取自 `AppState.project`。
     Todos,
-    /// Agent 生命周期状态窗口（实验性功能，spec D13）：订阅 daemon 推送，动态更新。
+    /// Agent status window, updated from daemon snapshots.
     Agents,
     /// 统一 GUI 宿主（菜单栏托盘 + 各窗口单实例，spec D2）：无初始窗口，常驻事件循环。
     GuiHost,
@@ -531,8 +531,7 @@ pub fn run_todos(project: String, config: AppConfig) -> ! {
     std::process::exit(0);
 }
 
-/// Agent 状态窗口入口（`AskHuman agents status`，实验性功能 spec D13）：
-/// 创建窗口 + 订阅 daemon 推送，动态展示工作中 / 空闲 / 已结束的 agent。
+/// Open the `AskHuman agents monitor` window and subscribe to daemon snapshots.
 pub fn run_agents(config: AppConfig) -> ! {
     let lang = Lang::resolve(&config.general.language);
     let state = AppState {
@@ -2157,10 +2156,10 @@ pub(crate) fn set_agents_focus(session_id: Option<String>) {
     }
 }
 
-/// 订阅 daemon 的 agent 快照推送，转成前端 `agents-updated` 事件（实验性功能 spec D20）；
-/// 焦点会话详情帧转成 `agent-detail` 事件（spec gui-agent-console C8）。
-/// 断连后退避重连（必要时 `open_for_subscribe` 会自动拉起 daemon），重连补发当前焦点。
-/// `stop` 为 Some 时（宿主）被通知即整体退出（窗口关闭/重启订阅用）；为 None 时随进程退出。
+/// Subscribe to daemon agent snapshots and emit frontend `agents-updated` events (spec D20).
+/// Focused-session detail frames become `agent-detail` events (gui-agent-console spec C8).
+/// Reconnect with backoff, starting the daemon when needed and restoring the current focus.
+/// A provided `stop` notification terminates the host subscription; otherwise it runs until exit.
 pub(crate) fn spawn_agents_subscription(
     app: tauri::AppHandle,
     stop: Option<std::sync::Arc<tokio::sync::Notify>>,

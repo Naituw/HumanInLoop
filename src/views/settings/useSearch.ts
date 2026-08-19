@@ -130,6 +130,10 @@ export function useSettingsSearch(deps: {
       lit("integration", "Cursor", ["Agent"]),
       lit("integration", "Grok", ["Agent"]),
       lit("integration", "Pi", ["Agent"]),
+      e("integration", "settings.integration.lifecycleTitle", [
+        "settings.integration.lifecycleHint",
+        "settings.integration.manualLifecycleHint",
+      ]),
       // 通信渠道
       e("channel", "settings.channels.popupTitle", [
         "settings.channels.rememberSize",
@@ -172,9 +176,6 @@ export function useSettingsSearch(deps: {
       e("general", "settings.menuBar.title", [
         "settings.menuBar.icon",
         "settings.menuBar.hint",
-      ]),
-      e("advanced", "settings.experimental.lifecycleTitle", [
-        "settings.experimental.lifecycleDesc",
       ]),
       e("advanced", "settings.experimental.daemonLifecycleTitle", [
         "settings.experimental.daemonLifecycleLabel",

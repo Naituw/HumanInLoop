@@ -1,5 +1,6 @@
-//! Agent 生命周期 hook 集成（实验性功能，spec D16/D17）：为 Claude Code / Codex / Cursor 安装
-//! **用户级** lifecycle hook，调用隐藏子命令 `AskHuman __agent-hook <agent> <event>` 上报事件。
+//! Agent lifecycle tracking integration. Automatic integrations own their user-level lifecycle
+//! hooks; Pi carries the capability in its shared managed extension. Tracking can be disabled
+//! inside an active integration, while `Mode::None` never retains AskHuman lifecycle artifacts.
 //!
 //! 设计要点：
 //! - The timeout hook (`askhuman-timeout.sh`) remains independent. Lifecycle events use the
@@ -22,16 +23,68 @@ use sha2::{Digest, Sha256};
 /// 识别本功能注入条目的命令标记。
 pub const MARKER: &str = "__agent-hook";
 
-/// 生命周期 hook 安装状态（前端实验区开关据此渲染）。
-#[derive(Debug, Clone, serde::Serialize)]
+/// Lifecycle preference and on-disk state aggregated for an Agent integration card.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LifecycleStatus {
-    /// 是否已安装（至少一个事件已注册本功能条目）。
+    /// Effective preference while the integration is active. Always false in None mode.
+    pub enabled: bool,
+    /// Whether the user/update flow has persisted an explicit preference.
+    pub preference_configured: bool,
+    /// Whether at least one lifecycle event contains an AskHuman entry.
     pub installed: bool,
-    /// 已安装但需更新（命令路径变化 / 事件缺失 / Codex 信任缺失或不匹配）。
+    /// Whether an installed artifact is stale or incomplete.
     pub outdated: bool,
     /// Whether lifecycle hooks are supported on the current platform.
     pub supported: bool,
+    /// The current mode/preferences and the actual artifact disagree or the artifact is outdated.
+    pub needs_update: bool,
+    /// A lifecycle artifact exists although the current mode/preferences require its removal.
+    pub cleanup_required: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DiskLifecycleStatus {
+    installed: bool,
+    outdated: bool,
+    supported: bool,
+}
+
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct LifecyclePreferences {
+    #[serde(default)]
+    claude: Option<bool>,
+    #[serde(default)]
+    codex: Option<bool>,
+    #[serde(default)]
+    cursor: Option<bool>,
+    #[serde(default)]
+    grok: Option<bool>,
+    #[serde(default)]
+    pi: Option<bool>,
+}
+
+impl LifecyclePreferences {
+    fn get(&self, kind: AgentKind) -> Option<bool> {
+        match kind {
+            AgentKind::Claude => self.claude,
+            AgentKind::Codex => self.codex,
+            AgentKind::Cursor => self.cursor,
+            AgentKind::Grok => self.grok,
+            AgentKind::Pi => self.pi,
+        }
+    }
+
+    fn set(&mut self, kind: AgentKind, value: bool) {
+        let slot = match kind {
+            AgentKind::Claude => &mut self.claude,
+            AgentKind::Codex => &mut self.codex,
+            AgentKind::Cursor => &mut self.cursor,
+            AgentKind::Grok => &mut self.grok,
+            AgentKind::Pi => &mut self.pi,
+        };
+        *slot = Some(value);
+    }
 }
 
 /// 某家族要注册的事件：(配置文件里的事件键, 归一化 lifecycle 事件)。
@@ -112,6 +165,64 @@ pub fn supported() -> bool {
     true
 }
 
+fn load_preferences() -> LifecyclePreferences {
+    std::fs::read(paths::lifecycle_preferences_file())
+        .ok()
+        .map(|bytes| parse_preferences(&bytes))
+        .unwrap_or_default()
+}
+
+fn parse_preferences(bytes: &[u8]) -> LifecyclePreferences {
+    serde_json::from_slice(bytes).unwrap_or_default()
+}
+
+fn save_preferences(preferences: &LifecyclePreferences) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(preferences)?;
+    super::hook_edit::atomic_write(&paths::lifecycle_preferences_file(), &bytes)
+}
+
+pub(crate) fn preference(kind: AgentKind) -> Option<bool> {
+    load_preferences().get(kind)
+}
+
+pub(crate) fn target_for_kind(kind: AgentKind) -> super::agent_rules::AgentTarget {
+    match kind {
+        AgentKind::Claude => super::agent_rules::AgentTarget::ClaudeCode,
+        AgentKind::Codex => super::agent_rules::AgentTarget::Codex,
+        AgentKind::Cursor => super::agent_rules::AgentTarget::Cursor,
+        AgentKind::Grok => super::agent_rules::AgentTarget::Grok,
+        AgentKind::Pi => super::agent_rules::AgentTarget::Pi,
+    }
+}
+
+fn aggregate_status(
+    mode: super::agent_mode::Mode,
+    preference: Option<bool>,
+    disk: DiskLifecycleStatus,
+) -> LifecycleStatus {
+    let enabled = mode != super::agent_mode::Mode::None && preference.unwrap_or(true);
+    let cleanup_required = disk.supported && !enabled && disk.installed;
+    let needs_update = disk.supported
+        && if enabled {
+            !disk.installed || disk.outdated
+        } else {
+            disk.installed
+        };
+    LifecycleStatus {
+        enabled,
+        preference_configured: preference.is_some(),
+        installed: disk.installed,
+        outdated: disk.outdated,
+        supported: disk.supported,
+        needs_update,
+        cleanup_required,
+    }
+}
+
+pub(crate) fn status_for_mode(kind: AgentKind, mode: super::agent_mode::Mode) -> LifecycleStatus {
+    aggregate_status(mode, preference(kind), disk_status(kind))
+}
+
 /// 是否有任意一家 agent 已开启生命周期追踪（即至少一家装了本功能的 lifecycle hook）。
 /// 用于「未开启任何追踪」时隐藏 Agent 状态相关入口（托盘菜单等）。
 pub fn any_installed() -> bool {
@@ -126,7 +237,7 @@ pub fn any_installed() -> bool {
         AgentKind::Pi,
     ]
     .iter()
-    .any(|k| status(*k).installed)
+    .any(|k| disk_status(*k).installed)
 }
 
 /// Whether lifecycle tracking is installed. A shared Stop handler counts only when it carries the
@@ -159,29 +270,6 @@ pub(crate) fn tracking_installed(kind: AgentKind) -> bool {
                 })
             })
         })
-}
-
-/// 启动时自动迁移：对**已安装但过期**的 lifecycle hook 幂等重装（补齐新增事件 / 修正命令路径）。
-/// 仅刷新用户已开启的家族（installed 才动），绝不为未启用的家族安装。返回被迁移的家族列表。
-/// 用于「升级二进制后，已开启生命周期追踪的用户自动拿到新 hook」，无需手动关开开关。
-pub fn migrate_outdated() -> Vec<AgentKind> {
-    if !supported() {
-        return Vec::new();
-    }
-    let mut migrated = Vec::new();
-    for kind in [
-        AgentKind::Claude,
-        AgentKind::Codex,
-        AgentKind::Cursor,
-        AgentKind::Grok,
-        AgentKind::Pi,
-    ] {
-        let st = status(kind);
-        if st.installed && st.outdated && install(kind).is_ok() {
-            migrated.push(kind);
-        }
-    }
-    migrated
 }
 
 /// 当前可执行文件绝对路径（hook 命令调用它）。
@@ -222,11 +310,16 @@ fn is_stop_event(kind: AgentKind, event_key: &str) -> bool {
         && matches!((kind, event_key), (AgentKind::Cursor, "stop") | (_, "Stop"))
 }
 
-// ===== 对外：状态 / 安装 / 卸载 =====
+// ===== Public status, preference, installation, and removal API =====
 
 pub fn status(kind: AgentKind) -> LifecycleStatus {
+    let mode = super::agent_mode::current(target_for_kind(kind));
+    status_for_mode(kind, mode)
+}
+
+fn disk_status(kind: AgentKind) -> DiskLifecycleStatus {
     if !supported() {
-        return LifecycleStatus {
+        return DiskLifecycleStatus {
             installed: false,
             outdated: false,
             supported: false,
@@ -240,7 +333,7 @@ pub fn status(kind: AgentKind) -> LifecycleStatus {
         AgentKind::Grok => json_status(kind, &paths::grok_hooks_json(), Shape::Nested),
         AgentKind::Pi => {
             let extension = super::pi_extension::status();
-            LifecycleStatus {
+            DiskLifecycleStatus {
                 installed: extension.lifecycle,
                 outdated: extension.lifecycle && extension.outdated,
                 supported: true,
@@ -249,9 +342,36 @@ pub fn status(kind: AgentKind) -> LifecycleStatus {
     }
 }
 
-pub fn install(kind: AgentKind) -> Result<String> {
+/// Change the lifecycle preference inside an active automatic integration. Turning the preference
+/// off in None mode is accepted as an idempotent cleanup; turning it on would create the invalid
+/// `None + lifecycle` state and is rejected.
+pub fn set_enabled(kind: AgentKind, value: bool) -> Result<String> {
     let _lock = super::mutation_lock::IntegrationMutationLock::acquire()?;
-    install_unlocked(kind)
+    let mode = super::agent_mode::current(target_for_kind(kind));
+    if value && mode == super::agent_mode::Mode::None {
+        return Err(anyhow!(
+            "enable an automatic Agent integration before enabling lifecycle tracking"
+        ));
+    }
+
+    let original = load_preferences();
+    let mut preferences = original.clone();
+    preferences.set(kind, value);
+    save_preferences(&preferences)?;
+    let result = reconcile_artifact_unlocked(kind, mode, value);
+    if let Err(error) = result {
+        let _ = save_preferences(&original);
+        return Err(error);
+    }
+    Ok(message(if value {
+        "cmd.lifecycleInstalled"
+    } else {
+        "cmd.lifecycleRemoved"
+    }))
+}
+
+pub fn install(kind: AgentKind) -> Result<String> {
+    set_enabled(kind, true)
 }
 
 pub(crate) fn install_unlocked(kind: AgentKind) -> Result<String> {
@@ -269,8 +389,46 @@ pub(crate) fn install_unlocked(kind: AgentKind) -> Result<String> {
 }
 
 pub fn uninstall(kind: AgentKind) -> Result<String> {
-    let _lock = super::mutation_lock::IntegrationMutationLock::acquire()?;
-    uninstall_unlocked(kind)
+    set_enabled(kind, false)
+}
+
+/// Reconcile lifecycle as part of an Agent mode mutation. When `adopt_default` is true, an active
+/// legacy integration with no stored preference adopts the new default-on preference. None mode
+/// always removes the artifact while preserving the stored preference for a later re-integration.
+pub(crate) fn reconcile_unlocked(
+    kind: AgentKind,
+    mode: super::agent_mode::Mode,
+    adopt_default: bool,
+) -> Result<()> {
+    let original = load_preferences();
+    let mut preferences = original.clone();
+    let mut changed = false;
+    if mode != super::agent_mode::Mode::None && preferences.get(kind).is_none() && adopt_default {
+        preferences.set(kind, true);
+        save_preferences(&preferences)?;
+        changed = true;
+    }
+    let desired = mode != super::agent_mode::Mode::None && preferences.get(kind).unwrap_or(true);
+    if let Err(error) = reconcile_artifact_unlocked(kind, mode, desired) {
+        if changed {
+            let _ = save_preferences(&original);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn reconcile_artifact_unlocked(
+    kind: AgentKind,
+    mode: super::agent_mode::Mode,
+    desired: bool,
+) -> Result<()> {
+    if mode != super::agent_mode::Mode::None && desired {
+        install_unlocked(kind)?;
+    } else {
+        uninstall_unlocked(kind)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn uninstall_unlocked(kind: AgentKind) -> Result<String> {
@@ -382,10 +540,10 @@ fn read_value(path: &std::path::Path) -> Option<Value> {
     jsonc_parser::parse_to_serde_value(&text, &ParseOptions::default()).ok()
 }
 
-fn json_status(kind: AgentKind, path: &std::path::Path, shape: Shape) -> LifecycleStatus {
+fn json_status(kind: AgentKind, path: &std::path::Path, shape: Shape) -> DiskLifecycleStatus {
     let exe = exe_path().unwrap_or_default();
     let Some(root) = read_value(path) else {
-        return LifecycleStatus {
+        return DiskLifecycleStatus {
             installed: false,
             outdated: false,
             supported: true,
@@ -398,7 +556,7 @@ fn json_status(kind: AgentKind, path: &std::path::Path, shape: Shape) -> Lifecyc
         shape,
         super::agent_stop::active_in_current_mode(kind),
     );
-    LifecycleStatus {
+    DiskLifecycleStatus {
         installed: any,
         outdated: any && !complete,
         supported: true,
@@ -407,8 +565,8 @@ fn json_status(kind: AgentKind, path: &std::path::Path, shape: Shape) -> Lifecyc
 
 /// 已安装 / 完整性判定（纯函数，供单测）：`any`＝至少一个事件含本功能条目；
 /// `complete`＝每个事件都恰好是期望形态（命令逐字一致 + PreToolUse 带 timeout=86400）。
-/// 不完整（如旧版安装缺 timeout）→ `outdated` → 由 `migrate_outdated()` 自动幂等重装
-/// （spec agent-interject D5「已开启用户的 hook 更新流程」）。
+/// Incomplete artifacts, such as an older entry without a timeout, become `outdated` and are
+/// repaired only after the user chooses Update in the Agent integration.
 fn json_presence(kind: AgentKind, exe: &str, root: &Value, shape: Shape) -> (bool, bool) {
     json_presence_with_stop(kind, exe, root, shape, false)
 }
@@ -686,7 +844,7 @@ fn codex_uninstall() -> Result<()> {
     Ok(())
 }
 
-fn codex_status() -> LifecycleStatus {
+fn codex_status() -> DiskLifecycleStatus {
     let base = json_status(AgentKind::Codex, &paths::codex_hooks_json(), Shape::Nested);
     if !base.installed {
         return base;
@@ -701,7 +859,7 @@ fn codex_status() -> LifecycleStatus {
         }
         _ => false,
     };
-    LifecycleStatus {
+    DiskLifecycleStatus {
         installed: true,
         outdated: base.outdated || !trust_ok,
         supported: true,
@@ -1027,8 +1185,8 @@ mod tests {
 
     #[test]
     fn old_install_without_timeout_is_incomplete() {
-        // 已开启用户的更新流程（spec agent-interject D5）：旧版产物（PreToolUse 无 timeout）
-        // 判 outdated → migrate_outdated() 自动幂等重装；重装后判定归位。
+        // An older artifact without the explicit PreToolUse timeout must be surfaced as outdated;
+        // the Agent integration update flow repairs it only after the user chooses Update.
         // 用「新版安装产物手动抹掉 timeout」模拟旧产物。
         let new = apply_json_install(AgentKind::Claude, EXE, "{}", Shape::Nested).unwrap();
         let mut old = to_value(&new);
@@ -1240,5 +1398,100 @@ mod tests {
         let mut s = String::new();
         canonical_compact(&v, &mut s);
         assert_eq!(s, "{\"a\":[{\"x\":1,\"y\":2}],\"b\":1}");
+    }
+
+    #[test]
+    fn lifecycle_status_matrix_binds_artifacts_to_active_modes() {
+        let missing = DiskLifecycleStatus {
+            installed: false,
+            outdated: false,
+            supported: true,
+        };
+        let installed = DiskLifecycleStatus {
+            installed: true,
+            ..missing
+        };
+        let outdated = DiskLifecycleStatus {
+            outdated: true,
+            ..installed
+        };
+
+        let none_clean =
+            aggregate_status(crate::integrations::agent_mode::Mode::None, None, missing);
+        assert!(!none_clean.enabled && !none_clean.needs_update);
+
+        let none_legacy = aggregate_status(
+            crate::integrations::agent_mode::Mode::None,
+            Some(true),
+            installed,
+        );
+        assert!(!none_legacy.enabled);
+        assert!(none_legacy.needs_update && none_legacy.cleanup_required);
+
+        let legacy_active =
+            aggregate_status(crate::integrations::agent_mode::Mode::Cli, None, missing);
+        assert!(legacy_active.enabled && !legacy_active.preference_configured);
+        assert!(legacy_active.needs_update && !legacy_active.cleanup_required);
+
+        let explicit_off = aggregate_status(
+            crate::integrations::agent_mode::Mode::Mcp,
+            Some(false),
+            missing,
+        );
+        assert!(!explicit_off.enabled && !explicit_off.needs_update);
+
+        let off_drift = aggregate_status(
+            crate::integrations::agent_mode::Mode::Mcp,
+            Some(false),
+            installed,
+        );
+        assert!(off_drift.needs_update && off_drift.cleanup_required);
+
+        let on_outdated = aggregate_status(
+            crate::integrations::agent_mode::Mode::Cli,
+            Some(true),
+            outdated,
+        );
+        assert!(on_outdated.enabled && on_outdated.needs_update && on_outdated.outdated);
+    }
+
+    #[test]
+    fn lifecycle_preferences_cover_every_agent_kind() {
+        let mut preferences = LifecyclePreferences::default();
+        for kind in [
+            AgentKind::Claude,
+            AgentKind::Codex,
+            AgentKind::Cursor,
+            AgentKind::Grok,
+            AgentKind::Pi,
+        ] {
+            assert_eq!(preferences.get(kind), None);
+            preferences.set(kind, true);
+            assert_eq!(preferences.get(kind), Some(true));
+            preferences.set(kind, false);
+            assert_eq!(preferences.get(kind), Some(false));
+        }
+    }
+
+    #[test]
+    fn lifecycle_preferences_are_backward_compatible_and_fail_closed_to_defaults() {
+        let missing_fields = parse_preferences(br#"{"codex":false,"pi":true}"#);
+        assert_eq!(missing_fields.get(AgentKind::Claude), None);
+        assert_eq!(missing_fields.get(AgentKind::Codex), Some(false));
+        assert_eq!(missing_fields.get(AgentKind::Pi), Some(true));
+
+        let empty = parse_preferences(b"{}");
+        assert_eq!(empty.get(AgentKind::Cursor), None);
+
+        let corrupt = parse_preferences(b"not json");
+        for kind in [
+            AgentKind::Claude,
+            AgentKind::Codex,
+            AgentKind::Cursor,
+            AgentKind::Grok,
+            AgentKind::Pi,
+        ] {
+            assert_eq!(corrupt.get(kind), None);
+        }
     }
 }

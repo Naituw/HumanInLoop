@@ -1,4 +1,4 @@
-//! Agent 生命周期追踪（实验性功能）。
+//! Agent lifecycle tracking.
 //!
 //! Claude Code / Codex / Cursor / Grok 通过用户级 lifecycle hook，Pi 通过受管 Extension，把
 //! `session-start` / `turn-start` / `turn-end` / `session-end` 事件经隐藏子命令
