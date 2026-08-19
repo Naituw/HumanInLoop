@@ -129,6 +129,7 @@ export function useSettingsSearch(deps: {
       lit("integration", "Codex", ["Agent"]),
       lit("integration", "Cursor", ["Agent"]),
       lit("integration", "Grok", ["Agent"]),
+      lit("integration", "Pi", ["Agent"]),
       // 通信渠道
       e("channel", "settings.channels.popupTitle", [
         "settings.channels.rememberSize",
