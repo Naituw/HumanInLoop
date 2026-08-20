@@ -13,6 +13,7 @@ import {
   openPath,
 } from "../../lib/ipc";
 import type { AgentKind, AgentTaskReadiness, AgentTaskWorkspace } from "../../lib/types";
+import { supportsAgentTasks } from "../../lib/platform";
 import type { SettingsCore } from "./context";
 
 /** Agent 官方安装文档（readiness「CLI ×」跳转；新建任务窗口复用）。 */
@@ -34,6 +35,8 @@ export function useAgentTasks(core: SettingsCore) {
   const taskSettingsMessage = ref("");
   const workspacePanelOpen = ref(false);
   const workspaceMenuPath = ref<string | null>(null);
+  let taskSettingsInflight: Promise<void> | null = null;
+  let piReadinessInflight: Promise<AgentTaskReadiness | undefined> | null = null;
 
   async function refreshAgentTaskSettings(scan = false) {
     taskSettingsBusy.value = true;
@@ -41,13 +44,45 @@ export function useAgentTasks(core: SettingsCore) {
     try {
       [taskWorkspaces.value, taskReadiness.value] = await Promise.all([
         agentTaskWorkspaces(scan),
-        agentTaskReadiness(),
+        agentTaskReadiness({ force: scan }),
       ]);
     } catch (e) {
       taskSettingsMessage.value = String(e);
     } finally {
       taskSettingsBusy.value = false;
     }
+  }
+
+  async function ensureAgentTaskSettings(force = false) {
+    if (!supportsAgentTasks) return;
+    if (taskSettingsInflight) {
+      await taskSettingsInflight;
+      if (!force) return;
+    }
+    const run = refreshAgentTaskSettings(force);
+    taskSettingsInflight = run.finally(() => {
+      if (taskSettingsInflight === run) taskSettingsInflight = null;
+    });
+    await taskSettingsInflight;
+  }
+
+  async function ensurePiReadiness(): Promise<AgentTaskReadiness | undefined> {
+    const existing = taskReadiness.value.find((item) => item.kind === "pi");
+    if (existing) return existing;
+    if (piReadinessInflight) return piReadinessInflight;
+    const run = (async () => {
+      const items = await agentTaskReadiness({ kind: "pi" });
+      const item = items.find((entry) => entry.kind === "pi") ?? items[0];
+      if (item) {
+        const rest = taskReadiness.value.filter((entry) => entry.kind !== "pi");
+        taskReadiness.value = [...rest, item];
+      }
+      return item;
+    })();
+    piReadinessInflight = run.finally(() => {
+      if (piReadinessInflight === run) piReadinessInflight = null;
+    });
+    return piReadinessInflight;
   }
 
   // 开启走确认弹层（列出保活/登录项等副作用，用户点「继续开启」才生效）；关闭直接持久化。
@@ -198,6 +233,8 @@ export function useAgentTasks(core: SettingsCore) {
     workspacePanelOpen,
     workspaceMenuPath,
     refreshAgentTaskSettings,
+    ensureAgentTaskSettings,
+    ensurePiReadiness,
     agentTasksConfirmOpen,
     toggleAgentTasks,
     confirmEnableAgentTasks,

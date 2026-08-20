@@ -27,17 +27,25 @@ import type {
   AgentId,
   AgentMode,
   AgentModeStatus,
+  AgentTaskReadiness,
   CollaborationStyle,
 } from "../../lib/types";
 import { isMac, isWindows, supportsAgentTasks } from "../../lib/platform";
 import type { SettingsCore } from "./context";
 
+const PI_MINIMUM_VERSION = "0.82.0";
+
 export function useIntegration(
   core: SettingsCore,
-  refreshAgentTaskSettings: (scan?: boolean) => Promise<void>,
+  tasks: {
+    refreshAgentTaskSettings: (scan?: boolean) => Promise<void>;
+    ensurePiReadiness: () => Promise<AgentTaskReadiness | undefined>;
+    taskReadiness: { value: AgentTaskReadiness[] };
+  },
 ) {
   const { t } = useI18n();
   const { config, persist } = core;
+  const { refreshAgentTaskSettings, ensurePiReadiness, taskReadiness } = tasks;
 
   // 「在文件管理器中显示」的按平台措辞（访达 / 文件资源管理器 / 文件管理器），单一来源。
   const revealLabel = computed(() => {
@@ -153,8 +161,61 @@ export function useIntegration(
     pi: false,
   });
 
+  function overlayPiVersion(item: AgentTaskReadiness) {
+    modes.value.pi = {
+      ...modes.value.pi,
+      agentVersion: item.version,
+      minimumVersion: PI_MINIMUM_VERSION,
+      versionSupported: item.binaryReady,
+    };
+  }
+
+  function overlayPiVersionIfKnown() {
+    const item = taskReadiness.value.find((entry) => entry.kind === "pi");
+    if (item) overlayPiVersion(item);
+  }
+
   async function refreshMode(agent: AgentId) {
     modes.value[agent] = await agentModeStatus(agent);
+    if (agent === "pi") overlayPiVersionIfKnown();
+  }
+
+  const integrationLoading = ref(true);
+  const piVersionLoading = ref(false);
+  let integrationInflight: Promise<void> | null = null;
+  let integrationReady = false;
+  let piVersionInflight: Promise<void> | null = null;
+  let piVersionReady = false;
+
+  async function ensureIntegration() {
+    if (integrationReady) return;
+    if (integrationInflight) return integrationInflight;
+    const run = initIntegration().finally(() => {
+      if (integrationInflight === run) integrationInflight = null;
+      integrationReady = true;
+      integrationLoading.value = false;
+    });
+    integrationInflight = run;
+    return run;
+  }
+
+  async function ensurePiVersion() {
+    if (piVersionReady) return;
+    if (piVersionInflight) return piVersionInflight;
+    const run = (async () => {
+      piVersionLoading.value = true;
+      try {
+        const item = await ensurePiReadiness();
+        if (item) overlayPiVersion(item);
+      } finally {
+        piVersionLoading.value = false;
+        piVersionReady = true;
+      }
+    })();
+    piVersionInflight = run.finally(() => {
+      if (piVersionInflight === run) piVersionInflight = null;
+    });
+    return piVersionInflight;
   }
 
   // 一键切换到目标模式（含「未集成」）：自动卸旧装新。
@@ -466,6 +527,10 @@ tool_timeout_sec = 86400`,
     saveCustomCollaborationText,
     AGENTS,
     modes,
+    integrationLoading,
+    piVersionLoading,
+    ensureIntegration,
+    ensurePiVersion,
     modeBusy,
     modeMessage,
     modeError,

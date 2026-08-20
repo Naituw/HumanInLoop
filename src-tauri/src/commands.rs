@@ -1692,10 +1692,19 @@ pub fn agent_task_workspace_forget(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn agent_task_readiness(
+    kind: Option<String>,
+    force: Option<bool>,
 ) -> Result<Vec<crate::integrations::agent_launch::AgentReadiness>, String> {
-    tokio::task::spawn_blocking(crate::integrations::agent_launch::all_readiness)
-        .await
-        .map_err(|e| e.to_string())
+    let parsed = match kind {
+        Some(name) => Some(parse_agent_kind(&name)?),
+        None => None,
+    };
+    let force = force.unwrap_or(false);
+    tokio::task::spawn_blocking(move || {
+        crate::integrations::agent_launch::collect_readiness(parsed, force)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Open a harmless platform terminal self-check. It never resolves or starts an Agent binary.
@@ -2521,18 +2530,21 @@ pub struct AgentModeStatus {
 }
 
 #[tauri::command]
-pub fn agent_mode_status(agent: String) -> Result<AgentModeStatus, String> {
-    let a = parse_agent(&agent)?;
-    let stop_kind =
-        crate::agents::AgentKind::parse(&agent).ok_or_else(|| "unknown agent".to_string())?;
+pub async fn agent_mode_status(agent: String) -> Result<AgentModeStatus, String> {
+    tokio::task::spawn_blocking(move || agent_mode_status_sync(&agent))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn agent_mode_status_sync(agent: &str) -> Result<AgentModeStatus, String> {
+    let a = parse_agent(agent)?;
+    let stop_kind = parse_agent_kind(agent)?;
     let updates = agent_mode::artifact_updates(a);
     let mode = agent_mode::current(a);
     let lifecycle = agent_lifecycle::status_for_mode(stop_kind, mode);
     let permission = agent_permission::status(a);
     let recovery = agent_context_recovery::status(a, mode);
     let permission_needs_update = permission.needs_update;
-    let pi_readiness = (stop_kind == crate::agents::AgentKind::Pi)
-        .then(|| crate::integrations::agent_launch::readiness(stop_kind));
     let mcp_supported = mcp_config::supported(a);
     Ok(AgentModeStatus {
         mode: mode.as_str().to_string(),
@@ -2566,13 +2578,10 @@ pub fn agent_mode_status(agent: String) -> Result<AgentModeStatus, String> {
             "hook"
         }
         .to_string(),
-        agent_version: pi_readiness
-            .as_ref()
-            .and_then(|readiness| readiness.version.clone()),
-        minimum_version: pi_readiness.as_ref().map(|_| "0.82.0".to_string()),
-        version_supported: pi_readiness
-            .as_ref()
-            .is_none_or(|readiness| readiness.binary_ready),
+        // Version/CLI presence is owned by `agent_task_readiness`, never by this snapshot.
+        agent_version: None,
+        minimum_version: None,
+        version_supported: true,
     })
 }
 
@@ -3802,6 +3811,21 @@ pub fn restart_settings(app: AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_mode_status_does_not_probe_agent_cli() {
+        crate::integrations::agent_launch::with_binary_probe_test_state(|| {
+            crate::integrations::agent_launch::participate_in_binary_probe_test();
+            let status = agent_mode_status_sync("pi").unwrap();
+            assert_eq!(status.agent_version, None);
+            assert_eq!(status.minimum_version, None);
+            assert!(status.version_supported);
+            assert_eq!(
+                crate::integrations::agent_launch::binary_probe_test_count(),
+                0
+            );
+        });
+    }
 
     fn workspace(path: &str, pinned: bool, hidden: bool) -> crate::agents::workspaces::Workspace {
         crate::agents::workspaces::Workspace {

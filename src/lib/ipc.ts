@@ -125,8 +125,11 @@ export const agentTaskWorkspaceHide = (path: string, hidden: boolean) =>
   invoke<void>("agent_task_workspace_hide", { path, hidden });
 export const agentTaskWorkspaceForget = (path: string) =>
   invoke<void>("agent_task_workspace_forget", { path });
-export const agentTaskReadiness = () =>
-  invoke<AgentTaskReadiness[]>("agent_task_readiness");
+export const agentTaskReadiness = (opts?: { kind?: AgentKind; force?: boolean }) =>
+  invoke<AgentTaskReadiness[]>(
+    "agent_task_readiness",
+    opts ? { kind: opts.kind, force: opts.force } : undefined,
+  );
 export const agentTaskTestTerminal = () =>
   invoke<void>("agent_task_test_terminal");
 

@@ -205,6 +205,20 @@ export function useAboutUpdates() {
     void checkUpdate(false);
   }
 
+  let aboutReady = false;
+  let aboutInflight: Promise<void> | null = null;
+
+  async function ensureAbout() {
+    if (aboutReady) return;
+    if (aboutInflight) return aboutInflight;
+    const run = initAbout().finally(() => {
+      if (aboutInflight === run) aboutInflight = null;
+      aboutReady = true;
+    });
+    aboutInflight = run;
+    return run;
+  }
+
   let unlistenProgress: UnlistenFn | null = null;
   listen<{ percentage: number }>("update_download_progress", (e) => {
     updateProgress.value = Math.round(e.payload.percentage);
@@ -237,5 +251,6 @@ export function useAboutUpdates() {
     onNotesClick,
     restartSettingsNow,
     initAbout,
+    ensureAbout,
   };
 }

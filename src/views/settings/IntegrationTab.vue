@@ -17,6 +17,8 @@ const {
   saveCustomCollaborationText,
   AGENTS,
   modes,
+  integrationLoading,
+  piVersionLoading,
   modeBusy,
   modeMessage,
   modeError,
@@ -209,6 +211,12 @@ const {
   <!-- 自动集成：每个 Agent 一张卡，CLI | MCP | 未集成 三态切换 -->
   <p class="section-title">{{ t("settings.integration.autoTitle") }}</p>
 
+  <div v-if="integrationLoading" class="card settings-section-loading">
+    <span class="permission-state-spinner" aria-hidden="true"></span>
+    <p>{{ t("common.loading") }}</p>
+  </div>
+
+  <template v-else>
   <!-- 待更新总览（跨所有 Agent）：有任意产物过期/缺失时出现，附「全部更新」按钮 -->
   <div v-if="updateSummary.total > 0" class="card update-overview">
     <div class="row">
@@ -321,7 +329,14 @@ const {
       <hr class="divider" />
 
       <p
-        v-if="a.id === 'pi' && !modes[a.id].versionSupported"
+        v-if="a.id === 'pi' && piVersionLoading"
+        class="card-desc settings-inline-loading"
+      >
+        <span class="permission-state-spinner" aria-hidden="true"></span>
+        {{ t("common.loading") }}
+      </p>
+      <p
+        v-else-if="a.id === 'pi' && !modes[a.id].versionSupported"
         class="result err"
       >
         {{
@@ -816,5 +831,6 @@ const {
       {{ modeMessage[a.id] }}
     </p>
   </div>
+  </template>
   </div>
 </template>

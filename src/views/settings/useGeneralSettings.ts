@@ -246,6 +246,20 @@ export function useGeneralSettings(core: SettingsCore) {
     }
   }
 
+  let generalReady = false;
+  let generalInflight: Promise<void> | null = null;
+
+  async function ensureGeneral() {
+    if (generalReady) return;
+    if (generalInflight) return generalInflight;
+    const run = initGeneral().finally(() => {
+      if (generalInflight === run) generalInflight = null;
+      generalReady = true;
+    });
+    generalInflight = run;
+    return run;
+  }
+
   return {
     changeTheme,
     changeLanguage,
@@ -273,5 +287,6 @@ export function useGeneralSettings(core: SettingsCore) {
     changeWindowEffect,
     toggleExperimental,
     initGeneral,
+    ensureGeneral,
   };
 }

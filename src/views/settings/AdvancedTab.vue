@@ -157,6 +157,13 @@ const config = computed(() => ctx.config.value!);
       </div>
       <hr class="divider" />
       <p class="label">{{ t("settings.agentTasks.readiness") }}</p>
+      <div
+        v-if="taskSettingsBusy && taskReadiness.length === 0"
+        class="settings-section-loading"
+      >
+        <span class="permission-state-spinner" aria-hidden="true"></span>
+        <p>{{ t("common.loading") }}</p>
+      </div>
       <div v-for="item in taskReadiness" :key="item.kind" class="row agent-row">
         <span class="label">{{ item.label }}</span>
         <span class="badge"><span class="dot" :class="item.ready ? 'on' : 'off'"></span>{{ item.ready ? t("settings.agentTasks.ready") : t("settings.agentTasks.notReady") }}</span>
@@ -191,7 +198,11 @@ const config = computed(() => ctx.config.value!);
       <div class="row">
         <div class="col">
           <span class="label">{{ t("settings.agentTasks.workspaces") }}</span>
-          <span class="card-desc">{{ t("settings.agentTasks.workspaceCount", { n: taskWorkspaces.length }) }}</span>
+          <span
+            v-if="taskSettingsBusy && taskWorkspaces.length === 0"
+            class="card-desc"
+          >{{ t("common.loading") }}</span>
+          <span v-else class="card-desc">{{ t("settings.agentTasks.workspaceCount", { n: taskWorkspaces.length }) }}</span>
         </div>
         <span class="spacer"></span>
         <button class="btn" type="button" @click="openWorkspacePanel">

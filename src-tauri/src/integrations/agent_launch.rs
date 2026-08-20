@@ -12,16 +12,26 @@ use crate::paths;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(test)]
+use std::thread::ThreadId;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const RECORD_TTL_SECS: u64 = 5 * 60;
 const MAX_TASK_CHARS: usize = 3000;
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(2);
+const PROBE_CACHE_TTL: Duration = Duration::from_secs(60);
 pub const LAUNCH_ID_ENV: &str = "ASKHUMAN_AGENT_TASK_LAUNCH_ID";
+pub const PI_MINIMUM_VERSION: &str = "0.82.0";
+const PI_MINIMUM: (u64, u64, u64) = (0, 82, 0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -113,15 +123,64 @@ pub struct AgentReadiness {
     pub diagnostics: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BinaryProbe {
+    executable: Option<String>,
+    pi_version: Option<(u64, u64, u64)>,
+}
+
+struct ProbeCache {
+    values: HashMap<AgentKind, (Instant, BinaryProbe)>,
+    inflight: HashMap<AgentKind, Arc<Mutex<()>>>,
+}
+
+fn probe_cache() -> &'static Mutex<ProbeCache> {
+    static CACHE: OnceLock<Mutex<ProbeCache>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        Mutex::new(ProbeCache {
+            values: HashMap::new(),
+            inflight: HashMap::new(),
+        })
+    })
+}
+
+#[cfg(test)]
+struct BinaryProbeTestHarness {
+    lock: Mutex<()>,
+    threads: Mutex<HashSet<ThreadId>>,
+    r#override: Mutex<Option<BinaryProbe>>,
+    hits: AtomicUsize,
+}
+
+#[cfg(test)]
+fn binary_probe_test_harness() -> &'static BinaryProbeTestHarness {
+    static HARNESS: OnceLock<BinaryProbeTestHarness> = OnceLock::new();
+    HARNESS.get_or_init(|| BinaryProbeTestHarness {
+        lock: Mutex::new(()),
+        threads: Mutex::new(HashSet::new()),
+        r#override: Mutex::new(None),
+        hits: AtomicUsize::new(0),
+    })
+}
+
 pub fn readiness(kind: AgentKind) -> AgentReadiness {
+    readiness_with(kind, false)
+}
+
+pub fn readiness_fresh(kind: AgentKind) -> AgentReadiness {
+    readiness_with(kind, true)
+}
+
+fn readiness_with(kind: AgentKind, force: bool) -> AgentReadiness {
     let command = command_name(kind).to_string();
-    let executable = resolve_login_shell_executable(&command);
+    let probe = binary_probe(kind, force);
+    let executable = probe.executable.clone();
     let lifecycle = agent_lifecycle::status(kind);
     let target = target(kind);
     let mode = agent_mode::current(target);
     let integration_ready = !integration_unavailable(target, mode);
     let pi_version = (kind == AgentKind::Pi)
-        .then(|| executable.as_deref().and_then(detect_pi_version))
+        .then_some(probe.pi_version)
         .flatten();
     let version_ready = kind != AgentKind::Pi || pi_version.is_some_and(pi_version_supported);
     let binary_ready = executable.is_some() && version_ready;
@@ -137,10 +196,12 @@ pub fn readiness(kind: AgentKind) -> AgentReadiness {
         } else if kind == AgentKind::Pi {
             diagnostics.push(match pi_version {
                 Some((major, minor, patch)) => format!(
-                    "Pi {major}.{minor}.{patch} is unsupported; AskHuman requires Pi >= 0.82.0"
+                    "Pi {major}.{minor}.{patch} is unsupported; AskHuman requires Pi >= {PI_MINIMUM_VERSION}"
                 ),
                 None => {
-                    "Pi version could not be detected; AskHuman requires Pi >= 0.82.0".to_string()
+                    format!(
+                        "Pi version could not be detected; AskHuman requires Pi >= {PI_MINIMUM_VERSION}"
+                    )
                 }
             });
         }
@@ -170,6 +231,108 @@ pub fn readiness(kind: AgentKind) -> AgentReadiness {
         ready: binary_ready && lifecycle_ready && integration_ready,
         diagnostics,
     }
+}
+
+fn binary_probe(kind: AgentKind, force: bool) -> BinaryProbe {
+    if !force {
+        if let Some(hit) = cached_probe(kind) {
+            return hit;
+        }
+    }
+    let gate = {
+        let mut cache = probe_cache().lock().unwrap();
+        cache
+            .inflight
+            .entry(kind)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    };
+    let _guard = gate.lock().unwrap();
+    if !force {
+        if let Some(hit) = cached_probe(kind) {
+            return hit;
+        }
+    }
+    let value = binary_probe_uncached(kind);
+    probe_cache()
+        .lock()
+        .unwrap()
+        .values
+        .insert(kind, (Instant::now(), value.clone()));
+    value
+}
+
+fn cached_probe(kind: AgentKind) -> Option<BinaryProbe> {
+    let cache = probe_cache().lock().unwrap();
+    let (at, value) = cache.values.get(&kind)?;
+    (at.elapsed() < PROBE_CACHE_TTL).then(|| value.clone())
+}
+
+fn binary_probe_uncached(kind: AgentKind) -> BinaryProbe {
+    #[cfg(test)]
+    {
+        let harness = binary_probe_test_harness();
+        let participating = harness
+            .threads
+            .lock()
+            .unwrap()
+            .contains(&std::thread::current().id());
+        if participating {
+            harness.hits.fetch_add(1, Ordering::SeqCst);
+            if let Some(value) = harness.r#override.lock().unwrap().clone() {
+                return value;
+            }
+        }
+    }
+    let executable = resolve_login_shell_executable(command_name(kind));
+    let pi_version = (kind == AgentKind::Pi)
+        .then(|| executable.as_deref().and_then(detect_pi_version))
+        .flatten();
+    BinaryProbe {
+        executable,
+        pi_version,
+    }
+}
+
+#[cfg(test)]
+fn reset_binary_probe_test_state() {
+    let harness = binary_probe_test_harness();
+    harness.threads.lock().unwrap().clear();
+    *harness.r#override.lock().unwrap() = None;
+    harness.hits.store(0, Ordering::SeqCst);
+    let mut cache = probe_cache().lock().unwrap();
+    cache.values.clear();
+    cache.inflight.clear();
+}
+
+#[cfg(test)]
+pub(crate) fn with_binary_probe_test_state<R>(f: impl FnOnce() -> R) -> R {
+    let harness = binary_probe_test_harness();
+    let _guard = harness.lock.lock().unwrap();
+    reset_binary_probe_test_state();
+    let result = f();
+    reset_binary_probe_test_state();
+    result
+}
+
+#[cfg(test)]
+pub(crate) fn binary_probe_test_count() -> usize {
+    binary_probe_test_harness().hits.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+fn set_binary_probe_test_override(value: BinaryProbe) {
+    let harness = binary_probe_test_harness();
+    *harness.r#override.lock().unwrap() = Some(value);
+}
+
+#[cfg(test)]
+pub(crate) fn participate_in_binary_probe_test() {
+    binary_probe_test_harness()
+        .threads
+        .lock()
+        .unwrap()
+        .insert(std::thread::current().id());
 }
 
 /// Task readiness requires the active AskHuman transport to exist and be current. Prompt text and
@@ -205,10 +368,21 @@ fn integration_unavailable_from(
 }
 
 pub fn all_readiness() -> Vec<AgentReadiness> {
+    collect_readiness(None, false)
+}
+
+pub fn all_readiness_fresh() -> Vec<AgentReadiness> {
+    collect_readiness(None, true)
+}
+
+pub fn collect_readiness(kind: Option<AgentKind>, force: bool) -> Vec<AgentReadiness> {
+    let kinds: Vec<AgentKind> = kind
+        .map(|kind| vec![kind])
+        .unwrap_or_else(|| AgentKind::ALL.to_vec());
     std::thread::scope(|scope| {
-        let handles: Vec<_> = AgentKind::ALL
+        let handles: Vec<_> = kinds
             .into_iter()
-            .map(|kind| scope.spawn(move || readiness(kind)))
+            .map(|kind| scope.spawn(move || readiness_with(kind, force)))
             .collect();
         handles
             .into_iter()
@@ -1031,7 +1205,7 @@ fn parse_pi_version(output: &str) -> Option<(u64, u64, u64)> {
 }
 
 fn pi_version_supported(version: (u64, u64, u64)) -> bool {
-    version >= (0, 82, 0)
+    version >= PI_MINIMUM
 }
 
 fn record_path(token: &str) -> PathBuf {
@@ -1173,6 +1347,46 @@ mod tests {
         assert!(pi_version_supported((0, 83, 0)));
         assert!(!pi_version_supported((0, 81, 99)));
         assert_eq!(parse_pi_version("unknown"), None);
+    }
+
+    #[test]
+    fn binary_probe_cache_reuses_until_force() {
+        with_binary_probe_test_state(|| {
+            participate_in_binary_probe_test();
+            set_binary_probe_test_override(BinaryProbe {
+                executable: Some("/tmp/pi-test".into()),
+                pi_version: Some((0, 82, 0)),
+            });
+            let first = binary_probe(AgentKind::Pi, false);
+            let second = binary_probe(AgentKind::Pi, false);
+            assert_eq!(first, second);
+            assert_eq!(binary_probe_test_count(), 1);
+            let _forced = binary_probe(AgentKind::Pi, true);
+            assert_eq!(binary_probe_test_count(), 2);
+        });
+    }
+
+    #[test]
+    fn binary_probe_single_flight_shares_one_uncached_call() {
+        with_binary_probe_test_state(|| {
+            set_binary_probe_test_override(BinaryProbe {
+                executable: Some("/tmp/grok-test".into()),
+                pi_version: None,
+            });
+            std::thread::scope(|scope| {
+                let first = scope.spawn(|| {
+                    participate_in_binary_probe_test();
+                    binary_probe(AgentKind::Grok, false)
+                });
+                let second = scope.spawn(|| {
+                    participate_in_binary_probe_test();
+                    binary_probe(AgentKind::Grok, false)
+                });
+                first.join().unwrap();
+                second.join().unwrap();
+            });
+            assert_eq!(binary_probe_test_count(), 1);
+        });
     }
 
     #[test]

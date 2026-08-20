@@ -4,6 +4,7 @@ export default {
     cancel: "Cancel",
     submit: "Submit",
     test: "Test",
+    loading: "Loading…",
     copyCode: "Copy code",
     copied: "Copied",
     attachmentBadge: "【{n} attachments】",

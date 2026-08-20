@@ -148,7 +148,7 @@ export function createSettingsContext() {
   const general = useGeneralSettings(core);
   const updates = useAboutUpdates();
   const tasks = useAgentTasks(core);
-  const integration = useIntegration(core, tasks.refreshAgentTaskSettings);
+  const integration = useIntegration(core, tasks);
   const channels = useChannels(core);
   const search = useSettingsSearch({
     config: core.config,

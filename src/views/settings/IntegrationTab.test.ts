@@ -96,6 +96,8 @@ function settingsContext(
     saveCustomCollaborationText: vi.fn(),
     AGENTS: [agent],
     modes: ref({ [agent.id]: status }),
+    integrationLoading: ref(false),
+    piVersionLoading: ref(false),
     modeBusy: ref({ [agent.id]: false }),
     modeMessage: ref({ [agent.id]: null }),
     modeError: ref({ [agent.id]: false }),
@@ -134,8 +136,11 @@ describe("IntegrationTab", () => {
   function mountAgent(
     agent: ReturnType<typeof agentDefinition>,
     status: AgentModeStatus,
+    extras: { integrationLoading?: boolean; piVersionLoading?: boolean } = {},
   ) {
     const context = settingsContext(agent, status);
+    if (extras.integrationLoading) context.integrationLoading.value = true;
+    if (extras.piVersionLoading) context.piVersionLoading.value = true;
     useSettingsContext.mockReturnValue(context);
     const wrapper = mount(IntegrationTab, {
       global: { plugins: [i18n] },
@@ -438,5 +443,36 @@ describe("IntegrationTab", () => {
     );
     expect(wrapper.get("#integration-pi").text()).toContain("0.81.9");
     expect(wrapper.get("#integration-pi").text()).toContain("0.82.0");
+  });
+
+  it("hides agent cards while integration status is loading", () => {
+    const { wrapper } = mountAgent(
+      agentDefinition("pi", true),
+      modeStatus({ mode: "none" }),
+      { integrationLoading: true },
+    );
+    expect(wrapper.find("#integration-pi").exists()).toBe(false);
+    expect(wrapper.text()).toContain(i18n.global.t("common.loading"));
+  });
+
+  it("does not show a Pi version error while the version probe is in flight", () => {
+    const { wrapper } = mountAgent(
+      agentDefinition("pi", true),
+      modeStatus({
+        mode: "cli",
+        mcpSupported: false,
+        runtimeArtifactKind: "extension",
+        versionSupported: false,
+        minimumVersion: "0.82.0",
+      }),
+      { piVersionLoading: true },
+    );
+    const card = wrapper.get("#integration-pi");
+    expect(card.text()).toContain(i18n.global.t("common.loading"));
+    expect(card.text()).not.toContain(
+      i18n.global.t("settings.integration.piVersionMissing", {
+        minimum: "0.82.0",
+      }),
+    );
   });
 });
