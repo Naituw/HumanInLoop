@@ -1,6 +1,6 @@
 {
   "name": "@humaninloop/darwin-x64",
-  "version": "0.12.2",
+  "version": "0.13.0",
   "description": "macOS x64 binary for humaninloop (AskHuman). Installed automatically as an optional dependency of `humaninloop`.",
   "license": "MIT",
   "author": "Naituw",
