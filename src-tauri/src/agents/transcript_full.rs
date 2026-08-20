@@ -243,7 +243,8 @@ fn last_timestamped_user_prompt_from_path(kind: AgentKind, path: &Path) -> Optio
             continue;
         };
         if kind == AgentKind::Codex
-            && codex_response_user_is_followed_by_explicit_user(&v, &lines[index + 1..])
+            && (codex_response_user_is_followed_by_explicit_user(&v, &lines[index + 1..])
+                || codex_response_assistant_is_preceded_by_explicit_assistant(&v, &lines[..index]))
         {
             continue;
         }
@@ -479,7 +480,8 @@ pub fn load_path(kind: AgentKind, path: &Path) -> Result<TranscriptDoc, String> 
             continue;
         };
         if kind == AgentKind::Codex
-            && codex_response_user_is_followed_by_explicit_user(&v, &lines[index + 1..])
+            && (codex_response_user_is_followed_by_explicit_user(&v, &lines[index + 1..])
+                || codex_response_assistant_is_preceded_by_explicit_assistant(&v, &lines[..index]))
         {
             continue;
         }
@@ -721,9 +723,11 @@ fn push_pi(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut OpenTools
 
 /// Codex records a real human submission twice: first as a model-facing
 /// `response_item/message(role=user)`, then immediately as the authoritative
-/// `event_msg/user_message`. Context fragments such as loaded skills only use the first envelope.
-/// Drop the model-facing duplicate when the explicit user event follows, while retaining standalone
-/// response items as a compatibility fallback for older rollout formats.
+/// `event_msg/user_message` (legacy) or `event_msg/item_completed` `UserMessage`
+/// (paginated, Codex 0.147+). Context fragments such as loaded skills only use
+/// the first envelope. Drop the model-facing duplicate when the explicit user
+/// event follows, while retaining standalone response items as a compatibility
+/// fallback for older rollout formats.
 fn codex_response_user_is_followed_by_explicit_user(v: &Value, following: &[String]) -> bool {
     if !is_codex_response_user_message(v) {
         return false;
@@ -734,15 +738,66 @@ fn codex_response_user_is_followed_by_explicit_user(v: &Value, following: &[Stri
         .is_some_and(|next| is_codex_explicit_user_message(&next))
 }
 
+/// Paginated sessions emit `item_completed` AgentMessage *before* the
+/// `response_item` assistant copy. Drop that copy so `/transcript` does not
+/// double the same reply.
+fn codex_response_assistant_is_preceded_by_explicit_assistant(
+    v: &Value,
+    previous: &[String],
+) -> bool {
+    if !is_codex_response_assistant_message(v) {
+        return false;
+    }
+    previous
+        .iter()
+        .rev()
+        .find_map(|line| serde_json::from_str::<Value>(line).ok())
+        .is_some_and(|prev| is_codex_explicit_assistant_message(&prev))
+}
+
 fn is_codex_response_user_message(v: &Value) -> bool {
     v.get("type").and_then(Value::as_str) == Some("response_item")
         && v.pointer("/payload/type").and_then(Value::as_str) == Some("message")
         && v.pointer("/payload/role").and_then(Value::as_str) == Some("user")
 }
 
+fn is_codex_response_assistant_message(v: &Value) -> bool {
+    v.get("type").and_then(Value::as_str) == Some("response_item")
+        && v.pointer("/payload/type").and_then(Value::as_str) == Some("message")
+        && v.pointer("/payload/role").and_then(Value::as_str) == Some("assistant")
+}
+
 fn is_codex_explicit_user_message(v: &Value) -> bool {
-    v.get("type").and_then(Value::as_str) == Some("event_msg")
-        && v.pointer("/payload/type").and_then(Value::as_str) == Some("user_message")
+    if v.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return false;
+    }
+    match v.pointer("/payload/type").and_then(Value::as_str) {
+        Some("user_message") => true,
+        Some("item_completed") => {
+            v.pointer("/payload/item/type").and_then(Value::as_str) == Some("UserMessage")
+        }
+        _ => false,
+    }
+}
+
+fn is_codex_explicit_assistant_message(v: &Value) -> bool {
+    if v.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return false;
+    }
+    match v.pointer("/payload/type").and_then(Value::as_str) {
+        Some("agent_message") => true,
+        Some("item_completed") => {
+            v.pointer("/payload/item/type").and_then(Value::as_str) == Some("AgentMessage")
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn codex_turn_item_text(item: &Value) -> Option<String> {
+    value_text(item.get("content")).and_then(|text| {
+        let text = text.trim();
+        (!text.is_empty()).then(|| text.to_string())
+    })
 }
 
 fn is_codex_contextual_user_payload(text: &str) -> bool {
@@ -981,6 +1036,55 @@ fn push_codex(v: &Value, out: &mut Vec<TranscriptEvent>, open_tools: &mut OpenTo
                     });
                 }
             }
+        }
+        ("event_msg", "item_completed") => {
+            push_codex_item_completed(v, payload.get("item"), out);
+        }
+        _ => {}
+    }
+}
+
+fn push_codex_item_completed(v: &Value, item: Option<&Value>, out: &mut Vec<TranscriptEvent>) {
+    let Some(item) = item else {
+        return;
+    };
+    match item.get("type").and_then(Value::as_str).unwrap_or("") {
+        "UserMessage" => {
+            if let Some(text) = codex_turn_item_text(item) {
+                let (text, label) = clean_user(&text);
+                if !text.is_empty() {
+                    out.push(TranscriptEvent::UserText {
+                        text: trunc(&text, MAX_TEXT_CHARS),
+                        at: event_time(v),
+                        at_label: label,
+                    });
+                }
+            }
+        }
+        "AgentMessage" => {
+            if let Some(text) = codex_turn_item_text(item) {
+                out.push(TranscriptEvent::AssistantText {
+                    text: trunc(&text, MAX_TEXT_CHARS),
+                    at: event_time(v),
+                    at_label: None,
+                });
+            }
+        }
+        "FileChange" => {
+            let td = super::activity::ToolDisplay {
+                label: super::activity::ToolLabel::Write,
+                object: super::activity::patch_changes_object(item.get("changes")),
+            };
+            let failed = super::activity::codex_file_change_failed(item);
+            out.push(TranscriptEvent::ToolCall {
+                name: "apply_patch".to_string(),
+                args_summary: format_tool_line(&td),
+                result_summary: None,
+                is_error: failed,
+                ask_human: None,
+                at: event_time(v),
+                at_label: None,
+            });
         }
         _ => {}
     }
@@ -2393,5 +2497,152 @@ mod tests {
                 eprintln!("  {l}");
             }
         }
+    }
+
+    #[test]
+    fn paginated_codex_item_completed_is_authoritative_and_deduped() {
+        let file = write_jsonl(&[
+            serde_json::json!({
+                "timestamp": "2026-08-20T10:47:18.000Z",
+                "ordinal": 8,
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "ASKHUMAN_PAGINATED_PROBE_20260820"}]
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-08-20T10:47:18.058Z",
+                "ordinal": 9,
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "UserMessage",
+                        "id": "um-1",
+                        "content": [{"type": "text", "text": "ASKHUMAN_PAGINATED_PROBE_20260820", "text_elements": []}]
+                    }
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-08-20T10:47:26.127Z",
+                "ordinal": 12,
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "AgentMessage",
+                        "id": "am-1",
+                        "content": [{"type": "Text", "text": "ASKHUMAN_PAGINATED_PROBE_20260820"}],
+                        "phase": "final_answer"
+                    }
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-08-20T10:47:26.128Z",
+                "ordinal": 13,
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "ASKHUMAN_PAGINATED_PROBE_20260820"}]
+                }
+            }),
+            serde_json::json!({
+                "timestamp": "2026-08-20T10:51:51.477Z",
+                "ordinal": 15,
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "FileChange",
+                        "id": "exec-1",
+                        "changes": {"/tmp/probe.txt": {"type": "add", "content": "PING\n"}},
+                        "status": "completed"
+                    }
+                }
+            }),
+        ]);
+        let doc = load_path(AgentKind::Codex, file.path()).unwrap();
+        let users: Vec<&str> = doc
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                TranscriptEvent::UserText { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let assistants: Vec<&str> = doc
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                TranscriptEvent::AssistantText { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let writes: Vec<&str> = doc
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                TranscriptEvent::ToolCall {
+                    name, args_summary, ..
+                } if name == "apply_patch" => Some(args_summary.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(users, vec!["ASKHUMAN_PAGINATED_PROBE_20260820"]);
+        assert_eq!(assistants, vec!["ASKHUMAN_PAGINATED_PROBE_20260820"]);
+        assert_eq!(writes, vec!["写入: probe.txt"]);
+    }
+
+    #[test]
+    fn paginated_codex_148_real_session_transcript_when_present() {
+        let sid = "01a01ec8-3867-7730-8acf-8911ef19b587";
+        let Some(path) = crate::agents::title::transcript_path(AgentKind::Codex, sid) else {
+            eprintln!("skip: paginated probe session not on disk");
+            return;
+        };
+        let doc = load_path(AgentKind::Codex, &path).expect("load paginated rollout");
+        let users: Vec<&str> = doc
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                TranscriptEvent::UserText { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let assistants: Vec<&str> = doc
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                TranscriptEvent::AssistantText { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        eprintln!(
+            "paginated transcript events={} users={users:?} assistants={assistants:?}",
+            doc.events.len()
+        );
+        assert!(
+            users
+                .iter()
+                .any(|text| text.contains("ASKHUMAN_PAGINATED_PROBE_20260820")),
+            "expected user prompt via response_item fallback, got {users:?}"
+        );
+        assert!(
+            assistants
+                .iter()
+                .any(|text| text.contains("ASKHUMAN_PAGINATED_PROBE_20260820")),
+            "expected assistant reply via response_item, got {assistants:?}"
+        );
+        let prompt = last_timestamped_user_prompt(AgentKind::Codex, sid);
+        eprintln!("last_timestamped_user_prompt={prompt:?}");
+        assert!(
+            prompt
+                .as_ref()
+                .is_some_and(|p| p.text.contains("ASKHUMAN_PAGINATED_PROBE_20260820")),
+            "show_last User Prompt should still resolve via response_item, got {prompt:?}"
+        );
     }
 }

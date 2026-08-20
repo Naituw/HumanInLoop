@@ -1,7 +1,8 @@
 //! 把 `session_id` 解析成「对话标题」，复刻各家恢复对话列表里显示的标题（FINDINGS / spec D10）。
 //!
 //! - Cursor：`~/.cursor/chats/*/<sid>/meta.json` 的 `title`；缺失回退 transcript 首条用户消息。
-//! - Codex：`~/.codex/sessions/**/rollout-*-<sid>.jsonl` 首条**真实**用户消息（跳过注入块）。
+//! - Codex：`~/.codex/sessions/**/rollout-*-<sid>.jsonl` 首条**真实**用户消息（跳过注入块；
+//!   paginated 会话读 `item_completed` `UserMessage`，legacy 读 `event_msg/user_message`）。
 //! - Claude：`~/.claude/projects/*/<sid>.jsonl` 最后一条 `summary`，否则首条真实用户消息。
 //!
 //! 全部 best-effort：文件可能不存在 / 正在写 / 巨大，任何失败都返回 `None`（窗口显示「未命名」）。
@@ -101,8 +102,11 @@ fn codex_title(session_id: &str) -> Option<String> {
     first_user_message(&file)
 }
 
-/// Codex：扫描取首条 `event_msg{payload.type=="user_message"}` 的 `message`。
-/// Codex 只为用户真实输入发出该事件（注入的上下文走 response_item），故无需再过滤注入块。
+/// Codex：扫描取首条真实用户消息。
+///
+/// Legacy rollout: `event_msg{payload.type=="user_message"}` 的 `message`。
+/// Paginated rollout (0.147+): `event_msg/item_completed` `UserMessage` 的 content。
+/// Codex 只为用户真实输入发出这些事件（注入的上下文走 response_item），故无需再过滤注入块。
 fn codex_user_message(path: &Path) -> Option<String> {
     let file = fs::File::open(path).ok()?;
     let reader = BufReader::new(file);
@@ -111,7 +115,7 @@ fn codex_user_message(path: &Path) -> Option<String> {
             break;
         }
         let Ok(line) = line else { break };
-        if !line.contains("user_message") {
+        if !line.contains("user_message") && !line.contains("UserMessage") {
             continue;
         }
         let Ok(v) = serde_json::from_str::<Value>(&line) else {
@@ -123,14 +127,29 @@ fn codex_user_message(path: &Path) -> Option<String> {
         let Some(payload) = v.get("payload") else {
             continue;
         };
-        if payload.get("type").and_then(|t| t.as_str()) != Some("user_message") {
-            continue;
-        }
-        if let Some(msg) = payload.get("message").and_then(|m| m.as_str()) {
-            let t = msg.trim();
-            if !t.is_empty() {
-                return Some(t.to_string());
+        match payload.get("type").and_then(|t| t.as_str()) {
+            Some("user_message") => {
+                if let Some(msg) = payload.get("message").and_then(|m| m.as_str()) {
+                    let t = msg.trim();
+                    if !t.is_empty() {
+                        return Some(t.to_string());
+                    }
+                }
             }
+            Some("item_completed") => {
+                let item = payload.get("item");
+                if item
+                    .and_then(|item| item.get("type"))
+                    .and_then(|t| t.as_str())
+                    == Some("UserMessage")
+                {
+                    if let Some(text) = item.and_then(super::transcript_full::codex_turn_item_text)
+                    {
+                        return Some(text);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     None
@@ -649,6 +668,47 @@ mod tests {
             Some("\nhi\n")
         );
         assert_eq!(unwrap_tag("no tags here", "user_query"), None);
+    }
+
+    /// Codex 0.148 paginated exec: no `event_msg/user_message`; authority is
+    /// `item_completed` + `UserMessage`. Primary title path reads that event;
+    /// response_item fallback still finds the real prompt after skipping injection.
+    #[test]
+    fn paginated_codex_title_reads_item_completed_user_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("rollout.jsonl");
+        let lines = [
+            r#"{"timestamp":"t","ordinal":0,"type":"session_meta","payload":{"id":"sid","history_mode":"paginated"}}"#,
+            r#"{"timestamp":"t","ordinal":1,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_plugins>skip me</recommended_plugins>"}]}}"#,
+            r#"{"timestamp":"t","ordinal":2,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"ASKHUMAN_PAGINATED_PROBE_20260820"}]}}"#,
+            r#"{"timestamp":"t","ordinal":3,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","id":"um-1","content":[{"type":"text","text":"ASKHUMAN_PAGINATED_PROBE_20260820","text_elements":[]}]}}}"#,
+        ];
+        std::fs::write(&f, lines.join("\n")).unwrap();
+        assert_eq!(
+            codex_user_message(&f).as_deref(),
+            Some("ASKHUMAN_PAGINATED_PROBE_20260820")
+        );
+        assert_eq!(
+            first_user_message(&f).as_deref(),
+            Some("ASKHUMAN_PAGINATED_PROBE_20260820")
+        );
+    }
+
+    #[test]
+    fn paginated_codex_148_real_session_title_when_present() {
+        let sid = "01a01ec8-3867-7730-8acf-8911ef19b587";
+        let Some(path) = transcript_path(AgentKind::Codex, sid) else {
+            eprintln!("skip: paginated probe session not on disk");
+            return;
+        };
+        let title = resolve_title(AgentKind::Codex, sid);
+        eprintln!("real paginated title={title:?} path={path:?}");
+        assert!(
+            title
+                .as_deref()
+                .is_some_and(|text| text.contains("ASKHUMAN_PAGINATED_PROBE_20260820")),
+            "expected fallback title from response_item, got {title:?}"
+        );
     }
 
     #[test]

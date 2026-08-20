@@ -143,9 +143,10 @@ resolve agent → kind + session_id → transcript_path
 
 - 复用并扩展 `agents/activity.rs` / `title.rs` 的路径与家族分支，但改为**整文件有界读取**（非仅尾部 256KB；上限如 2MB，优先尾部窗口保证「最近完整」时从文件末向前取）。
 - Claude / Cursor：message content 数组（text / tool_use / tool_result / thinking 若有）。
-- Codex：`event_msg / user_message` 是现代 rollout 的权威用户消息；紧邻的
-  `response_item / message(role=user)` 模型输入副本去重，独立 `<skill>` / Hook 等上下文跳过，
-  仅为旧格式保留非上下文 response_item 回退；reasoning 作 Thinking。
+- Codex：legacy rollout 的权威用户消息是 `event_msg / user_message`；0.147+ paginated
+  改为 `event_msg / item_completed` 的 `UserMessage`（助手为 `AgentMessage`，写文件为
+  `FileChange`）。紧邻的 `response_item / message(role=user|assistant)` 是模型输入副本，需去重。
+  独立 `<skill>` / Hook 等上下文跳过；仅为更旧格式保留非上下文 response_item 回退；reasoning 作 Thinking。
 - Grok：assistant / user / tool_result；reasoning 字段作 Thinking。
 - **CLI vs MCP**：同一 session 通常同一 jsonl；AskHuman 专项同时匹配：
   - 命令行含 `AskHuman` / `askhuman`；

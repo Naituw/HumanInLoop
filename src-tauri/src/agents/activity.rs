@@ -448,7 +448,8 @@ fn push_events_msg(v: &Value, out: &mut Vec<Ev>) {
 
 /// Codex rollout：`response_item.payload` 的 `message`(assistant output_text) / `function_call` /
 /// `function_call_output`，以及 Code Mode 的 `custom_tool_call` / `custom_tool_call_output`；
-/// `event_msg.payload` 的 `agent_message` 与 `patch_apply_end`。reasoning / token_count 忽略。
+/// `event_msg.payload` 的 `agent_message` 与 `patch_apply_end`；paginated 会话另有
+/// `item_completed` 的 `AgentMessage` / `FileChange`。reasoning / token_count 忽略。
 fn push_events_codex(v: &Value, out: &mut Vec<Ev>) {
     let ttype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
     let Some(payload) = v.get("payload") else {
@@ -512,7 +513,52 @@ fn push_events_codex(v: &Value, out: &mut Vec<Ev>) {
                 }
             }
         }
+        // Codex 0.148 paginated history: legacy completion events are replaced by
+        // `item_completed` + TurnItem. FileChange is the Write footprint; AgentMessage
+        // is last-assistant text when no `response_item` assistant copy is present.
+        ("event_msg", "item_completed") => {
+            push_codex_item_completed(payload.get("item"), out);
+        }
         _ => {}
+    }
+}
+
+fn push_codex_item_completed(item: Option<&Value>, out: &mut Vec<Ev>) {
+    let Some(item) = item else {
+        return;
+    };
+    match item.get("type").and_then(Value::as_str).unwrap_or("") {
+        "FileChange" => {
+            out.push(Ev::Tool(ToolDisplay {
+                label: ToolLabel::Write,
+                object: patch_changes_object(item.get("changes")),
+            }));
+            out.push(Ev::ToolResult(codex_file_change_failed(item)));
+        }
+        "AgentMessage" => {
+            if let Some(text) = value_text(item.get("content")) {
+                let text = text.trim();
+                if !text.is_empty() {
+                    out.push(Ev::Text(text.to_string()));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(super) fn codex_file_change_failed(item: &Value) -> bool {
+    match item.get("status") {
+        Some(Value::Bool(success)) => !success,
+        Some(Value::String(status)) => {
+            let status = status.to_ascii_lowercase();
+            status != "completed" && status != "success" && status != "ok"
+        }
+        Some(Value::Object(status)) => !status
+            .get("success")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        _ => false,
     }
 }
 
@@ -596,7 +642,7 @@ fn custom_tool_output_failed(payload: &Value) -> bool {
 }
 
 /// `patch_apply_end.changes` 的路径表 → `首文件名 +N`。只展示 basename，不读取 diff/stdout。
-fn patch_changes_object(changes: Option<&Value>) -> Option<String> {
+pub(super) fn patch_changes_object(changes: Option<&Value>) -> Option<String> {
     let mut names: Vec<String> = changes?
         .as_object()?
         .keys()
@@ -1343,5 +1389,79 @@ mod tests {
         let text = resolve_last_assistant_text_from_path(AgentKind::Cursor, &path, 2_000).unwrap();
         assert_eq!(text.matches('你').count(), 2_000);
         assert!(text.ends_with("… [truncated]"));
+    }
+
+    #[test]
+    fn paginated_item_completed_file_change_is_completed_write_step() {
+        // Codex 0.148 paginated exec writes FileChange instead of patch_apply_end.
+        let ls = lines(&[
+            r#"{"timestamp":"t","ordinal":15,"type":"event_msg","payload":{"type":"item_completed","thread_id":"t","turn_id":"u","item":{"type":"FileChange","id":"exec-1","changes":{"/tmp/probe.txt":{"type":"add","content":"PING\n"}},"status":"completed","stdout":"Success.","stderr":""}}}"#,
+        ]);
+        let a = analyze(AgentKind::Codex, &ls).unwrap();
+        assert_eq!(a.steps.len(), 1);
+        let step = &a.steps[0];
+        assert_eq!(step.tool.label, ToolLabel::Write);
+        assert_eq!(step.tool.object.as_deref(), Some("probe.txt"));
+        assert_eq!(step.state, StepState::Done);
+    }
+
+    #[test]
+    fn paginated_item_completed_agent_message_is_last_text() {
+        let ls = lines(&[
+            r#"{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","id":"m1","content":[{"type":"Text","text":"ASKHUMAN_PAGINATED_PROBE_20260820"}],"phase":"final_answer"}}}"#,
+        ]);
+        let a = analyze(AgentKind::Codex, &ls).unwrap();
+        assert_eq!(a.text.as_deref(), Some("ASKHUMAN_PAGINATED_PROBE_20260820"));
+        assert!(a.steps.is_empty());
+    }
+
+    #[test]
+    fn paginated_codex_148_real_session_activity_when_present() {
+        let sid = "01a01ec8-3867-7730-8acf-8911ef19b587";
+        if transcript_path(AgentKind::Codex, sid).is_none() {
+            eprintln!("skip: paginated probe session not on disk");
+            return;
+        }
+        let activity = resolve_activity(AgentKind::Codex, sid);
+        eprintln!("real paginated activity={activity:?}");
+        let Some(activity) = activity else {
+            panic!("expected activity from assistant response_item");
+        };
+        assert!(
+            activity
+                .text
+                .as_deref()
+                .is_some_and(|text| text.contains("ASKHUMAN_PAGINATED_PROBE_20260820")),
+            "expected last assistant text, got {:?}",
+            activity.text
+        );
+    }
+
+    #[test]
+    fn paginated_codex_148_write_session_activity_when_present() {
+        let sid = "01a01ecc-4f91-7740-8354-494eea787be6";
+        let Some(path) = super::transcript_path(AgentKind::Codex, sid) else {
+            eprintln!("skip: paginated write-session probe not on disk");
+            return;
+        };
+        let activity = resolve_activity(AgentKind::Codex, sid);
+        eprintln!("write-session activity={activity:?} path={path:?}");
+        assert!(
+            activity.is_some(),
+            "expected activity from the write session"
+        );
+        // Later exec/whats_next steps can push FileChange out of the 3-step window;
+        // the TurnItem itself must still parse as a Write.
+        let file_change: Vec<String> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains("\"FileChange\""))
+            .map(str::to_string)
+            .collect();
+        let write = analyze(AgentKind::Codex, &file_change).expect("FileChange");
+        assert_eq!(write.steps.len(), 1);
+        assert_eq!(write.steps[0].tool.label, ToolLabel::Write);
+        assert_eq!(write.steps[0].tool.object.as_deref(), Some("probe.txt"));
+        assert_eq!(write.steps[0].state, StepState::Done);
     }
 }
