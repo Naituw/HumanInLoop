@@ -4,6 +4,7 @@ pub mod confirm_coordinator;
 pub mod coordinator;
 pub mod gui_host;
 mod invoke;
+mod popup_size;
 pub mod terminal_gate;
 pub mod tray_menu;
 
@@ -333,12 +334,14 @@ pub(crate) fn finalize_popup_show(
     let Some(win) = app.get_webview_window("popup") else {
         return;
     };
-    // 预热期间用户若改过尺寸/置顶，这里按最新 config 兜底（主题由构建 + ConfigChanged 已同步）。
+    // Recover invalid shared preferences before restoring either a cold or warm popup.
     let config = AppConfig::load_without_secrets();
-    let _ = win.set_size(tauri::LogicalSize::new(
-        config.channels.popup.width,
-        config.channels.popup.height,
-    ));
+    let (width, height) = popup_size::restored_size(&config.channels.popup);
+    app.state::<std::sync::Mutex<popup_size::SizeMemory>>()
+        .lock()
+        .unwrap()
+        .restoring((width, height));
+    let _ = win.set_size(tauri::LogicalSize::new(width, height));
     let _ = win.set_always_on_top(config.general.always_on_top);
     // Apply the latest native appearance in case the theme changed while prewarmed.
     crate::commands::apply_theme_to_windows(app, &crate::commands::theme_str(config.general.theme));
@@ -736,8 +739,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
     let theme = window_theme(&state.config);
     let lang = Lang::resolve(&state.config.general.language);
     let window_bg = background_for(resolved_theme(&state.config));
-    let popup_w = state.config.channels.popup.width;
-    let popup_h = state.config.channels.popup.height;
+    let (popup_w, popup_h) = popup_size::restored_size(&state.config.channels.popup);
     let always_on_top = state.config.general.always_on_top;
     let window_effect = state.config.general.window_effect;
     let effective_window_effect = effective_window_effect(window_effect);
@@ -753,6 +755,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_liquid_glass::init())
         .manage(state)
+        .manage(std::sync::Mutex::new(popup_size::SizeMemory::default()))
         .invoke_handler(invoke::handle)
         .on_window_event(|window, event| {
             match window.label() {
@@ -772,7 +775,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                             let _ = app.emit("popup-close-requested", ());
                         }
                     }
-                    WindowEvent::Resized(_) => persist_popup_size(window),
+                    WindowEvent::Resized(size) => persist_popup_size(window, *size),
                     WindowEvent::Focused(true) => {
                         if let Some(bridge) = window.app_handle().try_state::<GuiBridge>() {
                             bridge.send_popup_focused();
@@ -834,7 +837,7 @@ fn launch(state: AppState, view: View, popup_ipc: Option<PopupIpc>) -> tauri::Re
                             WebviewWindowBuilder::new(app, "popup", WebviewUrl::App(url.into()))
                                 .title(i18n::tr(lang, "title.popup"))
                                 .inner_size(popup_w, popup_h)
-                                .min_inner_size(420.0, 480.0)
+                                .min_inner_size(popup_size::MIN_WIDTH, popup_size::MIN_HEIGHT)
                                 .center()
                                 // 先隐藏构建，设好原生出现动画后再显示，触发 macOS 窗口出现动画。
                                 .visible(false)
@@ -2256,18 +2259,42 @@ fn window_theme(config: &AppConfig) -> Option<tauri::Theme> {
     }
 }
 
-/// 记住窗口尺寸：用户拉伸后把逻辑尺寸写回配置。
-fn persist_popup_size(window: &tauri::Window) {
-    let state = window.app_handle().state::<AppState>();
-    if !state.config.channels.popup.remember_size {
+/// Persist normal, visible popup geometry; lifecycle events must not poison shared preferences.
+fn persist_popup_size(window: &tauri::Window, event_size: tauri::PhysicalSize<u32>) {
+    let app = window.app_handle();
+    let presented = app
+        .try_state::<GuiBridge>()
+        .is_some_and(|bridge| bridge.presented.load(Ordering::SeqCst) && !bridge.is_done());
+    if !presented
+        || !window.is_visible().unwrap_or(false)
+        || window.is_minimized().unwrap_or(true)
+        || window.is_maximized().unwrap_or(true)
+    {
         return;
     }
     if let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) {
+        // Queued creation/restore events can arrive after presentation. Only observe the
+        // current geometry, never a stale event paired with a newer native window state.
+        let remembered = app
+            .state::<std::sync::Mutex<popup_size::SizeMemory>>()
+            .lock()
+            .unwrap()
+            .observe(
+                (event_size.width, event_size.height),
+                scale,
+                size == event_size,
+            );
+        let Some((width, height)) = remembered else {
+            return;
+        };
         // Only the popup size changes; load without secrets so save() neither reads nor rewrites
         // the keychain (blank secret fields are left as-is by save()).
         let mut cfg = AppConfig::load_without_secrets();
-        cfg.channels.popup.width = size.width as f64 / scale;
-        cfg.channels.popup.height = size.height as f64 / scale;
+        if !cfg.channels.popup.remember_size {
+            return;
+        }
+        cfg.channels.popup.width = width;
+        cfg.channels.popup.height = height;
         let _ = cfg.save();
     }
 }
